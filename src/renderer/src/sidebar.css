@@ -1,0 +1,86 @@
+/* ── Collapsible sidebar ─────────────────────────────────────────────────────
+   Scoped companion to Sidebar.tsx. Base sidebar styles live in styles.css;
+   everything here is additive (transition, toggle button) or scoped under
+   .sidebar.collapsed so the expanded state stays pixel-identical. */
+
+.sidebar {
+  transition: width 0.15s ease, min-width 0.15s ease, padding 0.15s ease;
+  overflow: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}
+
+/* keep text on one line so the width transition reads as a slide, not a rewrap */
+.sidebar .logo,
+.sidebar .nav-item,
+.sidebar .sidebar-footer { white-space: nowrap; }
+
+/* ── Toggle button (bottom, next to the footer) ── */
+
+.sidebar-toggle {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 6px;
+  border: none; background: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sidebar-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.sidebar-toggle svg { flex-shrink: 0; }
+
+/* ── Collapsed icon rail ── */
+
+.sidebar.collapsed {
+  width: 52px;
+  min-width: 52px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+.sidebar.collapsed .logo {
+  justify-content: center;
+  padding: 2px 0 12px;
+}
+.sidebar.collapsed .logo > div { display: none; }
+
+.sidebar.collapsed .project-select { display: none; }
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 9px 0;
+  position: relative;
+}
+.sidebar.collapsed .nav-item .nav-label { display: none; }
+.sidebar.collapsed .nav-item .badge {
+  position: absolute;
+  top: 1px; right: 4px;
+  margin-left: 0;
+  min-width: 15px; height: 15px;
+  padding: 0 4px;
+  font-size: 9px;
+  border-radius: 8px;
+  box-shadow: 0 0 0 2px var(--bg-raised);
+}
+
+.sidebar.collapsed .sidebar-toggle {
+  justify-content: center;
+  padding: 8px 0;
+}
+.sidebar.collapsed .sidebar-toggle .nav-label { display: none; }
+
+.sidebar.collapsed .sidebar-footer {
+  padding: 10px 0 4px;
+  align-items: center;
+}
+.sidebar.collapsed .api-status { justify-content: center; }
+.sidebar.collapsed .api-status span:not(.api-dot),
+.sidebar.collapsed .api-status code { display: none; }
+.sidebar.collapsed .agents-hint { display: none; }

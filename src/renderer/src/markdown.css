@@ -1,0 +1,153 @@
+/* ── Obsidian-grade markdown extras ──────────────────────────────────────────
+   Callouts, mermaid blocks, task lists, footnotes, ==highlight== marks and
+   highlight.js token colors. Everything is namespaced under .md so nothing
+   bleeds into the rest of the app. Base .md typography lives in styles.css. */
+
+/* ── highlight ── */
+.md mark {
+  background: rgba(250, 204, 21, 0.22);
+  color: #fde68a;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+/* ── task lists ── */
+.md li:has(> input[type='checkbox'][data-task]),
+.md li:has(> p:first-child > input[type='checkbox'][data-task]) {
+  list-style: none;
+  margin-left: -1.1em;
+}
+.md input[type='checkbox'][data-task] {
+  cursor: pointer;
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+.md input[type='checkbox'][data-task][disabled] { cursor: default; }
+.md input[type='checkbox'][data-task]:checked + * { color: inherit; }
+
+/* ── callouts ── */
+.md .md-callout {
+  --co-color: var(--accent);
+  --co-bg: rgba(56, 189, 248, 0.08);
+  border-left: 3px solid var(--co-color);
+  background: var(--co-bg);
+  border-radius: var(--radius-sm);
+  padding: 9px 13px 10px;
+  margin: 0.7em 0;
+}
+.md .md-callout-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  color: var(--co-color);
+}
+.md .md-callout-icon::before {
+  content: var(--co-icon, '\270E');
+  font-size: 12px;
+  line-height: 1;
+}
+.md .md-callout-content { margin-top: 5px; }
+.md .md-callout-content > :first-child { margin-top: 0; }
+.md .md-callout-content > :last-child { margin-bottom: 0; }
+.md .md-callout-content > blockquote {
+  border-left: 3px solid var(--border-strong);
+}
+
+.md .md-callout-note    { --co-color: #38bdf8; --co-bg: rgba(56, 189, 248, 0.08);  --co-icon: '\270E'; }
+.md .md-callout-info    { --co-color: #60a5fa; --co-bg: rgba(96, 165, 250, 0.09);  --co-icon: '\2139'; }
+.md .md-callout-tip     { --co-color: #4ade80; --co-bg: rgba(74, 222, 128, 0.08);  --co-icon: '\2726'; }
+.md .md-callout-warning { --co-color: #facc15; --co-bg: rgba(250, 204, 21, 0.08);  --co-icon: '\26A0'; }
+.md .md-callout-danger  { --co-color: #f87171; --co-bg: rgba(248, 113, 113, 0.09); --co-icon: '\2716'; }
+.md .md-callout-quote   { --co-color: #8b94a7; --co-bg: rgba(139, 148, 167, 0.08); --co-icon: '\275D'; }
+
+/* ── mermaid ── */
+.md .mermaid-block { margin: 0.7em 0; }
+.md .mermaid-block[data-hydrated='ok'] {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 10px;
+  overflow-x: auto;
+  text-align: center;
+}
+.md .mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+  background: transparent;
+}
+.md .mermaid-error {
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-top: 5px;
+  white-space: pre-wrap;
+}
+
+/* ── footnotes ── */
+.md sup.md-fn-ref { line-height: 0; }
+.md sup.md-fn-ref a {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 2px;
+}
+.md .md-footnotes {
+  margin-top: 1.4em;
+  border-top: 1px solid var(--border);
+  padding-top: 0.7em;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.md .md-footnotes ol { padding-left: 1.5em; margin: 0.3em 0; }
+.md .md-footnotes li { margin: 0.25em 0; }
+.md .md-fn-back { margin-left: 5px; font-size: 11px; }
+
+/* ── highlight.js tokens (app palette, ~10 colors) ── */
+.md pre code .hljs-comment,
+.md pre code .hljs-quote { color: #5b6478; font-style: italic; }
+
+.md pre code .hljs-keyword,
+.md pre code .hljs-selector-tag,
+.md pre code .hljs-literal,
+.md pre code .hljs-name { color: #38bdf8; }
+
+.md pre code .hljs-string,
+.md pre code .hljs-regexp,
+.md pre code .hljs-addition { color: #4ade80; }
+
+.md pre code .hljs-number,
+.md pre code .hljs-symbol,
+.md pre code .hljs-bullet,
+.md pre code .hljs-link { color: #facc15; }
+
+.md pre code .hljs-title,
+.md pre code .hljs-title.function_,
+.md pre code .hljs-section { color: #c084fc; }
+
+.md pre code .hljs-title.class_,
+.md pre code .hljs-type,
+.md pre code .hljs-selector-class,
+.md pre code .hljs-selector-id { color: #2dd4bf; }
+
+.md pre code .hljs-attr,
+.md pre code .hljs-attribute,
+.md pre code .hljs-property,
+.md pre code .hljs-variable,
+.md pre code .hljs-template-variable { color: #7dd3fc; }
+
+.md pre code .hljs-built_in,
+.md pre code .hljs-params { color: #e0b774; }
+
+.md pre code .hljs-meta,
+.md pre code .hljs-doctag,
+.md pre code .hljs-punctuation,
+.md pre code .hljs-operator { color: #8b94a7; }
+
+.md pre code .hljs-deletion { color: #f87171; }
+
+.md pre code .hljs-emphasis { font-style: italic; }
+.md pre code .hljs-strong { font-weight: 700; }
