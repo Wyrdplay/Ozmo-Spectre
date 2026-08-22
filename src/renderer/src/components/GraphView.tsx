@@ -16,7 +16,7 @@ import { matchesAllTokens } from '@shared/fuzzy'
 import { useStore } from '@/store'
 import { rpc } from '@/api'
 import {
-  Confirm, FilterSection, FlagFilterChips, TagFilterChips, activeFlagNames, moveByIndex,
+  Confirm, FilterSection, FlagFilterChips, TagFilterChips, hiddenFlagNames, moveByIndex,
   nodeMatchesFlagFilter, nodeMatchesTagFilter, undimFlagNames
 } from './widgets'
 import { HelpPanel } from './HelpPanel'
@@ -190,6 +190,7 @@ export function GraphView(): React.JSX.Element {
   const toggleRelationshipFilter = useStore((s) => s.toggleRelationshipFilter)
   const soloRelationshipFilter = useStore((s) => s.soloRelationshipFilter)
   const showQuickAdd = useStore((s) => s.showQuickAdd)
+  const setExportScope = useStore((s) => s.setExportScope)
   const info = useStore((s) => s.info)
   const focusNodeId = useStore((s) => s.focusNodeId)
   const setFocusNode = useStore((s) => s.setFocusNode)
@@ -247,20 +248,20 @@ export function GraphView(): React.JSX.Element {
   flagRulesRef.current = flagRules
 
   // flag-rule filters: store carries rule ids; the draw loop matches node.flags
-  // (rule names) against the resolved active set. undim = actively-filtered
-  // dim rules whose matches render full-strength (the user asked to see them).
-  const flagFilters = useStore((s) => s.flagFilters)
-  const flagActive = useMemo(() => activeFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
-  const flagUndim = useMemo(() => undimFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
-  const flagFilterRef = useRef<{ active: Set<string> | null; undim: Set<string> }>({ active: flagActive, undim: flagUndim })
-  flagFilterRef.current = { active: flagActive, undim: flagUndim }
+  // (rule names) against the resolved hidden set. undim = a dim rule left alone
+  // on screen by a solo — dimming everything visible would serve nothing.
+  const hiddenFlags = useStore((s) => s.hiddenFlags)
+  const flagHidden = useMemo(() => hiddenFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
+  const flagUndim = useMemo(() => undimFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
+  const flagFilterRef = useRef<{ hidden: Set<string>; undim: Set<string> }>({ hidden: flagHidden, undim: flagUndim })
+  flagFilterRef.current = { hidden: flagHidden, undim: flagUndim }
 
-  // raw tag filters (TAGS section): union among themselves, intersected with
-  // every other lens. null = inactive, so an empty selection filters nothing.
-  const tagFilters = useStore((s) => s.tagFilters)
-  const tagActive = useMemo(() => (tagFilters.length ? new Set(tagFilters) : null), [tagFilters])
-  const tagFilterRef = useRef<Set<string> | null>(tagActive)
-  tagFilterRef.current = tagActive
+  // raw tag filters (TAGS section): SUBTRACTIVE like every other chip row — a
+  // node goes when any bucket it belongs to is hidden. Empty set hides nothing.
+  const hiddenTags = useStore((s) => s.hiddenTags)
+  const tagHidden = useMemo(() => new Set(hiddenTags), [hiddenTags])
+  const tagFilterRef = useRef<Set<string>>(tagHidden)
+  tagFilterRef.current = tagHidden
 
   // merged visual styles (settings.styleOverrides over the shipped defaults) —
   // the draw loop, hit tests and sim forces read these via stylesRef; nothing
@@ -399,15 +400,15 @@ export function GraphView(): React.JSX.Element {
     if (!q) return null
     return graph.nodes
       .filter((n) =>
-        typeFilters[n.type] && nodeMatchesFlagFilter(n.flags, flagActive) &&
-        nodeMatchesTagFilter(n.tags, tagActive) && matchesAllTokens(q, n))
+        typeFilters[n.type] && nodeMatchesFlagFilter(n.flags, flagHidden) &&
+        nodeMatchesTagFilter(n.tags, tagHidden) && matchesAllTokens(q, n))
       .map((n) => n.id)
-  }, [findQuery, graph.nodes, typeFilters, flagActive, tagActive])
+  }, [findQuery, graph.nodes, typeFilters, flagHidden, tagHidden])
   const findMatchSet = useMemo(() => (findMatches ? new Set(findMatches) : null), [findMatches])
   const visibleNodeCount = useMemo(
     () => graph.nodes.filter((n) =>
-      typeFilters[n.type] && nodeMatchesFlagFilter(n.flags, flagActive) && nodeMatchesTagFilter(n.tags, tagActive)).length,
-    [graph.nodes, typeFilters, flagActive, tagActive]
+      typeFilters[n.type] && nodeMatchesFlagFilter(n.flags, flagHidden) && nodeMatchesTagFilter(n.tags, tagHidden)).length,
+    [graph.nodes, typeFilters, flagHidden, tagHidden]
   )
   const findStateRef = useRef<{ matches: Set<string> | null; cursorId: string | null }>({ matches: null, cursorId: null })
   findStateRef.current = { matches: findMatchSet, cursorId: findCursorId }
@@ -434,7 +435,7 @@ export function GraphView(): React.JSX.Element {
   const fitView = useCallback((): void => {
     const canvas = canvasRef.current
     const nodes = nodesRef.current.filter(
-      (n) => filtersRef.current[n.data.type] && nodeMatchesFlagFilter(n.data.flags, flagFilterRef.current.active) &&
+      (n) => filtersRef.current[n.data.type] && nodeMatchesFlagFilter(n.data.flags, flagFilterRef.current.hidden) &&
         nodeMatchesTagFilter(n.data.tags, tagFilterRef.current)
     )
     if (!canvas || !nodes.length) return
@@ -590,7 +591,7 @@ export function GraphView(): React.JSX.Element {
    *  visibility predicate for the canvas (hidden members also leave the sim on
    *  merge; the hidden check covers the window before a deferred merge lands) */
   const nodeVisible = (n: SimNode): boolean =>
-    filtersRef.current[n.data.type] && nodeMatchesFlagFilter(n.data.flags, flagFilterRef.current.active) &&
+    filtersRef.current[n.data.type] && nodeMatchesFlagFilter(n.data.flags, flagFilterRef.current.hidden) &&
     nodeMatchesTagFilter(n.data.tags, tagFilterRef.current) &&
     !containerInfoRef.current.hidden.has(n.id)
   const visibleNodes = (): SimNode[] => nodesRef.current.filter(nodeVisible)
@@ -1578,7 +1579,7 @@ export function GraphView(): React.JSX.Element {
         const ids = useStore.getState().graph.nodes
           .filter((n) =>
             filtersRef.current[n.type] &&
-            nodeMatchesFlagFilter(n.flags, flagFilterRef.current.active) &&
+            nodeMatchesFlagFilter(n.flags, flagFilterRef.current.hidden) &&
             nodeMatchesTagFilter(n.tags, tagFilterRef.current) &&
             (!fmNow || fmNow.has(n.id)))
           .map((n) => n.id)
@@ -1866,7 +1867,7 @@ export function GraphView(): React.JSX.Element {
     () => (Object.keys(NODE_TYPES) as NodeType[]).filter((t) => !typeFilters[t]).length, [typeFilters])
   const linkFilterCount = useMemo(
     () => (Object.keys(EDGE_TYPES) as EdgeType[]).filter((t) => !relationshipFilters[t]).length, [relationshipFilters])
-  const tagFilterCount = flagFilters.length + tagFilters.length
+  const tagFilterCount = hiddenFlags.length + hiddenTags.length
 
   // type chips drag-to-reorder: persists settings.typeOrder on drop (click/
   // ctrl-click semantics untouched — HTML5 drag only starts after movement)
@@ -2045,6 +2046,12 @@ export function GraphView(): React.JSX.Element {
             onClick={() => createLinkedFromSelection(ctxSelIds)}
           >
             Create linked node…
+          </button>
+          <button
+            title="Export these nodes as one markdown document — whatever structure exists among them becomes its chapters"
+            onClick={() => { setCtxMenu(null); setExportScope('selection') }}
+          >
+            Export {ctxSelIds.length} as a document…
           </button>
           {openWarps.length > 0 && (ctxMenu.sub === 'warp' ? (
             <>

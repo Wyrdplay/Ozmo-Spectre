@@ -84,3 +84,14 @@
 .sidebar.collapsed .api-status span:not(.api-dot),
 .sidebar.collapsed .api-status code { display: none; }
 .sidebar.collapsed .agents-hint { display: none; }
+
+/* ── API status / agents hint — real <button>s now (click to copy), reset back
+   to look exactly like the plain footer rows they replaced; only a focus ring
+   and the transient "copied ✓" flash are new. */
+.api-status,
+.agents-hint {
+  border: none; background: none; padding: 0; margin: 0; width: 100%;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.api-status .copy-flash,
+.agents-hint .copy-flash { color: var(--ok); }

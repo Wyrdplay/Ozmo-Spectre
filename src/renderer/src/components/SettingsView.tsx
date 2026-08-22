@@ -3,10 +3,12 @@ import { mutateSettings, overlaySettings, useStore } from '@/store'
 import { rpc } from '@/api'
 import { Confirm, moveByIndex } from './widgets'
 import {
-  EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, defaultFlags, isTextGlyph, newId,
+  EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
+  defaultFlags, isTextGlyph, newId,
   orderedNodeTypes, relStyle, typeStyle,
   type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
-  type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type StyleOverrides
+  type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type StyleOverrides,
+  type WarpStage
 } from '@shared/types'
 import { INNER_GLYPH_RATIO, TEXT_GLYPH_FONT_RATIO, shapeGeometry, type ShapeGeom } from '@shared/shapes'
 
@@ -658,11 +660,15 @@ function FlagsCard({ flags }: { flags: FlagRule[] }): React.JSX.Element {
                 value={c.kind}
                 onChange={(e) => {
                   const kind = e.target.value
-                  patchCondition(rule, i, kind === 'tag' ? { kind: 'tag', tag: '' } : { kind: 'incoming-edge', edgeType: 'blocks' })
+                  patchCondition(rule, i,
+                    kind === 'tag' ? { kind: 'tag', tag: '' }
+                      : kind === 'stage' ? { kind: 'stage', stage: 'done' }
+                      : { kind: 'incoming-edge', edgeType: 'blocks' })
                 }}
               >
                 <option value="tag">has tag</option>
                 <option value="incoming-edge">has incoming link</option>
+                <option value="stage">warp is at stage</option>
               </select>
               {c.kind === 'tag' ? (
                 <input
@@ -672,6 +678,18 @@ function FlagsCard({ flags }: { flags: FlagRule[] }): React.JSX.Element {
                   value={c.tag}
                   onChange={(e) => patchCondition(rule, i, { kind: 'tag', tag: e.target.value.trim().toLowerCase() })}
                 />
+              ) : c.kind === 'stage' ? (
+                <select
+                  className="input"
+                  style={{ width: 'auto' }}
+                  title="Warps only — every other type carries no stage, so this condition is inert on them"
+                  value={c.stage}
+                  onChange={(e) => patchCondition(rule, i, { kind: 'stage', stage: e.target.value as WarpStage })}
+                >
+                  {WARP_STAGES.map((st) => (
+                    <option key={st} value={st}>{WARP_STAGE_META[st].label}</option>
+                  ))}
+                </select>
               ) : (
                 <>
                   <select

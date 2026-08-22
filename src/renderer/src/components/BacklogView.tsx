@@ -4,7 +4,7 @@ import { useStore } from '@/store'
 import { rpc } from '@/api'
 import {
   FlagChips, FlagFilterChips, ProgressBar, StageChip, TypeDot,
-  activeFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useTypeStyles
+  hiddenFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useTypeStyles
 } from './widgets'
 import { timeAgo } from '@/lib/markdown'
 
@@ -35,11 +35,11 @@ export function BacklogView(): React.JSX.Element {
   const flagRules = useFlagRules()
   const styleOf = useTypeStyles()
 
-  // flag-rule filters (store keeps rule ids; node.flags carries names)
+  // flag-rule filters (store keeps HIDDEN rule ids; node.flags carries names)
   const settingsFlags = useStore((s) => s.settings?.flags)
-  const flagFilters = useStore((s) => s.flagFilters)
-  const flagActive = useMemo(() => activeFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
-  const flagUndim = useMemo(() => undimFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
+  const hiddenFlags = useStore((s) => s.hiddenFlags)
+  const flagHidden = useMemo(() => hiddenFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
+  const flagUndim = useMemo(() => undimFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
 
   useEffect(() => {
     refreshBacklog()
@@ -63,12 +63,12 @@ export function BacklogView(): React.JSX.Element {
     () => backlog
       .filter((n) => !needle || n.title.toLowerCase().includes(needle) || n.tags.some((t) => t.includes(needle)) ||
         (n.flags ?? []).some((f) => f.toLowerCase().includes(needle)))
-      .filter((n) => nodeMatchesFlagFilter(n.flags, flagActive)),
-    [backlog, needle, flagActive]
+      .filter((n) => nodeMatchesFlagFilter(n.flags, flagHidden)),
+    [backlog, needle, flagHidden]
   )
   // any active filter (text or flag) flattens the tree and disables drag-reorder —
   // reordering a partial view would scramble the hidden rows' ranks
-  const filtered = needle.length > 0 || flagActive !== null
+  const filtered = needle.length > 0 || flagHidden.size > 0
 
   /** oldest incoming derives relationship decides a node's canonical parent (matches Lists) */
   const parentOf = useMemo(() => {

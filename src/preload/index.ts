@@ -15,6 +15,9 @@ const api = {
     return () => ipcRenderer.removeListener('ozmo:event', listener)
   },
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('pick-folder'),
+  saveDocument: (arg: { markdown: string; filename: string; toVault?: boolean }): Promise<{ ok: boolean; path?: string; canceled?: boolean }> =>
+    ipcRenderer.invoke('save-document', arg),
+  revealFile: (p: string): Promise<void> => ipcRenderer.invoke('reveal-file', p),
   openInObsidian: (nodeId: string): Promise<void> => ipcRenderer.invoke('open-in-obsidian', nodeId),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url),
   relaunch: (): Promise<void> => ipcRenderer.invoke('relaunch')

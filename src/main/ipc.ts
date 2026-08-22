@@ -1,5 +1,6 @@
 import { ipcMain, dialog, shell, app, BrowserWindow } from 'electron'
 import path from 'path'
+import fs from 'fs'
 import { call } from './registry'
 import { ApiError } from './services'
 import { getSettings } from './settings'
@@ -33,6 +34,41 @@ export function registerIpc(): void {
       title: 'Choose Obsidian vault folder'
     })
     return res.canceled ? null : res.filePaths[0]
+  })
+
+  /**
+   * Save a generated document. Two destinations, one handler, because the
+   * decision is the same one: a native Save dialog wherever the human wants it,
+   * or straight into the vault under `Documents/`.
+   *
+   * The vault route deliberately writes OUTSIDE the type folders and stamps a
+   * generated-by header: a document is a RENDERING of nodes, not a node, and one
+   * dropped among the source files would be picked up by the watcher and read
+   * back as spec.
+   */
+  ipcMain.handle('save-document', async (_e, arg: { markdown: string; filename: string; toVault?: boolean }) => {
+    const name = path.basename(arg?.filename || 'document.md').replace(/[^\w.\- ]+/g, '-')
+    const body = String(arg?.markdown ?? '')
+    if (arg?.toVault) {
+      const dir = path.join(vault.getVaultRoot(), 'Documents')
+      fs.mkdirSync(dir, { recursive: true })
+      const target = path.join(dir, name)
+      fs.writeFileSync(target, body, 'utf8')
+      return { ok: true, path: target }
+    }
+    const win = BrowserWindow.getFocusedWindow()
+    const res = await dialog.showSaveDialog(win ?? new BrowserWindow({ show: false }), {
+      title: 'Export document',
+      defaultPath: name,
+      filters: [{ name: 'Markdown', extensions: ['md'] }, { name: 'All files', extensions: ['*'] }]
+    })
+    if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+    fs.writeFileSync(res.filePath, body, 'utf8')
+    return { ok: true, path: res.filePath }
+  })
+
+  ipcMain.handle('reveal-file', (_e, p: string) => {
+    if (typeof p === 'string' && p) shell.showItemInFolder(path.resolve(p))
   })
 
   ipcMain.handle('open-in-obsidian', (_e, nodeId: string) => {

@@ -200,20 +200,28 @@ interface OzmoState {
   /** relationship-type visibility on the canvas — 'relates' governs bare connections.
    *  VISUAL-ONLY: the simulation keeps every link so the layout stays stable while lensing. */
   relationshipFilters: Record<EdgeType, boolean>
-  /** active flag-rule filters as rule IDS (stable across renames; node.flags carries
-   *  rule names — views join id→rule→name via settings). empty = no flag filtering.
-   *  several selected = union (any-of), intersected with type/text/find filters. */
-  flagFilters: string[]
-  /** active RAW tag filters (the TAGS filter section, canvas only) — same shape as
-   *  flagFilters: empty = no tag filtering, several = union (any-of), intersected
-   *  with the type/link/flag/find lenses. Project vocabulary, so reset on switch. */
-  tagFilters: string[]
+  /** flag-rule buckets HIDDEN from the view, as rule IDS (stable across renames;
+   *  node.flags carries rule names — views join id→rule→name via settings), plus
+   *  UNFLAGGED for nodes carrying no flag at all. Empty = everything visible.
+   *
+   *  SUBTRACTIVE, exactly like typeFilters: every bucket starts on and a click
+   *  takes one away. It used to be the opposite (a selection meant show-ONLY),
+   *  which put two contradictory mental models in one toolbar — the type and link
+   *  chips subtract, the flag and tag chips added — and left no way at all to say
+   *  "hide the finished work", the thing the filter bar is most often wanted for. */
+  hiddenFlags: string[]
+  /** RAW tag buckets hidden from the view (the TAGS section, canvas only) — same
+   *  subtractive shape as hiddenFlags, plus UNTAGGED for nodes with no tags.
+   *  Project vocabulary, so reset on switch. */
+  hiddenTags: string[]
   /** filter-bar sections folded shut (types/links/tags) — per-machine UI state */
   collapsedFilterSections: FilterSectionId[]
   /** the canvas '?' help panel is showing — per-machine, collapsed by default */
   helpOpen: boolean
   quickAdd: { open: boolean; x?: number; y?: number; linkTo?: QuickAddLink[]; type?: NodeType }
   palette: boolean
+  /** the export dialog: null = closed; a scope preselects which tab it opens on */
+  exportScope: 'project' | 'selection' | 'container' | 'filter' | null
   toasts: Toast[]
   focusNodeId: string | null
   /** inspector tab requested by ui.focus (agents pointing at a node's links/notes) — consumed once */
@@ -252,6 +260,8 @@ interface OzmoState {
   soloFlagFilter: (id: string) => void
   toggleTagFilter: (tag: string) => void
   soloTagFilter: (tag: string) => void
+  showAllFlagFilters: () => void
+  showAllTagFilters: () => void
   /** fold/unfold one filter-bar section (persists per machine) */
   toggleFilterSection: (id: FilterSectionId) => void
   /** show/hide the canvas help panel (persists per machine) */
@@ -259,6 +269,7 @@ interface OzmoState {
   showQuickAdd: (pos?: { x: number; y: number }, linkTo?: (string | QuickAddLink)[], type?: NodeType) => void
   hideQuickAdd: () => void
   setPalette: (open: boolean) => void
+  setExportScope: (s: 'project' | 'selection' | 'container' | 'filter' | null) => void
   toast: (msg: string, kind?: 'error' | 'info', action?: { label: string; run: () => void }) => void
   dismissToast: (id: number) => void
   setFocusNode: (id: string | null) => void
@@ -269,6 +280,17 @@ interface OzmoState {
   expandContainers: (ids: string[]) => void
   handleEvent: (evt: OzmoEvent) => void
 }
+
+/**
+ * Pseudo-buckets for "carries no tag" / "carries no flag". Filtering is
+ * subtractive, so without these a solo could never take unflagged nodes off the
+ * screen: they match no rule, so no rule can hide them. Giving the absence its
+ * own bucket keeps ONE predicate — "hidden if any bucket you belong to is
+ * hidden" — with no special cases. The \u0000 prefix cannot collide with a real
+ * tag or rule id.
+ */
+export const UNTAGGED = '\u0000untagged'
+export const UNFLAGGED = '\u0000unflagged'
 
 const ALL_TYPES: Record<NodeType, boolean> = {
   idea: true, pillar: true, principle: true, feature: true, instance: true, component: true, bug: true, question: true, warp: true, area: true, action: true,
@@ -298,12 +320,13 @@ export const useStore = create<OzmoState>((set, get) => ({
   activeReviewId: null,
   typeFilters: { ...ALL_TYPES },
   relationshipFilters: { ...ALL_RELS },
-  flagFilters: [],
-  tagFilters: [],
+  hiddenFlags: [],
+  hiddenTags: [],
   collapsedFilterSections: loadFilterSections(),
   helpOpen: loadHelpOpen(),
   quickAdd: { open: false },
   palette: false,
+  exportScope: null,
   toasts: [],
   focusNodeId: null,
   focusTab: null,
@@ -334,9 +357,9 @@ export const useStore = create<OzmoState>((set, get) => ({
     localStorage.setItem('ozmo.projectId', id)
     set({
       projectId: id, selection: null, selectionPositions: {}, backlog: [], warps: [], activity: [],
-      openReviewIds: [], activeReviewId: null, focusNodeId: null, findQuery: null, flagFilters: [],
+      openReviewIds: [], activeReviewId: null, focusNodeId: null, findQuery: null, hiddenFlags: [],
       // tags are project vocabulary — a filter on "canvas" means nothing in the next project
-      tagFilters: [],
+      hiddenTags: [],
       relationshipFilters: { ...ALL_RELS },
       collapsedContainerIds: loadCollapsed(id)
     })
@@ -504,27 +527,40 @@ export const useStore = create<OzmoState>((set, get) => ({
       return { relationshipFilters }
     }),
 
+  // click a flag chip: take that bucket out of the view (and click again to put it
+  // back) — the type chips' gesture exactly, now that the semantics match
   toggleFlagFilter: (id) =>
     set((s) => ({
-      flagFilters: s.flagFilters.includes(id) ? s.flagFilters.filter((x) => x !== id) : [...s.flagFilters, id]
+      hiddenFlags: s.hiddenFlags.includes(id) ? s.hiddenFlags.filter((x) => x !== id) : [...s.hiddenFlags, id]
     })),
 
-  // ctrl-click a flag chip: filter to only that flag; ctrl-click again while solo: clear
+  // ctrl-click: show only that flag — i.e. hide every other bucket, UNFLAGGED
+  // included, or "solo" would silently keep every unflagged node on screen.
+  // ctrl-click again while soloed: restore all.
   soloFlagFilter: (id) =>
-    set((s) => ({
-      flagFilters: s.flagFilters.length === 1 && s.flagFilters[0] === id ? [] : [id]
-    })),
+    set((s) => {
+      const buckets = [...(s.settings?.flags ?? []).map((r) => r.id), UNFLAGGED]
+      const isSolo = !s.hiddenFlags.includes(id) && buckets.every((b) => b === id || s.hiddenFlags.includes(b))
+      return { hiddenFlags: isSolo ? [] : buckets.filter((b) => b !== id) }
+    }),
 
   toggleTagFilter: (tag) =>
     set((s) => ({
-      tagFilters: s.tagFilters.includes(tag) ? s.tagFilters.filter((x) => x !== tag) : [...s.tagFilters, tag]
+      hiddenTags: s.hiddenTags.includes(tag) ? s.hiddenTags.filter((x) => x !== tag) : [...s.hiddenTags, tag]
     })),
 
-  // ctrl-click a tag chip: filter to only that tag; ctrl-click again while solo: clear
+  // ctrl-click: show only that tag. The bucket list is the project's live
+  // vocabulary plus UNTAGGED, so a tag added later simply is not hidden yet —
+  // solo is a snapshot of intent, not a standing rule.
   soloTagFilter: (tag) =>
-    set((s) => ({
-      tagFilters: s.tagFilters.length === 1 && s.tagFilters[0] === tag ? [] : [tag]
-    })),
+    set((s) => {
+      const buckets = [...new Set(s.graph.nodes.flatMap((n) => n.tags ?? [])), UNTAGGED]
+      const isSolo = !s.hiddenTags.includes(tag) && buckets.every((b) => b === tag || s.hiddenTags.includes(b))
+      return { hiddenTags: isSolo ? [] : buckets.filter((b) => b !== tag) }
+    }),
+
+  showAllFlagFilters: () => set({ hiddenFlags: [] }),
+  showAllTagFilters: () => set({ hiddenTags: [] }),
 
   toggleFilterSection: (id) =>
     set((s) => {
@@ -552,6 +588,7 @@ export const useStore = create<OzmoState>((set, get) => ({
     }),
   hideQuickAdd: () => set({ quickAdd: { open: false } }),
   setPalette: (open) => set({ palette: open }),
+  setExportScope: (exportScope) => set({ exportScope }),
 
   toast: (msg, kind = 'error', action) => {
     const id = toastSeq++

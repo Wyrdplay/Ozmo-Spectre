@@ -24,6 +24,8 @@ interface OzmoBridge {
   call: (method: string, payload?: unknown) => Promise<RpcResult>
   onEvent: (cb: (evt: OzmoEvent) => void) => () => void
   pickFolder: () => Promise<string | null>
+  saveDocument: (arg: { markdown: string; filename: string; toVault?: boolean }) => Promise<{ ok: boolean; path?: string; canceled?: boolean }>
+  revealFile: (p: string) => Promise<void>
   openInObsidian: (nodeId: string) => Promise<void>
   openExternal: (url: string) => Promise<void>
   relaunch: () => Promise<void>

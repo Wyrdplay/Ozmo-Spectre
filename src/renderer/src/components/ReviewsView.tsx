@@ -616,6 +616,9 @@ function IncrementPanel({ warp, closure, selectedId, onSelect }: {
     .filter((g) => g.nodes.length > 0)
 
   const covered = closure.work.length - closure.offenders.uncovered.length
+  const complete = closure.completable.length - closure.offenders.incomplete.length
+  const completableIds = useMemo(() => new Set(closure.completable.map((n) => n.id)), [closure])
+  const incompleteIds = useMemo(() => new Set(closure.offenders.incomplete.map((n) => n.id)), [closure])
 
   return (
     <div className="rp-panel">
@@ -627,6 +630,12 @@ function IncrementPanel({ warp, closure, selectedId, onSelect }: {
           title="COVERAGE — the gate wants at least one piece of feedback about every member. Confirmation counts: “this matches the spec” is a review result."
         >
           {covered}/{closure.work.length} covered
+        </span>
+        <span
+          className={`cov-summary ${complete === closure.completable.length ? 'ok' : 'warn'}`}
+          title="COMPLETION — the gate wants every completable member (feature/instance/component/bug/question/idea/action/threat/flaw/warp) finished (tag it done/fixed), or dropped from the warp."
+        >
+          {complete}/{closure.completable.length} complete
         </span>
       </div>
       <div className="rp-col-body">
@@ -676,6 +685,8 @@ function IncrementPanel({ warp, closure, selectedId, onSelect }: {
                   key={n.id}
                   node={n}
                   feedback={closure.coverageOf.get(n.id) ?? []}
+                  completable={completableIds.has(n.id)}
+                  complete={!incompleteIds.has(n.id)}
                   selected={selectedId === n.id}
                   onSelect={() => onSelect(n.id)}
                   onPass={canPass ? () => setPassing(n) : undefined}
@@ -690,9 +701,13 @@ function IncrementPanel({ warp, closure, selectedId, onSelect }: {
   )
 }
 
-function IncrementRow({ node, feedback, selected, exempt, onSelect, onPass }: {
+function IncrementRow({ node, feedback, completable, complete, selected, exempt, onSelect, onPass }: {
   node: SpecNode
   feedback: SpecNode[]
+  /** a COMPLETABLE type (COMPLETION applies) — pillar/principle/area never draw the marker */
+  completable?: boolean
+  /** resolved, or already named a pending action/blocker — only read when completable */
+  complete?: boolean
   selected: boolean
   /** the warp itself — the container, not a member the coverage rule counts */
   exempt?: boolean
@@ -728,6 +743,13 @@ function IncrementRow({ node, feedback, selected, exempt, onSelect, onPass }: {
         </span>
       ) : (
         <span className="cov off" title="no feedback about this yet — the gate holds until something reviews it (confirmation counts)">○</span>
+      )}
+      {completable && (
+        complete ? (
+          <span className="cov cmp on" title="finished — resolved (tagged done/fixed/answered, pruned, or a shipped/done warp)">✓</span>
+        ) : (
+          <span className="cov cmp off" title="COMPLETION — not finished yet; the gate holds until it is complete, or dropped from the warp">◐</span>
+        )
       )}
     </div>
   )
@@ -1531,14 +1553,17 @@ function ActionsPanel({ warp, closure, derived, maps, onSelect }: {
  * Close OR Send Back. That's it. I like the %%% actioned note, but the other
  * parts of the summary dont seem to work.").
  *
- * So: one number and two ways out. The standing offender lists are gone — the
- * other three panels already carry that visibility (uncovered members wear a ○,
- * undesignated feedback says "needs a designation", open actions ARE the Actions
- * list), and restating it here was the fourth copy.
+ * So: one number and two ways out. The standing offender lists are gone from
+ * the other three panels — that visibility lives there instead (uncovered
+ * members wear a ○, undesignated feedback says "needs a designation", open
+ * actions ARE the Actions list), and restating it there was the fourth copy.
  *
- * The 409's offender lists still render, because a refusal is the one moment the
- * detail is wanted and the one moment it is not already on screen — the gate
- * names what it refused over, right under the button that earned it.
+ * Here, though, offenders DO render — advisory from the client mirror whenever
+ * the gate is not yet fully actioned (so the human is not left with a bare
+ * percentage and a button that might refuse), and as the server's own verdict
+ * on an actual 409 refusal, which wins and replaces the advisory list while it
+ * is on screen. Either way it is the gate's own words, right under the button
+ * that earns or would earn them.
  */
 function ClosePanel({ warp, closure, onSelect }: {
   warp: SpecNode
@@ -1601,7 +1626,7 @@ function ClosePanel({ warp, closure, onSelect }: {
       <div className="gate-summary">
         <span
           className={closure.fullyActioned ? 'ok' : 'warn'}
-          title="fully actioned = coverage · designation · disposition · blocks. The ship gate reads the same math server-side."
+          title="fully actioned = coverage · designation · disposition · blocks · completion. The ship gate reads the same math server-side."
         >
           {closure.fullyActioned ? 'fully actioned — the gate is open' : `${closure.pct}% actioned`}
         </span>
@@ -1628,11 +1653,16 @@ function ClosePanel({ warp, closure, onSelect }: {
           {earlier.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
-      {/* ONLY on refusal. This is now the single place the offenders are
-          enumerated, so it has to read on its own: what the server refused, and
-          every node behind it, each one clickable straight into the Content
-          panel. Dismissable, because a refusal is a moment, not a state. */}
-      {refusal && (
+      {/* On refusal, this is the single place the offenders are enumerated, so
+          it has to read on its own: what the server refused, and every node
+          behind it, each one clickable straight into the Content panel.
+          Dismissable, because a refusal is a moment, not a state. Absent a
+          refusal on screen, the same list renders ADVISORY from the client
+          mirror whenever the gate is not yet fully actioned — so the human
+          does not have to press Close to find out what is wrong. The 409
+          remains the truth; the advisory heading says so and is never shown
+          at the same time as a real refusal. */}
+      {refusal ? (
         <div className="gate-offenders">
           <div className="gate-refused">
             the gate refused this close — 409. It wants:
@@ -1640,11 +1670,29 @@ function ClosePanel({ warp, closure, onSelect }: {
           </div>
           {offRow('no feedback yet', refusal.uncovered,
             'COVERAGE — every member of the increment needs at least one piece of feedback (confirmation counts). The ✓ pass control on an increment row answers this in one gesture.')}
+          {offRow('members not finished', refusal.incomplete,
+            'COMPLETION — every completable member of the increment must be finished (tag it done/fixed), or dropped from the warp')}
           {offRow('needs a designation', refusal.undesignated,
             'DESIGNATION — every feedback derives an action or is waived')}
           {offRow('actions still open', refusal.pendingActions,
             'DISPOSITION — address-now actions complete; undisposed ones must be disposed of')}
           {offRow('blocking this warp', refusal.blockers,
+            'BLOCKS — an unresolved node holds a blocks edge into this warp; fix and tag it, or drop the edge')}
+        </div>
+      ) : !closure.fullyActioned && (
+        <div className="gate-offenders outstanding">
+          <div className="gate-refused outstanding">
+            the gate will refuse this — it wants:
+          </div>
+          {offRow('no feedback yet', closure.offenders.uncovered,
+            'COVERAGE — every member of the increment needs at least one piece of feedback (confirmation counts). The ✓ pass control on an increment row answers this in one gesture.')}
+          {offRow('members not finished', closure.offenders.incomplete,
+            'COMPLETION — every completable member of the increment must be finished (tag it done/fixed), or dropped from the warp')}
+          {offRow('needs a designation', closure.offenders.undesignated,
+            'DESIGNATION — every feedback derives an action or is waived')}
+          {offRow('actions still open', closure.offenders.pendingActions.map((p) => p.node),
+            'DISPOSITION — address-now actions complete; undisposed ones must be disposed of')}
+          {offRow('blocking this warp', closure.offenders.blockers,
             'BLOCKS — an unresolved node holds a blocks edge into this warp; fix and tag it, or drop the edge')}
         </div>
       )}
@@ -1658,6 +1706,7 @@ interface ServerOffenders {
   undesignated: { id: string; title: string }[]
   pendingActions: { id: string; title: string; feedbackIds: string[]; disposition: string }[]
   blockers: { id: string; title: string; type: string }[]
+  incomplete: { id: string; title: string; type: string }[]
 }
 
 function CompleteModal({ node, onClose }: { node: SpecNode; onClose: () => void }): React.JSX.Element {

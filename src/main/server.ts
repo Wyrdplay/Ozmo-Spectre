@@ -122,6 +122,57 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   // blast radius: blocks (while unresolved) + reversed depends, transitive,
   // grouped by type, annotated with containing areas + open warps
   app.get('/api/nodes/:id/impact', h('impact.get', (r) => ({ id: r.params.id })))
+
+  // THE DOCUMENT EXPORT — a graph, a container, a selection or a query, flattened
+  // into one markdown document. `?format=md` (the default) sends the text itself so
+  // `curl -o spec.md` just works; `?format=json` returns { title, markdown, stats }
+  // for a caller that wants the counts too.
+  const docFlags = (r: Request): Record<string, unknown> => ({
+    includeResolved: r.query.resolved !== '0' && r.query.resolved !== 'false',
+    includeBodies: r.query.bodies !== '0' && r.query.bodies !== 'false',
+    includeLinks: r.query.links !== '0' && r.query.links !== 'false',
+    includeContents: r.query.contents !== '0' && r.query.contents !== 'false'
+  })
+  const sendDoc = async (req: Request, res: Response, next: NextFunction, payload: unknown): Promise<void> => {
+    try {
+      const doc = (await Promise.resolve(call('document.build', payload, { actor: actorOf(req) }))) as {
+        markdown: string; suggestedFilename: string
+      }
+      if (req.query.format === 'json') { res.json(doc); return }
+      res.type('text/markdown; charset=utf-8')
+      res.setHeader('Content-Disposition', `inline; filename="${doc.suggestedFilename}"`)
+      res.send(doc.markdown)
+    } catch (e) {
+      next(e)
+    }
+  }
+  // the whole project, or a query over it: ?type= &tag= &q=
+  app.get('/api/projects/:id/document', (req, res, next) =>
+    sendDoc(req, res, next, {
+      projectId: req.params.id,
+      filter: {
+        type: typeof req.query.type === 'string' ? req.query.type : undefined,
+        tag: typeof req.query.tag === 'string' ? req.query.tag : undefined,
+        q: typeof req.query.q === 'string' ? req.query.q : undefined
+      },
+      ...docFlags(req)
+    }))
+  // one container (area | warp | class) and everything in it
+  app.get('/api/nodes/:id/document', (req, res, next) =>
+    sendDoc(req, res, next, { nodeId: req.params.id, ...docFlags(req) }))
+  // an explicit set — the canvas selection, or any list an agent assembled
+  app.post('/api/projects/:id/document', (req, res, next) =>
+    sendDoc(req, res, next, {
+      projectId: req.params.id,
+      nodeIds: Array.isArray(req.body?.nodeIds) ? req.body.nodeIds : undefined,
+      nodeId: typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined,
+      filter: req.body?.filter,
+      ...docFlags(req),
+      ...(req.body?.includeResolved !== undefined ? { includeResolved: !!req.body.includeResolved } : {}),
+      ...(req.body?.includeBodies !== undefined ? { includeBodies: !!req.body.includeBodies } : {}),
+      ...(req.body?.includeLinks !== undefined ? { includeLinks: !!req.body.includeLinks } : {}),
+      ...(req.body?.includeContents !== undefined ? { includeContents: !!req.body.includeContents } : {})
+    }))
   app.post('/api/nodes/:id/annotations', h('nodes.annotate', (r) => ({ id: r.params.id, body: r.body?.body })))
   app.delete('/api/annotations/:id', h('annotations.delete', (r) => ({ id: r.params.id })))
   // terminal verbs: complete removes an action (instructions), prune archives a record with the why

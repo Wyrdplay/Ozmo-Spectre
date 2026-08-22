@@ -1574,9 +1574,67 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
   })
   await req('POST', `/api/nodes/${fbFlaw.json.id}/waive`, { note: 'the flaw is the observation' })
 
+  // COMPLETION — the fifth requirement: every COMPLETABLE member of the warp
+  // must be RESOLVED, not merely covered/designated. Coverage and designation
+  // are clear now, but rfWork (a live feature) and fb4 (designated into a
+  // flaw, still a member) are both unfinished — the gate must still hold.
+  gate = await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'ship' })
+  ok('completion: unresolved completable members hold the gate',
+    gate.status === 409 &&
+    gate.json.error?.offenders?.incomplete?.some((o) => o.id === rfWork.json.id) &&
+    gate.json.error?.offenders?.incomplete?.some((o) => o.id === fb4.json.id),
+    JSON.stringify(gate.json.error?.offenders?.incomplete))
+
+  // COVERAGE_EXEMPT ≠ complete: a live `action` member is invisible to coverage
+  // (it is review output, not work to review) and used to be "completed" only
+  // by REMOVAL — so a warp built out of actions shipped reviewed and finished
+  // by nobody. This IS the hole COMPLETION closes.
+  const rfAction = await req('POST', `/api/projects/${pid}/nodes`,
+    { type: 'action', title: 'RF Live Action', linkTo: [{ nodeId: rfW.json.id, type: 'member', outgoing: true }] })
+  ok('live action member fixture', rfAction.status === 200, JSON.stringify(rfAction.json))
+  gate = await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'ship' })
+  ok('a live action member stays exempt from coverage (review output, not work to review)',
+    gate.status === 409 && !gate.json.error?.offenders?.uncovered?.some((o) => o.id === rfAction.json.id),
+    JSON.stringify(gate.json.error?.offenders?.uncovered))
+  ok('a live action member holds the gate via completion (the hole this closes)',
+    gate.status === 409 && gate.json.error?.offenders?.incomplete?.some((o) => o.id === rfAction.json.id),
+    JSON.stringify(gate.json.error?.offenders?.incomplete))
+
+  // finish rfWork and fb4 — tagging done/fixed clears them from `incomplete`
+  // (the live action is still outstanding, so the gate keeps holding)
+  await req('PATCH', `/api/nodes/${rfWork.json.id}`, { tags: ['done'] })
+  await req('PATCH', `/api/nodes/${fb4.json.id}`, { tags: ['fixed'] })
+  gate = await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'ship' })
+  ok('tagging a member done/fixed clears it from incomplete',
+    gate.status === 409 &&
+    !gate.json.error?.offenders?.incomplete?.some((o) => o.id === rfWork.json.id) &&
+    !gate.json.error?.offenders?.incomplete?.some((o) => o.id === fb4.json.id) &&
+    gate.json.error?.offenders?.incomplete?.some((o) => o.id === rfAction.json.id),
+    JSON.stringify(gate.json.error?.offenders?.incomplete))
+
+  // complete the live action (it is REMOVED — the last offender clears)
+  const rfActionDone = await req('POST', `/api/nodes/${rfAction.json.id}/complete`, { note: 'done' })
+  ok('completing the action removes it — completion no longer blocked by it', rfActionDone.status === 200)
+
+  // standing types never "done": a pillar member is exempt from COMPLETION —
+  // isolated in its own warp so it does not also need coverage to prove the point
+  {
+    const pW = (await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Standing Warp', stage: 'review' })).json
+    const pillar = (await req('POST', `/api/projects/${pid}/nodes`,
+      { type: 'pillar', title: 'RF Standing Pillar', linkTo: [{ nodeId: pW.id, type: 'member', outgoing: true }] })).json
+    const pGate = await req('PATCH', `/api/nodes/${pW.id}`, { stage: 'ship' })
+    ok('a pillar member never appears in incomplete (standing types never "done")',
+      pGate.status === 409 && !pGate.json.error?.offenders?.incomplete?.some((o) => o.id === pillar.id),
+      JSON.stringify(pGate.json.error?.offenders?.incomplete))
+    ok('...the pillar still owes COVERAGE — completion exemption is not a coverage bypass',
+      pGate.json.error?.offenders?.uncovered?.some((o) => o.id === pillar.id),
+      JSON.stringify(pGate.json.error?.offenders?.uncovered))
+  }
+
   // fully actioned → the gate opens; shipping IS the close
   gate = await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'ship' })
-  ok('review→ship passes at fully-actioned', gate.status === 200 && gate.json.stage === 'ship', JSON.stringify(gate.json))
+  ok('review→ship passes at fully-actioned (coverage · designation · disposition · blocks · completion)',
+    gate.status === 200 && gate.json.stage === 'ship', JSON.stringify(gate.json))
 
   // CLOSED REVIEW takes no new material — the service refuses it, so agents and
   // the lens hit the same wall (the lens simply does not offer shipped warps)
@@ -1612,6 +1670,61 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
   ok('resolved threat un-rings Threatened', !nRF(thTarget.json.id)?.flags?.includes('Threatened') &&
     !nRF(thTarget.json.id)?.flags?.includes('Blocked'), JSON.stringify(nRF(thTarget.json.id)?.flags))
 
+  // STAGE CONDITIONS — a warp carries `stage`, a field, not a `done` TAG, so
+  // before the stage condition kind existed no flag rule could reach a finished
+  // warp: it rendered undimmed and no filter touched it.
+  {
+    const stDone = await req('GET', '/api/settings')
+    const doneRule = (stDone.json.flags ?? []).find((f) => f.id === 'done')
+    ok('flags migration: the shipped Done rule covers finished warps',
+      (doneRule?.conditions ?? []).some((c) => c.kind === 'stage' && c.stage === 'done') &&
+      (doneRule?.conditions ?? []).some((c) => c.kind === 'stage' && c.stage === 'not_needed'),
+      JSON.stringify(doneRule?.conditions))
+    ok('flags migration: the tag conditions were not clobbered',
+      (doneRule?.conditions ?? []).filter((c) => c.kind === 'tag').length === 5)
+    ok('flags migration: version stamped', (stDone.json.flagsVersion ?? 0) >= 5)
+
+    const swDone = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Stage Done', stage: 'done' })
+    const swNN = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Stage NotNeeded', stage: 'not_needed' })
+    const swOpen = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Stage Open', stage: 'implement' })
+    const swFeat = await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'RF Stage Nonwarp' })
+    gRF = await req('GET', `/api/projects/${pid}/graph`)
+    ok('a warp at Done carries the Done flag', (nRF(swDone.json.id)?.flags ?? []).includes('Done'),
+      JSON.stringify(nRF(swDone.json.id)?.flags))
+    ok('a warp at Not Needed carries it too', (nRF(swNN.json.id)?.flags ?? []).includes('Done'))
+    ok('a warp at an open stage does not', !(nRF(swOpen.json.id)?.flags ?? []).includes('Done'))
+    ok('stage conditions are inert on non-warps', !(nRF(swFeat.json.id)?.flags ?? []).includes('Done'))
+
+    // CONSEQUENCE, asserted on purpose rather than discovered later: `done` feeds
+    // `resolved`, and a resolved source stops blocking. A finished warp should not
+    // hold anything blocked — but it IS a live change to a shipped rule.
+    const swBlocked = await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'RF Stage Blocked Target' })
+    const swBlocker = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Stage Blocker', stage: 'implement' })
+    await req('POST', `/api/projects/${pid}/edges`, { sourceId: swBlocker.json.id, targetId: swBlocked.json.id, type: 'blocks' })
+    gRF = await req('GET', `/api/projects/${pid}/graph`)
+    ok('an open warp still blocks its target', (nRF(swBlocked.json.id)?.flags ?? []).includes('Blocked'),
+      JSON.stringify(nRF(swBlocked.json.id)?.flags))
+    await req('PATCH', `/api/nodes/${swBlocker.json.id}`, { stage: 'done' })
+    gRF = await req('GET', `/api/projects/${pid}/graph`)
+    ok('a warp finished by STAGE stops blocking, exactly as a done-tagged node does',
+      !(nRF(swBlocked.json.id)?.flags ?? []).includes('Blocked'), JSON.stringify(nRF(swBlocked.json.id)?.flags))
+
+    // the kind is user-editable and REST-editable like every other condition
+    const stStage = await req('PATCH', '/api/settings', {
+      flags: [...stDone.json.flags, { id: 'fl_stagetest', name: 'InReview', treatment: 'badge', color: '#38bdf8',
+        conditions: [{ kind: 'stage', stage: 'review' }, { kind: 'stage', stage: 'bogus' }] }]
+    })
+    const mine = (stStage.json.settings?.flags ?? []).find((f) => f.id === 'fl_stagetest')
+    ok('a stage condition round-trips through settings', (mine?.conditions ?? []).some((c) => c.kind === 'stage' && c.stage === 'review'),
+      JSON.stringify(mine?.conditions))
+    ok('an unknown stage is dropped by the sanitizer', (mine?.conditions ?? []).length === 1)
+    const swRev = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'RF Stage Review', stage: 'review' })
+    gRF = await req('GET', `/api/projects/${pid}/graph`)
+    ok('a user-authored stage rule fires', (nRF(swRev.json.id)?.flags ?? []).includes('InReview'),
+      JSON.stringify(nRF(swRev.json.id)?.flags))
+    await req('PATCH', '/api/settings', { flags: stDone.json.flags })
+  }
+
   // sourceType condition sanitizer: junk sourceType drops to any-source
   {
     const st0RF = await req('GET', '/api/settings')
@@ -1645,17 +1758,22 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
 }
 
 // ---------------------------------------------------------------------------
-// FULLY-ACTIONED, the four requirements. The loop is: prioritise, designate
+// FULLY-ACTIONED, the five requirements. The loop is: prioritise, designate
 // every piece of feedback (an action, or a waive — waive IS an action and it
 // undoes), dispose of every action (address-now = member + blocks · address-
-// later = converted), and clear the blockers. The gate reads all four; a warp
-// sent back keeps its review, and the gate follows it.
+// later = converted), clear the blockers, and finish every completable member.
+// The gate reads all five; a warp sent back keeps its review, and the gate
+// follows it.
 
 {
   const W = (await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'CL Warp', stage: 'review' })).json
   const workA = (await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'CL Work A', linkTo: [{ nodeId: W.id }] })).json
   const workB = (await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'CL Work B', linkTo: [{ nodeId: W.id }] })).json
   const gateOf = async () => req('PATCH', `/api/nodes/${W.id}`, { stage: 'ship' })
+  // every completable member this test scope creates, so COMPLETION can be
+  // finished in one loop right before the ship this test expects to pass
+  // (passWork/passWork2/fbTarget live in nested block scopes below)
+  const completableIds = [workA.id, workB.id]
 
   // 1. COVERAGE — an increment nobody reviewed is not a reviewed increment.
   //    The old gate was vacuous here: no feedback meant nothing to action.
@@ -1801,6 +1919,7 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
       type: 'bug', title: 'CL Pass target (a BUG, the type filing used to miss)',
       linkTo: [{ nodeId: W.id, type: 'member', outgoing: true }]
     })).json
+    completableIds.push(passWork.id)
     let gp = await gateOf()
     ok('pass: the fresh member starts UNCOVERED',
       gp.status === 409 && gp.json.error?.offenders?.uncovered?.some((o) => o.id === passWork.id),
@@ -1833,6 +1952,7 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
     const passWork2 = (await req('POST', `/api/projects/${pid}/nodes`, {
       type: 'feature', title: 'CL Pass target 2', linkTo: [{ nodeId: W.id, type: 'member', outgoing: true }]
     })).json
+    completableIds.push(passWork2.id)
     const passed2 = await req('POST', `/api/nodes/${passWork2.id}/pass`, { body: 'confirmed' })
     ok('pass: warpId optional when the member sits in exactly one open warp', passed2.status === 200,
       JSON.stringify(passed2.json))
@@ -1858,6 +1978,7 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
     const fbTarget = (await req('POST', `/api/projects/${pid}/nodes`, {
       type: 'bug', title: 'CL Filing target (bug)', linkTo: [{ nodeId: W.id, type: 'member', outgoing: true }]
     })).json
+    completableIds.push(fbTarget.id)
     const obs = (await req('POST', `/api/projects/${pid}/nodes`, {
       type: 'feedback', title: 'CL Filed against a bug',
       linkTo: [{ nodeId: W.id, type: 'member', outgoing: true }]
@@ -1896,6 +2017,9 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
   ok('an action member is exempt from the coverage rule (it is review output)',
     !g1.json.error?.offenders?.uncovered?.some((o) => o.id === act.id),
     JSON.stringify(g1.json.error?.offenders?.uncovered))
+  ok('a node already named in pendingActions is not double-listed in incomplete (named once)',
+    !g1.json.error?.offenders?.incomplete?.some((o) => o.id === act.id),
+    JSON.stringify(g1.json.error?.offenders?.incomplete))
   const doneAct = await req('POST', `/api/nodes/${act.id}/complete`, { note: 'renamed' })
   ok('completing an action removes it — and its derives go with it', doneAct.status === 200)
   g1 = await gateOf()
@@ -1925,9 +2049,25 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
   g1 = await gateOf()
   ok('blocks: still refused while the bug is unresolved', g1.status === 409 &&
     g1.json.error?.offenders?.blockers?.some((o) => o.id === blocker.id), JSON.stringify(g1.json.error?.offenders))
+  ok('a node already named in blockers is not double-listed in incomplete (named once)',
+    !g1.json.error?.offenders?.incomplete?.some((o) => o.id === blocker.id),
+    JSON.stringify(g1.json.error?.offenders?.incomplete))
   await req('PATCH', `/api/nodes/${blocker.id}`, { tags: ['fixed'] })
+
+  // 5. COMPLETION — every other completable member of this warp (workA, workB,
+  //    the two pass()ed members and the filing target) is still a live, unfixed
+  //    node: coverage/designation never resolves the MEMBER itself, only the
+  //    review about it. Finish them before the ship this test expects to pass.
   g1 = await gateOf()
-  ok('blocks: a FIXED blocker stops blocking — the gate opens (same resolved-set as the flags)',
+  ok('completion: the pass()ed / filed members are covered but still unresolved — the gate still holds',
+    g1.status === 409 &&
+    completableIds.every((idv) => g1.json.error?.offenders?.incomplete?.some((o) => o.id === idv)),
+    JSON.stringify(g1.json.error?.offenders?.incomplete))
+  for (const idv of completableIds) {
+    await req('PATCH', `/api/nodes/${idv}`, { tags: ['done'] })
+  }
+  g1 = await gateOf()
+  ok('blocks: a FIXED blocker stops blocking, and completion finishes — the gate opens (same resolved-set as the flags)',
     g1.status === 200 && g1.json.stage === 'ship', JSON.stringify(g1.json.error?.offenders ?? g1.json.stage))
 
   // THE GATE FOLLOWS A SENT-BACK WARP: a review stays open through a send-back,
@@ -2503,6 +2643,96 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
 
   await req('DELETE', `/api/projects/${coId}`)
   await req('DELETE', `/api/projects/${cuId}`)
+}
+
+// --- the DOCUMENT export: a graph, or part of one, as ONE markdown document.
+// Its own project, so the linearisation is asserted against a known shape.
+{
+  const dp = await req('POST', '/api/projects', { name: `doc-${Date.now()}`, description: 'export fixture' })
+  const dpid = dp.json.id
+  const mk = async (type, title, extra = {}) =>
+    (await req('POST', `/api/projects/${dpid}/nodes`, { type, title, ...extra })).json
+
+  const area = await mk('area', 'Doc Area')
+  const comp = await mk('component', 'Doc Component', {
+    content: '## Job\n\nDoes the job.', linkTo: [{ nodeId: area.id, type: 'member', outgoing: true }]
+  })
+  const feat = await mk('feature', 'Doc Feature', {
+    content: '## Summary\n\nA capability.', linkTo: [{ nodeId: area.id, type: 'member', outgoing: true }]
+  })
+  await req('POST', `/api/projects/${dpid}/edges`, { sourceId: feat.id, targetId: comp.id, type: 'depends' })
+  const loose = await mk('bug', 'Doc Bug')
+
+  // markdown is the default content type, so `curl -o spec.md` just works
+  const md = await req('GET', `/api/projects/${dpid}/document`)
+  const text = typeof md.json === 'string' ? md.json : JSON.stringify(md.json)
+  ok('document: whole project returns markdown', md.status === 200 && text.startsWith('# '), text.slice(0, 120))
+  ok('document: an area is a chapter', text.includes('\n# Doc Area\n'), text.slice(0, 400))
+  ok('document: its members nest under it', text.includes('\n## Doc Component\n'))
+  ok('document: a node with no parent is its own chapter', text.includes('\n# Doc Bug\n'))
+  ok('document: every node appears exactly once', text.split('# Doc Component').length - 1 === 1)
+  ok('document: relationships read from the node side with the inverse verb',
+    text.includes('required by \u2192 Doc Feature'), text)
+  ok('document: a contents list is generated', text.includes('## Contents'))
+  ok('document: body headings are re-levelled beneath their node', text.includes('\n### Job\n'), text)
+
+  // ?format=json carries the counts, which is what a caller needs to know it got everything
+  const js = await req('GET', `/api/projects/${dpid}/document?format=json`)
+  ok('document: format=json returns title/markdown/stats',
+    js.status === 200 && typeof js.json.markdown === 'string' && js.json.stats.nodes === 4,
+    JSON.stringify(js.json?.stats))
+  ok('document: nothing is unplaced in a well-formed graph', js.json.stats.unplaced === 0)
+  ok('document: a filename is suggested', /\.md$/.test(js.json.suggestedFilename ?? ''), js.json.suggestedFilename)
+
+  // a CONTAINER scope — the area and what is in it, and nothing else
+  const cont = await req('GET', `/api/nodes/${area.id}/document?format=json`)
+  ok('document: a container scope is itself plus its members',
+    cont.json.stats.nodes === 3 && !cont.json.markdown.includes('Doc Bug'), JSON.stringify(cont.json?.stats))
+
+  // an explicit SET — what the canvas selection sends
+  const sel = await req('POST', `/api/projects/${dpid}/document?format=json`, { nodeIds: [comp.id, loose.id] })
+  // "exports only those nodes" means only those get a SECTION. A relationship line
+  // may still NAME an outside node — suppressing that would make the node look
+  // unconnected — so assert on the heading, not on the substring anywhere.
+  ok('document: an explicit selection gives sections to only those nodes',
+    sel.json.stats.nodes === 2 && sel.json.markdown.includes('\n# Doc Component\n') &&
+    !/\n#+ Doc Feature\n/.test(sel.json.markdown),
+    JSON.stringify(sel.json?.stats))
+  ok('document: a link to a node outside the document is KEPT but marked',
+    sel.json.markdown.includes('required by \u2192 Doc Feature *(not in this document)*'), sel.json.markdown)
+  // ...and in a whole-project export, where everything IS present, the marker never appears
+  ok('document: a whole-project export marks nothing as outside',
+    !js.json.markdown.includes('not in this document'), js.json.markdown.slice(0, 300))
+
+  // a QUERY scope
+  const q = await req('GET', `/api/projects/${dpid}/document?type=bug&format=json`)
+  ok('document: a filter scope selects only matches',
+    q.json.stats.nodes === 1 && q.json.markdown.includes('Doc Bug'), JSON.stringify(q.json?.stats))
+
+  // the flags actually switch things off
+  const outline = await req('GET', `/api/projects/${dpid}/document?bodies=0&links=0&contents=0`)
+  const otext = typeof outline.json === 'string' ? outline.json : ''
+  ok('document: bodies=0 drops the spec text', !otext.includes('Does the job.'))
+  ok('document: links=0 drops the relationship lines', !otext.includes('required by \u2192'))
+  ok('document: contents=0 drops the table of contents', !otext.includes('## Contents'))
+
+  // resolved nodes are MARKED by default and their omission is DISCLOSED
+  await req('PATCH', `/api/nodes/${loose.id}`, { tags: ['fixed'] })
+  const withDone = await req('GET', `/api/projects/${dpid}/document?format=json`)
+  ok('document: resolved nodes are included and marked by default',
+    withDone.json.markdown.includes('Doc Bug') && withDone.json.markdown.includes('Done'), withDone.json.markdown)
+  const without = await req('GET', `/api/projects/${dpid}/document?resolved=0&format=json`)
+  ok('document: resolved=0 excludes them AND says how many',
+    without.json.stats.omittedResolved === 1 && without.json.markdown.includes('excluded from this document'),
+    JSON.stringify(without.json?.stats))
+
+  // it is a READ: generating a document must not touch the graph
+  const before = (await req('GET', `/api/projects/${dpid}/activity`)).json.length
+  await req('GET', `/api/projects/${dpid}/document`)
+  const after = (await req('GET', `/api/projects/${dpid}/activity`)).json.length
+  ok('document: exporting writes nothing to the activity log', before === after, `${before} -> ${after}`)
+
+  await req('DELETE', `/api/projects/${dpid}`)
 }
 
 // cleanup

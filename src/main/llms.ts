@@ -149,7 +149,12 @@ conditions, and FIRES when ANY condition holds:
                             idea). Optional \`sourceType\` narrows to sources of ONE node type:
                             {"kind":"incoming-edge","edgeType":"blocks","sourceType":"threat"}
                             fires only for blocks arriving FROM threats
-Shipped defaults (editable): "Done" → dim, tags done|fixed|answered|adopted|wontfix.
+- stage condition:          a WARP sitting at this pipeline stage: {"kind":"stage","stage":"done"}.
+                            Stage is a FIELD, not a tag — tags are user vocabulary, stage is the
+                            warp pipeline — so without this kind no rule could reach a finished
+                            warp and it carried no flag at all. Inert on every other type.
+Shipped defaults (editable): "Done" → dim, tags done|fixed|answered|adopted|wontfix, PLUS stage
+done|not_needed, so a finished warp is finished work under the same one rule.
 "Blocked" → red ring, tag \`blocked\` OR incoming \`blocks\` edge — so a node is Blocked either
 by saying so or by a live blocker pointing at it. "Debt" → amber badge, tag \`debt\` — mark
 paydown candidates (typical shape: the debt-tagged node derives an action that pays it down).
@@ -513,6 +518,42 @@ Impact           GET  /api/nodes/:id/impact          — BLAST RADIUS: what brea
                                                        OPEN \`warps\`. Ask before touching a component: an
                                                        empty payload means the change is contained.
 
+Document         GET  /api/projects/:id/document      — THE WHOLE GRAPH AS ONE MARKDOWN DOCUMENT.
+                 GET  /api/nodes/:id/document           Returns text/markdown by default (so \`curl -o
+                 POST /api/projects/:id/document        spec.md\` just works); add ?format=json for
+                                                        {title, markdown, suggestedFilename, stats}.
+                                                        THREE SCOPES, one generator:
+                                                          /projects/:id/document            the whole project
+                                                          /projects/:id/document?type=&tag=&q=  a query over it
+                                                          /nodes/:id/document               one CONTAINER (area,
+                                                            warp or class) and everything in it
+                                                          POST {"nodeIds":[...]}            an explicit set
+                                                        LINEARISATION — a node's PARENT is the first of: the
+                                                        area containing it, its \`derives\` parent, its
+                                                        \`class-of\` class, THAT IS ALSO IN THE SET. Parentless
+                                                        nodes are chapters; the rest nest. Order is the
+                                                        settings' typeOrder, then rank, then title. So a whole
+                                                        project comes out geography-first, a warp comes out as
+                                                        its members, and an arbitrary set comes out with
+                                                        whatever structure genuinely exists among it.
+                                                        NOTHING IS SILENTLY DROPPED: a node under two parents
+                                                        renders ONCE and is cross-referenced from the other;
+                                                        anything the walk cannot reach lands in a trailing
+                                                        "Also in this document" section. Each node carries a
+                                                        meta line (type · id · members · tags · progress ·
+                                                        flags) and its relationships read from ITS side, with
+                                                        the INVERSE verb where it is the target. Body headings
+                                                        are re-levelled to nest under their node's heading.
+                                                        Flags (all default ON, set ?x=0 to drop):
+                                                          resolved  include Done/Pruned nodes — they are MARKED,
+                                                                    not hidden; excluding them prints the count
+                                                                    it left out rather than quietly shrinking
+                                                          bodies    the spec text (bodies=0 gives an outline)
+                                                          links     the relationship lines
+                                                          contents  the generated table of contents
+                                                        This is a READ. It writes nothing and is safe to call
+                                                        on anything.
+
 Reviews          no dedicated CRUD — the Review STAGE is the review (old /api/reviews* routes 410).
                  Open:  PATCH the warp {"stage":"review"} — entering the stage IS opening
                  List:  GET /api/projects/:id/nodes?type=warp then filter stage "review" — but a
@@ -541,7 +582,8 @@ Settings         GET  /api/settings                  — vault path, port, human
                                                      array, read-modify-write like tags); rule order IS
                                                      chip order and evaluation order. Rules are
                                                      {id,name,treatment:"ring"|"dim"|"badge",color?,
-                                                      conditions:[{kind:"tag",tag}|{kind:"incoming-edge",edgeType}]}
+                                                      conditions:[{kind:"tag",tag}|{kind:"incoming-edge",edgeType}
+                                                                  |{kind:"stage",stage}]}
                                                      Returns {settings, relaunchRequired}.
                  styleOverrides — theme the UI (canvas nodes, chips, dots, lines), merged over the
                  shipped defaults; render-side ONLY (graph payloads and vault FOLDERS never change):
@@ -596,7 +638,7 @@ item statuses or verdict enums.
      ADDRESS LATER → convert the action to persistent work (feature/flaw/…) and PATCH rank; it
                      is no longer transient, so it leaves this review's math
 5. CLOSE = SHIP — the forward-restage IS the close: PATCHing a warp to ship/done is legal only at
-   FULLY-ACTIONED, four requirements:
+   FULLY-ACTIONED, five requirements:
      COVERAGE    — every non-feedback, non-action member of the warp has ≥1 feedback ABOUT it:
                    a bare association with a feedback node ("discusses"), a feedback membering
                    it, or a record that feedback derived. CONFIRMATION COUNTS — "this matches the
@@ -605,9 +647,18 @@ item statuses or verdict enums.
      DISPOSITION — no live \`action\` derived from this warp's feedback remains (step 4)
      BLOCKS      — nothing UNRESOLVED holds a \`blocks\` relationship into the warp; same
                    resolved-set as the flag rules, so a bug tagged \`fixed\` stops blocking
+     COMPLETION  — every COMPLETABLE member of the warp (feature, instance, component, bug,
+                   question, idea, action, threat, flaw, warp — a warp may member another warp)
+                   is RESOLVED, same resolved-set as BLOCKS. Standing types (pillar, principle,
+                   area) are exempt — they never "done" — and so is feedback, which already
+                   carries DESIGNATION. This is what stops a warp built out of \`action\`
+                   members — COVERAGE_EXEMPT, completed by REMOVAL — from shipping having been
+                   reviewed and finished by nobody: complete()/waive/tag-done the member, or
+                   drop it from the warp.
    Otherwise 409 with error.offenders {uncovered:[{id,title,type}], undesignated:[{id,title}],
-   pendingActions:[{id,title,feedbackIds,disposition}], blockers:[{id,title,type}]} —
-   disposition is "address-now" | "undisposed".
+   pendingActions:[{id,title,feedbackIds,disposition}], blockers:[{id,title,type}],
+   incomplete:[{id,title,type}]} — disposition is "address-now" | "undisposed". A node already
+   named in pendingActions or blockers is never also named in incomplete (named once).
    The gate fires from the Review stage AND from wherever else the warp sits while unresolved
    feedback members remain; a warp that was never reviewed ships freely. Backward restage is
    always free (send-back needs no verb). Restage to not_needed always bypasses: remaining open
@@ -705,7 +756,7 @@ Work an action to completion (create linked → do the work → complete with a 
   # 4. see what it changed: diff the nodes it was linked to (ids are in the action.completed activity detail)
   curl -s "${base}/api/nodes/FEAT_ID/diff?since=T"
 
-Work a review end to end (open → cover → designate → dispose → ship; W = the warp under review):
+Work a review end to end (open → cover → designate → dispose → complete → ship; W = the warp under review):
 
   # 1. the warp enters Review — that IS the open (the human usually drags the card):
   curl -s -X PATCH ${base}/api/nodes/W -H "X-Actor: claude-code" -H "Content-Type: application/json" -d '{"stage":"review"}'
@@ -733,7 +784,12 @@ Work a review end to end (open → cover → designate → dispose → ship; W =
   curl -s -X POST ${base}/api/nodes/ACTION/complete -H "X-Actor: claude-code" -H "Content-Type: application/json" -d '{"note":"spec realigned"}'
   curl -s -X POST ${base}/api/nodes/FB1/waive -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"note":"covered — spec realigned","into":"X"}'
-  # 6. ship = close (the gate): 409 lists offenders until fully-actioned:
+  # 6. COMPLETE every completable member (feature/instance/component/bug/question/idea/action/
+  #    threat/flaw/warp): tag it done/fixed/answered, complete() it if it's an action, or drop it
+  #    from the warp — an unresolved completable member holds the gate via error.offenders.incomplete
+  curl -s -X PATCH ${base}/api/nodes/MEMBER_ID -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"tags":["done"]}'
+  # 7. ship = close (the gate): 409 lists offenders until fully-actioned:
   curl -s -X PATCH ${base}/api/nodes/W -H "X-Actor: claude-code" -H "Content-Type: application/json" -d '{"stage":"ship"}'
 
 Prune a dead record (kept, dimmed, with the why — never silently deleted):
@@ -817,6 +873,23 @@ Catching up after time away (T = the \`now\` you stored last session, epoch ms):
   curl -s "${base}/api/nodes/NODE_ID/diff?since=T"         # 2. per interesting node: content diff,
                                                            #    tag changes, edges ±, new annotations
   # 3. store the diff's \`now\` as your next \`since\` — the loop never misses or re-reads anything.
+
+Export a graph, or part of one, as ONE document (a read — writes nothing):
+
+  # the whole project, straight to a file
+  curl -s "${base}/api/projects/PROJ/document" -o spec.md
+  # one district — an area, a warp, or a class and its instances
+  curl -s "${base}/api/nodes/AREA_ID/document" -o area.md
+  # a query: every open bug, as a report
+  curl -s "${base}/api/projects/PROJ/document?type=bug&resolved=0" -o bugs.md
+  # an outline with no spec bodies — cheap to scan when you only need the shape
+  curl -s "${base}/api/projects/PROJ/document?bodies=0&links=0"
+  # an explicit set (what the canvas selection does), and the counts with it
+  curl -s -X POST "${base}/api/projects/PROJ/document?format=json" -H "X-Actor: claude-code" \
+    -H "Content-Type: application/json" -d '{"nodeIds":["nd_a","nd_b"]}'
+  # -> {"title":..., "markdown":"# ...", "suggestedFilename":"...md",
+  #     "stats":{"nodes":2,"chapters":2,"unplaced":0,"omittedResolved":0,"generatedAt":...}}
+  # ALWAYS read stats.unplaced and stats.omittedResolved before quoting a document as complete.
 
 Watch what the human is doing and react:
 

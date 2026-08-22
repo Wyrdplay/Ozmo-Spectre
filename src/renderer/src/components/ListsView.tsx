@@ -3,7 +3,7 @@ import { edgeRelationships, type NodeType, type SpecNode } from '@shared/types'
 import { useStore } from '@/store'
 import {
   FlagChips, FlagFilterChips, ProgressBar, TypeDot,
-  activeFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useOrderedTypes, useTypeStyles
+  hiddenFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useOrderedTypes, useTypeStyles
 } from './widgets'
 import { timeAgo } from '@/lib/markdown'
 
@@ -44,11 +44,11 @@ export function ListsView(): React.JSX.Element {
     }
   }, [focusNodeId, graph.nodes, setFocusNode])
 
-  // flag-rule filters (store keeps rule ids; node.flags carries names)
+  // flag-rule filters (store keeps HIDDEN rule ids; node.flags carries names)
   const settingsFlags = useStore((s) => s.settings?.flags)
-  const flagFilters = useStore((s) => s.flagFilters)
-  const flagActive = useMemo(() => activeFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
-  const flagUndim = useMemo(() => undimFlagNames(flagFilters, settingsFlags), [flagFilters, settingsFlags])
+  const hiddenFlags = useStore((s) => s.hiddenFlags)
+  const flagHidden = useMemo(() => hiddenFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
+  const flagUndim = useMemo(() => undimFlagNames(hiddenFlags, settingsFlags), [hiddenFlags, settingsFlags])
 
   // ctrl/cmd+F routes to the existing filter input (no overlay in list views)
   useEffect(() => {
@@ -66,7 +66,7 @@ export function ListsView(): React.JSX.Element {
   const needle = q.trim().toLowerCase()
   // any active filter (text or flag) switches to flat matches — the decomposition
   // tree would otherwise resurrect filtered-out children via the tree walk
-  const filtering = needle.length > 0 || flagActive !== null
+  const filtering = needle.length > 0 || flagHidden.size > 0
 
   /** Decomposition + classification tree: a node nests under the parent of its
    *  OLDEST incoming derives relationship; failing that, under its OLDEST class
@@ -131,12 +131,12 @@ export function ListsView(): React.JSX.Element {
     for (const n of graph.nodes) {
       if (needle && !n.title.toLowerCase().includes(needle) && !n.tags.some((t) => t.includes(needle)) &&
         !(n.flags ?? []).some((f) => f.toLowerCase().includes(needle))) continue
-      if (!nodeMatchesFlagFilter(n.flags, flagActive)) continue
+      if (!nodeMatchesFlagFilter(n.flags, flagHidden)) continue
       map.get(n.type)?.push(n)
     }
     for (const [, list] of map) list.sort((a, b) => b.updatedAt - a.updatedAt)
     return map
-  }, [graph.nodes, needle, flagActive, typeOrder])
+  }, [graph.nodes, needle, flagHidden, typeOrder])
 
   /** Depth-first flatten of the visible tree, honouring per-node collapse. */
   const rowsFor = (topLevel: SpecNode[]): TreeEntry[] => {

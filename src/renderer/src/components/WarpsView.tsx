@@ -195,6 +195,7 @@ export function WarpsView(): React.JSX.Element {
                             <div
                               className="warp-card-progress"
                               title={`review: ${c.pct}% fully actioned — coverage ${c.work.length - c.offenders.uncovered.length}/${c.work.length}, ` +
+                                `completion ${c.completable.length - c.offenders.incomplete.length}/${c.completable.length}, ` +
                                 `${c.offenders.undesignated.length} undesignated, ${c.offenders.pendingActions.length} action(s), ` +
                                 `${c.offenders.blockers.length} blocker(s). Shipping is gated on 100%.`}
                             >

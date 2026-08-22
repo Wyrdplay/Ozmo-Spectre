@@ -314,6 +314,11 @@ export type FlagCondition =
    *  blocking) — optionally narrowed to sources of one node type (`sourceType`), so e.g.
    *  "incoming blocks from threats" can ring differently than a plain block */
   | { kind: 'incoming-edge'; edgeType: EdgeType; sourceType?: NodeType }
+  /** a WARP sitting at this pipeline stage. Stage is a field, not a tag — tags are
+   *  user vocabulary, stage is the warp pipeline — so without this kind no rule can
+   *  express "this warp is finished" and a Done-stage warp carries no flag at all.
+   *  Inert on every other type: only warps have a stage. */
+  | { kind: 'stage'; stage: WarpStage }
 
 export interface FlagRule {
   id: string
@@ -336,7 +341,12 @@ export function defaultFlags(): FlagRule[] {
         { kind: 'tag', tag: 'fixed' },
         { kind: 'tag', tag: 'answered' },
         { kind: 'tag', tag: 'adopted' },
-        { kind: 'tag', tag: 'wontfix' }
+        { kind: 'tag', tag: 'wontfix' },
+        // a finished warp is finished work — it dims and hides through this same
+        // rule rather than needing a hand-applied `done` tag that could disagree
+        // with the stage it duplicates
+        { kind: 'stage', stage: 'done' },
+        { kind: 'stage', stage: 'not_needed' }
       ]
     },
     {

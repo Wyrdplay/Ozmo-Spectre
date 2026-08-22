@@ -453,6 +453,10 @@ function computeFlags(nodes: SpecNode[], edges: SpecEdge[], rules: FlagRule[]): 
     rule.conditions.some((c) =>
       c.kind === 'tag'
         ? n.tags.includes(c.tag.toLowerCase())
+        // stage is warp-only, so this is inert on every other type — which is what
+        // lets the Done rule cover finished warps without a tag that duplicates it
+        : c.kind === 'stage'
+        ? n.stage === c.stage
         : (incoming.get(n.id) ?? []).some((r) => r.type === c.edgeType && !isResolved(r.sourceId) &&
             // optional source-type narrowing: "incoming blocks from threats" ≠ any block
             (!c.sourceType || byId.get(r.sourceId)?.type === c.sourceType))
@@ -747,7 +751,7 @@ export function updateNode(
           throw new ApiError(
             `cannot restage warp "${r.title}" out of review to ${p.stage} — the review is not fully actioned: ` +
             offenderSummary(c.offenders) +
-            ' — cover the increment, designate the feedback, settle the actions and clear the blockers, or restage to not_needed to abandon',
+            ' — cover the increment, designate the feedback, settle the actions, clear the blockers and finish the members, or restage to not_needed to abandon',
             409, { offenders: c.offenders }
           )
         }
@@ -2142,14 +2146,27 @@ interface ClosureOffenders {
   pendingActions: { id: string; title: string; feedbackIds: string[]; disposition: 'address-now' | 'undisposed' }[]
   /** UNRESOLVED nodes holding a live blocks relationship into the warp */
   blockers: { id: string; title: string; type: string }[]
+  /** completable members of the warp that are neither resolved nor already
+   *  named as a pending action or a blocker */
+  incomplete: { id: string; title: string; type: string }[]
 }
 
 /** Neither the review's material (feedback) nor its output (actions) — so the
  *  coverage requirement runs over the WORK the increment actually contains. */
 const COVERAGE_EXEMPT = new Set<string>(['feedback', 'action'])
 
+/** Types a warp member can be FINISHED at — the completion requirement runs
+ *  over these. This is the existing BACKLOG_TYPES set plus `warp` (a warp may
+ *  member another warp) — defined independently of BACKLOG_TYPES because the
+ *  two answer different questions and must be free to diverge. Standing types
+ *  (pillar, principle, area) never "done", and feedback already carries its
+ *  own DESIGNATION requirement — never put it in two requirements. */
+const COMPLETABLE_TYPES = new Set<NodeType>(
+  ['feature', 'instance', 'component', 'bug', 'question', 'idea', 'action', 'threat', 'flaw', 'warp']
+)
+
 /**
- * fully_actioned(warp) + the offender lists for the gate's 409 — four
+ * fully_actioned(warp) + the offender lists for the gate's 409 — five
  * requirements, all of them graph reads:
  *
  *  1. COVERAGE — every non-feedback, non-action member of the warp has at least
@@ -2163,6 +2180,11 @@ const COVERAGE_EXEMPT = new Set<string>(['feedback', 'action'])
  *     Address-later leaves the math by conversion (it is persistent work now).
  *  4. BLOCKS — nothing UNRESOLVED holds a `blocks` relationship into the warp.
  *     Same resolved-set the flag rules use, so a bug tagged fixed stops blocking.
+ *  5. COMPLETION — every COMPLETABLE member of the warp (COMPLETABLE_TYPES:
+ *     feature/instance/component/bug/question/idea/action/threat/flaw/warp) is
+ *     RESOLVED (the same resolved-set requirement 4 uses). This is what stops a
+ *     warp built out of action members — COVERAGE_EXEMPT, completed by removal —
+ *     from shipping having been reviewed and finished by nobody.
  *
  * Designated findings (feedback converted to bug/flaw/threat/question) leave the
  * feedback math and become institutional records — but if they block the warp,
@@ -2175,12 +2197,15 @@ export function warpClosure(warpId: string, projectId: string): {
   /** unresolved feedback members — an open review, wherever the warp's stage sits */
   openFeedbackCount: number
   coverage: { total: number; covered: number }
+  completion: { total: number; complete: number }
   offenders: ClosureOffenders
 } {
   const { nodes, edges, resolved } = graphInternal(projectId)
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const feedback: SpecNode[] = []
   const work: SpecNode[] = []
+  /** every member of the warp, whatever its type — completion's denominator */
+  const members: SpecNode[] = []
   const derivesOut = new Map<string, string[]>()
   /** ids some feedback is ABOUT — discusses, direct membership, or derived from it */
   const reviewed = new Set<string>()
@@ -2191,6 +2216,7 @@ export function warpClosure(warpId: string, projectId: string): {
       const src = byId.get(rel.sourceId)
       if (rel.type === 'member') {
         if (rel.targetId === warpId) {
+          if (src) members.push(src)
           if (src?.type === 'feedback') feedback.push(src)
           else if (src && !COVERAGE_EXEMPT.has(src.type)) work.push(src)
         }
@@ -2219,7 +2245,7 @@ export function warpClosure(warpId: string, projectId: string): {
     }
   }
 
-  const offenders: ClosureOffenders = { uncovered: [], undesignated: [], pendingActions: [], blockers: [] }
+  const offenders: ClosureOffenders = { uncovered: [], undesignated: [], pendingActions: [], blockers: [], incomplete: [] }
   for (const m of work) {
     if (!reviewed.has(m.id)) offenders.uncovered.push({ id: m.id, title: m.title, type: m.type })
   }
@@ -2248,12 +2274,25 @@ export function warpClosure(warpId: string, projectId: string): {
     if (!pendingBy.has(b.id)) offenders.blockers.push({ id: b.id, title: b.title, type: b.type })
   }
 
+  const completable = members.filter((m) => COMPLETABLE_TYPES.has(m.type))
+  const pendingActionIds = new Set(offenders.pendingActions.map((p) => p.id))
+  const blockerIds = new Set(offenders.blockers.map((b) => b.id))
+  for (const m of completable) {
+    if (resolved.has(m.id)) continue
+    // name each offending node once — a node already named as a pending action
+    // or a blocker must not also appear in `incomplete`
+    if (pendingActionIds.has(m.id) || blockerIds.has(m.id)) continue
+    offenders.incomplete.push({ id: m.id, title: m.title, type: m.type })
+  }
+
   return {
     fullyActioned: offenders.uncovered.length === 0 && offenders.undesignated.length === 0 &&
-      offenders.pendingActions.length === 0 && offenders.blockers.length === 0,
+      offenders.pendingActions.length === 0 && offenders.blockers.length === 0 &&
+      offenders.incomplete.length === 0,
     feedbackCount: feedback.length,
     openFeedbackCount: feedback.filter((f) => !resolved.has(f.id)).length,
     coverage: { total: work.length, covered: work.length - offenders.uncovered.length },
+    completion: { total: completable.length, complete: completable.length - offenders.incomplete.length },
     offenders
   }
 }
@@ -2275,6 +2314,9 @@ function offenderSummary(o: ClosureOffenders): string {
   if (o.blockers.length) {
     parts.push(`${o.blockers.length} unresolved node(s) blocking this warp (fix and tag them, or drop the blocks edge): ` +
       o.blockers.map((x) => `"${x.title}" (${x.id}, ${x.type})`).join('; '))
+  }
+  if (o.incomplete.length) {
+    parts.push(`${o.incomplete.length} member(s) not finished (complete them, or drop them from the warp): ` + names(o.incomplete))
   }
   return parts.join(' · ')
 }

@@ -3,9 +3,10 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import {
-  EDGE_TYPES, INNER_GLYPHS, NODE_SHAPES, NODE_TYPES, defaultFlags, isTextGlyph, newId,
+  EDGE_TYPES, INNER_GLYPHS, NODE_SHAPES, NODE_TYPES, WARP_STAGES, defaultFlags, isTextGlyph, newId,
   type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type InnerGlyph, type NodeFill,
-  type NodeInnerStyle, type NodeShape, type NodeStyleOverride, type NodeType, type StyleOverrides
+  type NodeInnerStyle, type NodeShape, type NodeStyleOverride, type NodeType, type StyleOverrides,
+  type WarpStage
 } from '@shared/types'
 
 const DEFAULTS = (): AppSettings => ({
@@ -18,8 +19,15 @@ const DEFAULTS = (): AppSettings => ({
 })
 
 /** Rules shipped after the original defaults — appended exactly once per version bump. */
-const FLAGS_VERSION = 4
-const VERSIONED_FLAGS: { version: number; rules: FlagRule[] }[] = [
+const FLAGS_VERSION = 5
+const VERSIONED_FLAGS: {
+  version: number
+  rules: FlagRule[]
+  /** amend rules that already exist. Appending a new rule cannot fix a shipped one
+   *  that was always incomplete, so a step may also patch in place — idempotently,
+   *  and never overwriting what the user has edited. */
+  patch?: (flags: FlagRule[]) => void
+}[] = [
   {
     version: 2,
     rules: [
@@ -47,6 +55,24 @@ const VERSIONED_FLAGS: { version: number; rules: FlagRule[] }[] = [
       // because a project should never quietly inherit a spec nobody maintains.
       { id: 'reference-broken', name: 'Reference broken', treatment: 'ring', color: '#f87171', conditions: [{ kind: 'tag', tag: 'reference-broken' }] }
     ]
+  },
+  {
+    version: 5,
+    rules: [],
+    // Done never covered finished WARPS. A warp carries `stage`, a field, not a
+    // `done` tag — deliberately, since tags are user vocabulary and stage is the
+    // pipeline — so no rule could reach one and a Done-stage warp showed up
+    // undimmed and unfilterable. The `stage` condition kind closes that, and the
+    // shipped rule adopts it so finished work is one concept with one control.
+    patch: (flags) => {
+      const done = flags.find((f) => f.id === 'done')
+      if (!done) return // the user deleted it; never resurrect
+      for (const stage of ['done', 'not_needed'] as WarpStage[]) {
+        if (!done.conditions.some((c) => c.kind === 'stage' && c.stage === stage)) {
+          done.conditions.push({ kind: 'stage', stage })
+        }
+      }
+    }
   }
 ]
 
@@ -66,6 +92,13 @@ function migrateFlagDefaults(s: AppSettings): { settings: AppSettings; changed: 
     for (const rule of step.rules) {
       const exists = flags.some((f) => f.id === rule.id || f.name.trim().toLowerCase() === rule.name.toLowerCase())
       if (!exists) flags.push({ ...rule, conditions: rule.conditions.map((c) => ({ ...c })) })
+    }
+    // patches mutate copies, never the caller's rule objects
+    if (step.patch) {
+      const copies = flags.map((f) => ({ ...f, conditions: f.conditions.map((c) => ({ ...c })) }))
+      step.patch(copies)
+      flags.length = 0
+      flags.push(...copies)
     }
   }
   return { settings: { ...s, flags, flagsVersion: FLAGS_VERSION }, changed: true }
@@ -98,6 +131,8 @@ function sanitizeFlags(raw: unknown): FlagRule[] | null {
         const co = c as Record<string, unknown>
         if (co.kind === 'tag' && typeof co.tag === 'string' && co.tag.trim()) {
           conditions.push({ kind: 'tag', tag: co.tag.trim().toLowerCase() })
+        } else if (co.kind === 'stage' && typeof co.stage === 'string' && WARP_STAGES.includes(co.stage as WarpStage)) {
+          conditions.push({ kind: 'stage', stage: co.stage as WarpStage })
         } else if (co.kind === 'incoming-edge' && typeof co.edgeType === 'string' && EDGE_TYPES[co.edgeType as EdgeType]) {
           const cond: FlagCondition = { kind: 'incoming-edge', edgeType: co.edgeType as EdgeType }
           // optional source-type narrowing — unknown types drop back to "any source"

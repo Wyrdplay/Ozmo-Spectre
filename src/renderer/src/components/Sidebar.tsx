@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore, type View } from '@/store'
 import { rpc } from '@/api'
-import { Modal } from './widgets'
+import { Modal, useCopyFlash } from './widgets'
 import { warpStageOpen, type Project } from '@shared/types'
 import '../sidebar.css'
 
@@ -107,6 +107,13 @@ export function Sidebar(): React.JSX.Element {
     }
   }
 
+  // null until the main process reports in. Copying "http://127.0.0.1:—" is
+  // worse than not copying, so the buttons stay inert until there is an address.
+  const apiBase = info?.apiBase ?? (info?.port ? `http://127.0.0.1:${info.port}` : null)
+  const setExportScope = useStore((s) => s.setExportScope)
+  const { copied: apiCopied, copy: copyApi } = useCopyFlash()
+  const { copied: agentsCopied, copy: copyAgents } = useCopyFlash()
+
   const NAV: { key: View; label: string; badge?: number }[] = [
     { key: 'graph', label: 'Graph' },
     { key: 'lists', label: 'Lists' },
@@ -161,15 +168,49 @@ export function Sidebar(): React.JSX.Element {
         </button>
       ))}
 
+      <button
+        className="nav-item"
+        title="Export this project — or an area, a warp, a selection or a query — as one markdown document"
+        onClick={() => setExportScope('project')}
+      >
+        <span className="nav-icon" aria-hidden>⤓</span>
+        <span className="nav-label">Export…</span>
+      </button>
+
       <div className="sidebar-footer">
-        <div className="api-status" title={collapsed ? `API 127.0.0.1:${info?.port ?? '—'}` : undefined}>
+        <button
+          type="button"
+          className="api-status"
+          disabled={!apiBase}
+          title={apiBase
+            ? (collapsed ? `API ${apiBase} — click to copy` : `click to copy — ${apiBase}`)
+            : 'waiting for the API to report its address'}
+          onClick={() => apiBase && copyApi(apiBase)}
+        >
           <span className="api-dot" />
-          <span>API</span>
-          <code>127.0.0.1:{info?.port ?? '—'}</code>
-        </div>
-        <div className="agents-hint" style={{ paddingLeft: 13 }}>
-          agents: <code>GET /llms.txt</code>
-        </div>
+          {apiCopied ? (
+            <span className="copy-flash">copied ✓</span>
+          ) : (
+            <>
+              <span>API</span>
+              <code>127.0.0.1:{info?.port ?? '—'}</code>
+            </>
+          )}
+        </button>
+        <button
+          type="button"
+          className="agents-hint"
+          style={{ paddingLeft: 13 }}
+          disabled={!apiBase}
+          title={apiBase ? `click to copy — ${apiBase}/llms.txt` : 'waiting for the API to report its address'}
+          onClick={() => apiBase && copyAgents(`${apiBase}/llms.txt`)}
+        >
+          {agentsCopied ? (
+            <span className="copy-flash">copied ✓</span>
+          ) : (
+            <>agents: <code>GET /llms.txt</code></>
+          )}
+        </button>
       </div>
 
       <button

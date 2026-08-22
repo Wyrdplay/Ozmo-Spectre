@@ -3,7 +3,7 @@ import {
   WARP_STAGE_META, orderedNodeTypes, relStyle, typeStyle,
   type EdgeType, type EdgeTypeMeta, type FlagRule, type NodeType, type NodeTypeMeta, type SpecNode, type WarpStage
 } from '@shared/types'
-import { mutateSettings, useStore, type FilterSectionId } from '@/store'
+import { UNFLAGGED, UNTAGGED, mutateSettings, useStore, type FilterSectionId } from '@/store'
 
 // ---------------------------------------------------------------------------
 // Merged type/relationship styles — settings.styleOverrides applied over the
@@ -100,33 +100,52 @@ export function flagDecor(nodeFlags: string[] | undefined, rules: Map<string, Fl
 // The store keeps flagFilters as rule IDS (stable across renames); node.flags
 // carries rule NAMES — these helpers do the id→rule→name join against settings.
 
-/** Rule names actively filtered. null = flag filtering inactive (nothing
- *  selected, or every selected rule has since been deleted from settings). */
-export function activeFlagNames(flagFilters: string[], rules: FlagRule[] | undefined): Set<string> | null {
+/** Rule NAMES whose nodes are hidden, joined from the stored rule ids, plus the
+ *  UNFLAGGED bucket when unflagged nodes are hidden too. Empty = nothing hidden. */
+export function hiddenFlagNames(hiddenFlags: string[], rules: FlagRule[] | undefined): Set<string> {
   const names = new Set<string>()
-  for (const r of rules ?? []) if (flagFilters.includes(r.id)) names.add(r.name)
-  return names.size ? names : null
-}
-
-/** Names of actively-filtered dim-treatment rules — their matches un-dim. */
-export function undimFlagNames(flagFilters: string[], rules: FlagRule[] | undefined): Set<string> {
-  const names = new Set<string>()
-  for (const r of rules ?? []) if (r.treatment === 'dim' && flagFilters.includes(r.id)) names.add(r.name)
+  for (const r of rules ?? []) if (hiddenFlags.includes(r.id)) names.add(r.name)
+  if (hiddenFlags.includes(UNFLAGGED)) names.add(UNFLAGGED)
   return names
 }
 
-/** Union among selected flags: the node shows if it carries ANY active flag. */
-export function nodeMatchesFlagFilter(nodeFlags: string[] | undefined, active: Set<string> | null): boolean {
-  if (!active) return true
-  return (nodeFlags ?? []).some((f) => active.has(f))
+/** Dim-treatment rules whose matches should render at full strength: a dim rule
+ *  that is the ONLY flag bucket left visible. Soloing "Done" is a request to
+ *  READ the finished work, and dimming every node on an otherwise empty screen
+ *  serves nothing. Any other combination keeps dim meaning what it always did. */
+export function undimFlagNames(hiddenFlags: string[], rules: FlagRule[] | undefined): Set<string> {
+  const names = new Set<string>()
+  const buckets = [...(rules ?? []).map((r) => r.id), UNFLAGGED]
+  for (const r of rules ?? []) {
+    if (r.treatment !== 'dim' || hiddenFlags.includes(r.id)) continue
+    if (buckets.every((b) => b === r.id || hiddenFlags.includes(b))) names.add(r.name)
+  }
+  return names
 }
 
-/** Union among selected RAW tags — the flag filter's semantics, one level below
- *  it (flags are the curated face of tags; these are the vocabulary itself).
- *  null = tag filtering inactive. Intersects with every other lens. */
-export function nodeMatchesTagFilter(nodeTags: string[] | undefined, active: Set<string> | null): boolean {
-  if (!active) return true
-  return (nodeTags ?? []).some((t) => active.has(t))
+/**
+ * SUBTRACTIVE, like the type chips: a node is hidden when ANY bucket it belongs
+ * to is hidden. Carrying a visible flag does not rescue it — subtraction is the
+ * more specific instruction, and a node reappearing because it happens to also
+ * be Blocked is the surprising outcome, not the useful one.
+ *
+ * A node with no flags belongs to the UNFLAGGED bucket, so "hide everything
+ * except Done" can actually empty the screen.
+ */
+export function nodeMatchesFlagFilter(nodeFlags: string[] | undefined, hidden: Set<string>): boolean {
+  if (!hidden.size) return true
+  const flags = nodeFlags ?? []
+  if (!flags.length) return !hidden.has(UNFLAGGED)
+  return !flags.some((f) => hidden.has(f))
+}
+
+/** The same subtraction one level below the flags (flags are the curated face of
+ *  tags; these are the vocabulary itself). Untagged nodes are their own bucket. */
+export function nodeMatchesTagFilter(nodeTags: string[] | undefined, hidden: Set<string>): boolean {
+  if (!hidden.size) return true
+  const tags = nodeTags ?? []
+  if (!tags.length) return !hidden.has(UNTAGGED)
+  return !tags.some((t) => hidden.has(t))
 }
 
 /** Colorless (dim-treatment) rules light up in this neutral bright (--text). */
@@ -153,7 +172,7 @@ export function moveByIndex<T>(list: T[], from: number, to: number): T[] {
 export function FlagFilterChips({ reorderable }: { reorderable?: boolean }): React.JSX.Element | null {
   const rules = useStore((s) => s.settings?.flags)
   const nodes = useStore((s) => s.graph.nodes)
-  const flagFilters = useStore((s) => s.flagFilters)
+  const hiddenFlags = useStore((s) => s.hiddenFlags)
   const toggleFlagFilter = useStore((s) => s.toggleFlagFilter)
   const soloFlagFilter = useStore((s) => s.soloFlagFilter)
   const [dragId, setDragId] = useState<string | null>(null)
@@ -161,6 +180,7 @@ export function FlagFilterChips({ reorderable }: { reorderable?: boolean }): Rea
   const counts = useMemo(() => {
     const c = new Map<string, number>()
     for (const n of nodes) for (const f of n.flags ?? []) c.set(f, (c.get(f) ?? 0) + 1)
+    c.set(UNFLAGGED, nodes.filter((n) => !(n.flags ?? []).length).length)
     return c
   }, [nodes])
   if (!rules?.length) return null
@@ -186,8 +206,8 @@ export function FlagFilterChips({ reorderable }: { reorderable?: boolean }): Rea
     >
       {rules.map((r, i) => {
         const count = counts.get(r.name) ?? 0
-        const active = flagFilters.includes(r.id)
-        const inert = count === 0 && !active
+        const hidden = hiddenFlags.includes(r.id)
+        const inert = count === 0 && !hidden
         const c = r.color ?? FLAG_FILTER_NEUTRAL
         return (
           <button
@@ -195,16 +215,12 @@ export function FlagFilterChips({ reorderable }: { reorderable?: boolean }): Rea
             className={[
               'filter-chip',
               inert ? 'off inert' : '',
-              active ? 'on' : '',
+              hidden ? 'off' : '',
               dragId === r.id ? 'dragging' : '',
               dragId && dropIdx === i ? 'drop-left' : '',
               dragId && i === rules.length - 1 && dropIdx === rules.length ? 'drop-right' : ''
             ].filter(Boolean).join(' ')}
-            style={inert ? undefined : {
-              color: c,
-              background: c + (active ? '30' : '1a'),
-              boxShadow: active ? `inset 0 0 0 1px ${c}66` : undefined
-            }}
+            style={inert ? undefined : { color: c, background: c + '1a' }}
             draggable={canDrag}
             onDragStart={(e) => {
               if (!canDrag) return
@@ -223,12 +239,30 @@ export function FlagFilterChips({ reorderable }: { reorderable?: boolean }): Rea
               if (e.ctrlKey || e.metaKey) soloFlagFilter(r.id)
               else toggleFlagFilter(r.id)
             }}
-            title={`filter by ${r.name} flag (ctrl-click to solo${canDrag ? ' · drag to reorder' : ''})`}
+            title={`${hidden ? 'show' : 'hide'} ${r.name} nodes (ctrl-click to show only these${canDrag ? ' · drag to reorder' : ''})`}
           >
             {r.name} {count ? `· ${count}` : ''}
           </button>
         )
       })}
+      {/* the absence is a bucket too, or "show only Done" would quietly leave every
+          unflagged node on screen — and hiding it is the fastest way to see just
+          the nodes the flag rules have something to say about */}
+      {(() => {
+        const count = counts.get(UNFLAGGED) ?? 0
+        const hidden = hiddenFlags.includes(UNFLAGGED)
+        if (!count && !hidden) return null
+        return (
+          <button
+            className={['filter-chip', hidden ? 'off' : ''].filter(Boolean).join(' ')}
+            style={{ color: FLAG_FILTER_NEUTRAL, background: FLAG_FILTER_NEUTRAL + '1a' }}
+            onClick={(e) => (e.ctrlKey || e.metaKey ? soloFlagFilter(UNFLAGGED) : toggleFlagFilter(UNFLAGGED))}
+            title={`${hidden ? 'show' : 'hide'} nodes carrying no flag (ctrl-click to show only these)`}
+          >
+            unflagged {count ? `· ${count}` : ''}
+          </button>
+        )
+      })()}
     </span>
   )
 }
@@ -248,7 +282,7 @@ export const TAG_CHIP_CAP = 20
  */
 export function TagFilterChips(): React.JSX.Element | null {
   const nodes = useStore((s) => s.graph.nodes)
-  const tagFilters = useStore((s) => s.tagFilters)
+  const hiddenTags = useStore((s) => s.hiddenTags)
   const toggleTagFilter = useStore((s) => s.toggleTagFilter)
   const soloTagFilter = useStore((s) => s.soloTagFilter)
   const [expanded, setExpanded] = useState(false)
@@ -263,24 +297,37 @@ export function TagFilterChips(): React.JSX.Element | null {
 
   const head = expanded ? ranked : ranked.slice(0, TAG_CHIP_CAP)
   const tail = expanded ? [] : ranked.slice(TAG_CHIP_CAP)
-  const shown = [...head, ...tail.filter((r) => tagFilters.includes(r.tag))]
-  const buried = tail.filter((r) => !tagFilters.includes(r.tag)).length
+  // a HIDDEN tag always renders even past the cap: a filter you cannot see is a
+  // filter you cannot switch off, and now that hiding empties the view it matters more
+  const shown = [...head, ...tail.filter((r) => hiddenTags.includes(r.tag))]
+  const buried = tail.filter((r) => !hiddenTags.includes(r.tag)).length
+  const untagged = nodes.filter((n) => !(n.tags ?? []).length).length
+  const untaggedHidden = hiddenTags.includes(UNTAGGED)
 
   return (
     <span className="tag-filter-chips">
       {shown.map(({ tag, count }) => {
-        const active = tagFilters.includes(tag)
+        const hidden = hiddenTags.includes(tag)
         return (
           <button
             key={tag}
-            className={`filter-chip tag ${active ? 'on' : ''}`}
+            className={`filter-chip tag ${hidden ? 'off' : ''}`}
             onClick={(e) => (e.ctrlKey || e.metaKey ? soloTagFilter(tag) : toggleTagFilter(tag))}
-            title={`filter by the "${tag}" tag (ctrl-click to solo)`}
+            title={`${hidden ? 'show' : 'hide'} nodes tagged "${tag}" (ctrl-click to show only these)`}
           >
             {tag} · {count}
           </button>
         )
       })}
+      {(untagged > 0 || untaggedHidden) && (
+        <button
+          className={`filter-chip tag ${untaggedHidden ? 'off' : ''}`}
+          onClick={(e) => (e.ctrlKey || e.metaKey ? soloTagFilter(UNTAGGED) : toggleTagFilter(UNTAGGED))}
+          title={`${untaggedHidden ? 'show' : 'hide'} nodes carrying no tag (ctrl-click to show only these)`}
+        >
+          untagged · {untagged}
+        </button>
+      )}
       {buried > 0 && (
         <button className="filter-chip more" title={`show the remaining ${buried} tags`} onClick={() => setExpanded(true)}>
           +{buried} more…

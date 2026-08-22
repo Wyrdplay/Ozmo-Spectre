@@ -11,6 +11,7 @@ import { SettingsView } from './components/SettingsView'
 import { Inspector } from './components/Inspector'
 import { QuickAdd } from './components/QuickAdd'
 import { Palette } from './components/Palette'
+import { ExportDialog } from './components/ExportDialog'
 import { Toasts } from './components/widgets'
 import { inTextField, matches } from './lib/shortcuts'
 
@@ -20,6 +21,8 @@ export default function App(): React.JSX.Element {
   const selection = useStore((s) => s.selection)
   const quickAdd = useStore((s) => s.quickAdd)
   const palette = useStore((s) => s.palette)
+  const exportScope = useStore((s) => s.exportScope)
+  const setExportScope = useStore((s) => s.setExportScope)
   const setPalette = useStore((s) => s.setPalette)
   const showQuickAdd = useStore((s) => s.showQuickAdd)
 
@@ -64,6 +67,7 @@ export default function App(): React.JSX.Element {
       {showInspector && <Inspector />}
       {quickAdd.open && <QuickAdd />}
       {palette && <Palette />}
+      {exportScope && <ExportDialog initialScope={exportScope} onClose={() => setExportScope(null)} />}
       <Toasts />
     </div>
   )

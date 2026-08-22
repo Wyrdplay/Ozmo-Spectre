@@ -1,4 +1,5 @@
 import * as svc from './services'
+import { buildDocument } from './document'
 import { getSettings, updateSettings } from './settings'
 import { emitEvent } from './events'
 import type { AppInfo } from '@shared/types'
@@ -80,6 +81,10 @@ export const registry: Record<string, Handler> = {
   'backlog.list': (p) => svc.listBacklog(p),
 
   'scope.get': (p) => svc.getScope(p),
+
+  // the whole graph, a container, a selection or a query — flattened into ONE
+  // markdown document. One generator; IPC, REST and the vault write all adapt to it.
+  'document.build': (p) => buildDocument(p as never),
   'impact.get': (p) => svc.getImpact(p),
 
   // reviews are NODES now — nodes.create type review, nodes.waive, nodes.pass,

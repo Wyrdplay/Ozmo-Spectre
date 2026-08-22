@@ -17,6 +17,14 @@ export const isResolved = (n: SpecNode): boolean =>
  *  the increment contains, which is what the coverage requirement runs over. */
 const COVERAGE_EXEMPT = new Set<string>(['feedback', 'action'])
 
+/** Types a warp member can be FINISHED at — mirrors COMPLETABLE_TYPES in
+ *  services.ts (keep the two in step). Standing types (pillar, principle, area)
+ *  never "done", and feedback already carries its own DESIGNATION requirement —
+ *  never put it in two requirements. */
+const COMPLETABLE_TYPES = new Set<string>(
+  ['feature', 'instance', 'component', 'bug', 'question', 'idea', 'action', 'threat', 'flaw', 'warp']
+)
+
 export interface PendingAction {
   node: SpecNode
   from: SpecNode[]
@@ -32,6 +40,9 @@ export interface ClosureOffenders {
   pendingActions: PendingAction[]
   /** UNRESOLVED nodes holding a live blocks relationship into the warp */
   blockers: SpecNode[]
+  /** completable members that are neither resolved nor already named as a
+   *  pending action or a blocker */
+  incomplete: SpecNode[]
 }
 
 export interface Closure {
@@ -41,6 +52,8 @@ export interface Closure {
   openFeedback: SpecNode[]
   /** the increment: member work, coverage's denominator */
   work: SpecNode[]
+  /** every completable member of the warp — completion's denominator */
+  completable: SpecNode[]
   /** work member id → the feedback about it (the coverage indicator's source) */
   coverageOf: Map<string, SpecNode[]>
   offenders: ClosureOffenders
@@ -51,13 +64,15 @@ export interface Closure {
 
 /**
  * fully_actioned(warp), mirrored from the server (see warpClosure in
- * services.ts — keep the two in step). Four requirements:
- *   coverage · designation · disposition · blocks.
+ * services.ts — keep the two in step). Five requirements:
+ *   coverage · designation · disposition · blocks · completion.
  */
 export function computeClosure(graph: GraphPayload, warpId: string): Closure {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
   const feedback: SpecNode[] = []
   const work: SpecNode[] = []
+  /** every member of the warp, whatever its type — completion's denominator */
+  const members: SpecNode[] = []
   const derivesOut = new Map<string, string[]>()
   const coverageOf = new Map<string, SpecNode[]>()
   const blockers: SpecNode[] = []
@@ -74,6 +89,7 @@ export function computeClosure(graph: GraphPayload, warpId: string): Closure {
       const src = byId.get(r.sourceId)
       if (r.type === 'member') {
         if (r.targetId === warpId) {
+          if (src) members.push(src)
           if (src?.type === 'feedback') feedback.push(src)
           else if (src && !COVERAGE_EXEMPT.has(src.type)) work.push(src)
         }
@@ -98,7 +114,7 @@ export function computeClosure(graph: GraphPayload, warpId: string): Closure {
     }
   }
 
-  const offenders: ClosureOffenders = { uncovered: [], undesignated: [], pendingActions: [], blockers: [] }
+  const offenders: ClosureOffenders = { uncovered: [], undesignated: [], pendingActions: [], blockers: [], incomplete: [] }
   for (const m of work) if (!coverageOf.get(m.id)?.length) offenders.uncovered.push(m)
 
   const pendingBy = new Map<string, SpecNode[]>()
@@ -123,13 +139,26 @@ export function computeClosure(graph: GraphPayload, warpId: string): Closure {
   }
   for (const b of blockers) if (!pendingBy.has(b.id)) offenders.blockers.push(b)
 
+  const completable = members.filter((m) => COMPLETABLE_TYPES.has(m.type))
+  const pendingActionIds = new Set(offenders.pendingActions.map((p) => p.node.id))
+  const blockerIds = new Set(offenders.blockers.map((b) => b.id))
+  for (const m of completable) {
+    if (isResolved(m)) continue
+    // name each offending node once — a node already named as a pending action
+    // or a blocker must not also appear in `incomplete`
+    if (pendingActionIds.has(m.id) || blockerIds.has(m.id)) continue
+    offenders.incomplete.push(m)
+  }
+
   const open = offenders.uncovered.length + offenders.undesignated.length +
-    offenders.pendingActions.length + offenders.blockers.length
-  const total = work.length + feedback.length + offenders.pendingActions.length + offenders.blockers.length
+    offenders.pendingActions.length + offenders.blockers.length + offenders.incomplete.length
+  const total = work.length + feedback.length + offenders.pendingActions.length + offenders.blockers.length +
+    completable.length
   return {
     feedback,
     openFeedback: feedback.filter((f) => !isResolved(f)),
     work,
+    completable,
     coverageOf,
     offenders,
     fullyActioned: open === 0,
