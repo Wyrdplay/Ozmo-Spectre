@@ -5,8 +5,29 @@ import {
 } from '@shared/types'
 import { useStore } from '@/store'
 import { rpc } from '@/api'
-import { FlagChips, Modal, ProgressBar, TypeDot, flagDecor, flagRowStyle, useFlagRules, useTypeStyles } from './widgets'
+import { FlagChips, Modal, ProgressBar, TypeDot, flagDecor, flagRowStyle, useCopyFlash, useFlagRules, useTypeStyles } from './widgets'
 import { buildSweepPrompt, computeClosure } from '@/lib/review'
+
+/**
+ * Copy every warp id in one stage column, newline-separated.
+ *
+ * The board is where a human decides "these are the ones"; an agent then needs
+ * them as a list it can loop over. Same gesture as the IdChip everywhere else —
+ * click, flash, done (faykarta: "copy the ids of all Warps in a stage").
+ */
+function StageIds({ warps }: { warps: WarpSummary[] }): React.JSX.Element {
+  const { copied, copy } = useCopyFlash()
+  return (
+    <button
+      className={`id-chip ${copied ? 'copied' : ''}`}
+      style={{ marginLeft: 'auto' }}
+      title={`click to copy ${warps.length} warp id${warps.length === 1 ? '' : 's'} — one per line`}
+      onClick={(e) => { e.stopPropagation(); copy(warps.map((w) => w.warp.id).join('\n')) }}
+    >
+      {copied ? 'copied ✓' : '⧉ ids'}
+    </button>
+  )
+}
 
 /**
  * The Warps page: ONE board, a column per stage, every warp a card.
@@ -155,6 +176,7 @@ export function WarpsView(): React.JSX.Element {
               >
                 <div className="board-col-head" style={{ color: meta.color }}>
                   {meta.label} <span className="badge">{byStage[stage].length}</span>
+                  {byStage[stage].length > 0 && <StageIds warps={byStage[stage]} />}
                 </div>
                 <div className="board-col-body">
                   {byStage[stage].map((w) => {

@@ -32,7 +32,7 @@ function createWindow(): void {
     minHeight: 680,
     backgroundColor: '#0b0e14',
     autoHideMenuBar: true,
-    title: 'Ozmo Spec Engine',
+    title: 'Ozmo Spectre',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,

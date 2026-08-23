@@ -2,11 +2,11 @@ import { create } from 'zustand'
 import {
   edgeRelationships,
   type AppInfo, type AppSettings, type Project, type GraphPayload, type SpecNode, type WarpSummary,
-  type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule
+  type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule, type SkillsPayload
 } from '@shared/types'
-import { rpc } from './api'
+import { RpcError, rpc } from './api'
 
-export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'activity' | 'settings'
+export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'agentic' | 'activity' | 'settings'
 
 /** THE selection — one model for single, multi and edge selection.
  *  Nodes: `ids` in selection order, `anchor` = the reference row for range
@@ -35,6 +35,7 @@ export interface Toast {
 
 let toastSeq = 1
 let graphRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 // canvas container-collapse is per-machine UI state, persisted per project.
 // A CONTAINER is a class (node with class-of instances) or an area (member
@@ -188,6 +189,15 @@ interface OzmoState {
   backlog: SpecNode[]
   warps: WarpSummary[]
   activity: ActivityEntry[]
+  /** the Agentic page's whole payload: skill/prompt rows × install targets ×
+   *  drift, plus the raw disk scan. NOT project-scoped — like the commons, this
+   *  is a query across every project, so it does not reset on project switch. */
+  skills: SkillsPayload | null
+  skillsLoading: boolean
+  /** the running main process has no `skills.*` methods (a build older than the
+   *  feature). Distinct from "the call failed": the page says so plainly and
+   *  offers a retry instead of pretending the fleet has no skills. */
+  skillsUnavailable: boolean
   selection: Selection | null
   /** live canvas positions of the selected nodes (2+ selections), published by GraphView so
    *  the multi panel can place a linked node at the selection centroid */
@@ -243,6 +253,10 @@ interface OzmoState {
   refreshBacklog: () => Promise<void>
   refreshWarps: () => Promise<void>
   refreshActivity: () => Promise<void>
+  /** rescan skills + targets (cross-project) — safe to call when the endpoint is missing */
+  refreshSkills: () => Promise<void>
+  /** coalesced rescan, for bursts of skill and node events */
+  refreshSkillsSoon: () => void
   select: (sel: Selection | null) => void
   /** plain click: selection of exactly this node */
   selectNode: (id: string) => void
@@ -294,7 +308,7 @@ export const UNFLAGGED = '\u0000unflagged'
 
 const ALL_TYPES: Record<NodeType, boolean> = {
   idea: true, pillar: true, principle: true, feature: true, instance: true, component: true, bug: true, question: true, warp: true, area: true, action: true,
-  feedback: true, threat: true, flaw: true
+  feedback: true, threat: true, flaw: true, skill: true
 }
 
 const ALL_RELS: Record<EdgeType, boolean> = {
@@ -313,6 +327,9 @@ export const useStore = create<OzmoState>((set, get) => ({
   backlog: [],
   warps: [],
   activity: [],
+  skills: null,
+  skillsLoading: false,
+  skillsUnavailable: false,
   selection: null,
   selectionPositions: {},
   detailVersion: 0,
@@ -372,6 +389,7 @@ export const useStore = create<OzmoState>((set, get) => ({
     if (v === 'backlog') get().refreshBacklog()
     if (v === 'warps') get().refreshWarps()
     if (v === 'reviews') get().refreshGraph() // the lens reads review-stage warps + feedback straight from the graph
+    if (v === 'agentic') get().refreshSkills()
   },
 
   refreshProjects: async () => {
@@ -460,6 +478,35 @@ export const useStore = create<OzmoState>((set, get) => ({
     try {
       set({ activity: await rpc<ActivityEntry[]>('activity.list', { projectId, limit: 200 }) })
     } catch { /* ignore */ }
+  },
+
+  // The skills scan is a disk walk across every declared target, so it is NOT
+  // free — it runs when the page is opened, when a skill event says something
+  // moved, and when the page asks. It never runs on boot.
+  refreshSkills: async () => {
+    // the scan walks every declared root — mounting the page and setView both
+    // ask for it, so an in-flight scan absorbs the duplicate rather than
+    // walking sixteen repos twice
+    if (get().skillsLoading) return
+    set({ skillsLoading: true })
+    try {
+      const skills = await rpc<SkillsPayload>('skills.list')
+      set({ skills, skillsUnavailable: false, skillsLoading: false })
+    } catch (e) {
+      // a main process older than the feature answers 404 "unknown method" —
+      // that is a stale build, not a broken page, and the view says exactly that
+      const missing = e instanceof RpcError && (e.status === 404 || /unknown method/i.test(e.message))
+      set({ skillsLoading: false, skillsUnavailable: missing })
+      if (!missing) get().toast(`skills scan failed: ${e instanceof Error ? e.message : e}`)
+    }
+  },
+
+  refreshSkillsSoon: () => {
+    if (skillsRefreshTimer) return
+    skillsRefreshTimer = setTimeout(() => {
+      skillsRefreshTimer = null
+      if (get().view === 'agentic' && !get().skillsUnavailable) void get().refreshSkills()
+    }, 150)
   },
 
   select: (sel) => set({ selection: sel }),
@@ -629,6 +676,13 @@ export const useStore = create<OzmoState>((set, get) => ({
       s.refreshGraphSoon()
       return
     }
+    // skill.installed / skill.adopted / skill.target.* — the Agentic page is a
+    // CROSS-PROJECT query, so these are handled above the project gate: an
+    // install into another project's skill still changes this table.
+    if (evt.type.startsWith('skill.')) {
+      s.refreshSkillsSoon()
+      return
+    }
     if (evt.type.startsWith('project.')) {
       s.refreshProjects()
       if (evt.type === 'project.created' && evt.actor !== 'seed') return
@@ -670,6 +724,9 @@ export const useStore = create<OzmoState>((set, get) => ({
 
     if (/^(node|edge|annotation)\./.test(evt.type)) {
       s.refreshGraphSoon()
+      // a skill node's body/frontmatter changing moves its drift from clean to
+      // ahead, so the matrix has to hear about node edits too
+      if (s.view === 'agentic') s.refreshSkillsSoon()
       set((st) => ({ detailVersion: st.detailVersion + 1 }))
       if (evt.type === 'node.deleted') {
         const gone = (evt.data as { id?: string })?.id

@@ -39,6 +39,14 @@ const ICONS: Record<View, React.JSX.Element> = {
       <path d="M8.5 11h7M8.5 14.5h4.5" />
     </svg>
   ),
+  // the matrix itself: rows of skills against columns of targets, one cell lit
+  agentic: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
+      <path d="M9.5 3.5v17M15 3.5v17M3.5 9.5h17M3.5 15h17" strokeOpacity="0.4" strokeWidth="1.4" />
+      <rect x="15.4" y="9.9" width="4.2" height="4.2" fill="currentColor" stroke="none" />
+    </svg>
+  ),
   activity: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M3 12h4l2.5-6.5L14 18l2.5-6H21" />
@@ -61,6 +69,7 @@ export function Sidebar(): React.JSX.Element {
   const info = useStore((s) => s.info)
   const graphNodes = useStore((s) => s.graph.nodes)
   const warps = useStore((s) => s.warps)
+  const skills = useStore((s) => s.skills)
   const toast = useStore((s) => s.toast)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -92,6 +101,15 @@ export function Sidebar(): React.JSX.Element {
 
   // the review lens badge: warps currently at the Review stage
   const openReviewCount = graphNodes.filter((n) => n.type === 'warp' && n.stage === 'review').length
+  // the Agentic badge counts FILES OUT OF STEP — a target behind its node, or a
+  // copy someone hand-edited. It stays absent until the page has scanned once:
+  // the scan is a disk walk across every declared root and boot must not pay for it.
+  const driftedCount = skills
+    ? skills.rows.reduce(
+      (n, r) => n + Object.values(r.drift ?? {}).filter((d) => d === 'ahead' || d === 'modified').length,
+      0
+    )
+    : 0
   const liveWarpCount = warps.filter((w) => warpStageOpen(w.warp.stage)).length
 
   const createProject = async (): Promise<void> => {
@@ -120,6 +138,7 @@ export function Sidebar(): React.JSX.Element {
     { key: 'backlog', label: 'Backlog' },
     { key: 'warps', label: 'Warps', badge: liveWarpCount },
     { key: 'reviews', label: 'Reviews', badge: openReviewCount },
+    { key: 'agentic', label: 'Agentic', badge: driftedCount },
     { key: 'activity', label: 'Activity' },
     { key: 'settings', label: 'Settings' }
   ]
@@ -135,7 +154,7 @@ export function Sidebar(): React.JSX.Element {
           <circle cx="17.6" cy="15.2" r="1.5" fill="#c084fc" />
         </svg>
         <div>
-          Spec Engine
+          Spectre
           <span className="sub">human + agent canvas</span>
         </div>
       </div>

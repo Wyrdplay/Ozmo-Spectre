@@ -1,5 +1,5 @@
 export function llmsTxt(base: string): string {
-  return `# Ozmo Spec Engine — Agent Guide
+  return `# Ozmo Spectre — The Agentic Human Canvas · Agent Guide
 
 You are talking to a running desktop app where a human shapes software specs on a canvas.
 You have exactly the same powers they do. Base URL: ${base}
@@ -20,7 +20,9 @@ Node types and what they mean:
 - feature    — buildable capability with a design spec; has progress 0-100
 - instance   — one of many kinds in a class (a rune type, a seal, an element): a catalog entry
                with its own spec + progress 0-100. Usually created with linkTo class-of — the
-               default link for a new instance beside any non-warp node IS class-of (see below)
+               default link for a new instance is class-of, but ONLY beside a node that is
+               neither a warp NOR an area: the container rules run first, so an instance created
+               beside an area MEMBERS that area instead of being classified by it (see below)
 - component  — a ONE-OF-ONE part that does a defined job (the damage resolver, the save system):
                the architecture layer, perpendicular to instances' one-of-many. Its spec IS the
                job definition; progress 0-100. Features link to the components that realize them
@@ -44,6 +46,13 @@ Node types and what they mean:
 - warp       — a deliverable: grouped work around goals (sprint-like). Warps carry a \`stage\` —
                the increment pipeline: concept|design|implement|test|review|ship|done|not_needed.
                Stage is warp-only (PATCHing it on other types is a 400). done/not_needed close the warp.
+- skill      — a STANDING INSTRUCTION agents follow: how a kind of work gets done here (the
+               review checklist, the commit convention, the release drill). Authored as a node,
+               INSTALLED as \`.claude/skills/<slug>/SKILL.md\` in one or more repos. Carries
+               \`slug\` (the kebab identity that names the installed directory — a FIELD, so a
+               retitle never orphans the installs), \`description\` (the ONLY thing a model
+               matches on to decide the skill is relevant) and \`skillOptions\`. A PROMPT is the
+               same type with \`disable-model-invocation: true\` — one type, not two. See § Skills
 - area       — a stable grouping of features in SPACE: product geography (Combat, Economy, the
                Editor). Belonging is the same \`member\` verb warps use — warps group in time,
                areas in space, and one node can be in both at once. Areas roll progress up from
@@ -67,6 +76,17 @@ or extend an occupied one (this table is the test):
   JUDGMENT  feedback                     observations about built reality, digesting into actions
                                          on the spec while the warp sits in Review
   CHANGE    actions                      transient instructions that update the spec, then vanish
+  METHOD    skills                       how the work itself is done — standing instructions that
+                                         PERSIST and are installed into repos for agents to follow
+
+METHOD vs CHANGE vs HOW — the three that get confused:
+  action (CHANGE)  a TRANSIENT instruction about the product: "update the retry spec". Executing
+                   it makes it meaningless, so completing it REMOVES the node.
+  skill  (METHOD)  a STANDING instruction about the practice: "this is how we review". It is
+                   never completed — it is edited, versioned and re-installed. It describes the
+                   work, not the product, so it is in no backlog and no ship gate.
+  component (HOW)  a one-of-one part OF THE PRODUCT. A skill is not part of what you are
+                   building; it is part of how you build it.
 
 The HEALTH resolution table — four kinds of wrong, four different fixes:
 
@@ -90,7 +110,10 @@ PLACEMENT — file things where they belong (decide by what the thing IS):
   a plan endangered by uncertainty     → threat      (link it blocks→ the plan)
   an unknown needing an answer         → question
   an observation about built work      → feedback    (member it on the node under review)
-  an instruction to change the spec    → action
+  an instruction to change the spec    → action      (transient: completing it removes it)
+  a standing instruction for agents    → skill       (permanent: how the work is done; installs
+                                                      to .claude/skills — a prompt is one of these
+                                                      with disable-model-invocation)
   none of the above yet                → idea (seeds convert later — POST /convert)
 
 Conventions (recognized, NEVER enforced — keep the graph honest, not policed):
@@ -130,6 +153,9 @@ neighbours shows what it changed). Choose the verb:
                                                            waives it. {warpId?, body?, title?}
 - prune     (POST /api/nodes/:id/prune, any non-warp)    — the record is dead; node kept, dimmed, with the why
 - delete    (DELETE /api/nodes/:id)                      — it should never have existed (mistakes, noise)
+Skills are NEITHER instruction nor record: a standing instruction has no terminal verb at all.
+It is edited and re-installed while the practice lives, and UNINSTALLED from the repos when it
+stops (then pruned like anything else if the practice is retired outright). Do not "complete" one.
 
 State is TAGS, not a status enum. There is no \`status\` field on nodes — sending one on
 create/PATCH, or filtering \`?status=\`, is a 400 (this is the migration note: if you used
@@ -162,6 +188,10 @@ paydown candidates (typical shape: the debt-tagged node derives an action that p
 same tag). "Threatened" → amber ring, incoming \`blocks\` from sourceType \`threat\` — a
 threat-blocked plan rings BOTH red and amber (Blocked stays type-agnostic on purpose); a
 bug-blocked one stays plain Blocked.
+"Reference broken" → red ring, tag \`reference-broken\` — the SIXTH shipped rule: a reference
+whose owner unshared or deleted the node it pointed at. The text and every local link survived
+(see SEVERANCE below), so this is a state to ACKNOWLEDGE — adopt the orphan, repoint it, or
+prune it — not a failure to repair.
 Every node in the graph payload carries computed \`flags: ["Done","Blocked",...]\` (rule names,
 rule order) — you see exactly the highlights the human sees. The rule with id "done" DEFINES
 done-ness (progress fallback below); done OR pruned defines RESOLUTION: backlog exclusion and
@@ -280,11 +310,43 @@ Projects         GET|POST /api/projects              POST {"name","description?"
                  GET|PATCH|DELETE /api/projects/:id  PATCH {"name?","description?"}
 Whole graph      GET  /api/projects/:id/graph        — {nodes:[],edges:[]}; nodes carry progressComputed
                                                        and flags (computed highlight-rule names)
+                                                     NOT ONLY THIS PROJECT'S NODES. The payload also
+                                                     carries FOREIGN nodes — the far endpoints of
+                                                     cross-project connections (references, forks,
+                                                     referrals) — appended after the local ones, plus
+                                                     the edges that reach them. They are there so the
+                                                     canvas has something to attach a cross-project
+                                                     line to; they are NOT this project's graph.
+                                                     FILTER ON \`projectId\` before you count, sweep,
+                                                     export or mutate anything from this payload:
+                                                     nodes.filter(n => n.projectId === PROJ). Every
+                                                     other read (nodes.list, backlog, scope, document)
+                                                     is already project-scoped — the graph is the one
+                                                     that is not.
 Activity         GET  /api/projects/:id/activity?limit=100&since=<epoch ms>  — since: only entries after T;
                                                        edge.created/deleted carry the connection endpoints (deleted
                                                        also lists the relationships it carried); edge.relationship.
                                                        added/updated/removed carry {type,sourceId,targetId}
-Search           GET  /api/search?projectId=<id>&q=<text>   — titles, tags, and spec content
+Search           GET  /api/search?projectId=<id>&q=<text>   — titles, tags, and spec content.
+                                                     TWO LISTS, not one, and both are CAPPED SILENTLY:
+                                                     { nodes: [ ...full SpecNode rows whose TITLE or a
+                                                                TAG contains q — at most 50 ],
+                                                       contentMatches: [ {nodeId, title, type, snippet}
+                                                                — the BODY contains q; snippet is ±60
+                                                                chars around the first hit, whitespace
+                                                                collapsed, elided with … — at most 30 ] }
+                                                     Matching is substring, case-insensitive, NOT fuzzy
+                                                     and NOT tokenised: "hot reload" never matches
+                                                     "Reload, hot". A node can appear in BOTH lists.
+                                                     THE CAPS ARE HARD AND UNSIGNALLED — no total, no
+                                                     \`truncated\` flag, no paging: exactly 50 nodes back
+                                                     means you are probably looking at a truncated
+                                                     answer, so narrow q rather than concluding
+                                                     anything from the count. \`q\` is required (400
+                                                     without it). Need completeness instead of a
+                                                     search? GET /nodes?type=&tag=&q= (uncapped —
+                                                     but q is a TITLE substring only, and tag is an
+                                                     exact match) or the document export.
 
 Nodes            GET  /api/projects/:id/nodes?type=&tag=&q=&unassigned=1
                                                      unassigned=1 — in NO container at all (no outgoing
@@ -292,11 +354,22 @@ Nodes            GET  /api/projects/:id/nodes?type=&tag=&q=&unassigned=1
                                                      node) and not resolved. With type=feedback this IS
                                                      the review lens's triage inbox, in one call.
                  POST /api/projects/:id/nodes        {"type","title","stage?","tags?","content?","progress?","x?","y?",
+                                                      "pinned?","slug?","description?","skillOptions?",
                                                       "linkTo?":[{"nodeId","type?","outgoing?"}]}  — create pre-linked, see recipe
                                                      stage is warp-only (defaults to "concept"); no status field exists
+                                                     pinned:true parks the node where x/y put it instead of letting the
+                                                     force layout move it — the same pin Ctrl+P toggles. Pin a node you
+                                                     placed deliberately; leave it out and the layout decides.
+                                                     slug/description/skillOptions are SKILL fields (§ Skills): slug
+                                                     defaults from the title, is validated not sanitised (400), and is
+                                                     unique per project among skills (409)
                  GET  /api/nodes/:id                 — full detail: content, annotations, edges, flags
-                 PATCH /api/nodes/:id                {"title?","stage?","progress?","rank?","tags?","x?","y?","pinned?"}
+                 PATCH /api/nodes/:id                {"title?","stage?","progress?","rank?","tags?","x?","y?","pinned?",
+                                                      "slug?","description?","skillOptions?"}
                                                      tags REPLACE the node's tag set — send the full array
+                                                     slug/description/skillOptions: skills only (§ Skills). Retitling
+                                                     NEVER moves the slug — the installs would orphan — so rename the
+                                                     directory deliberately by PATCHing slug, and reinstall.
                                                      stage: warps only — concept|design|implement|test|review|ship|done|not_needed
                  DELETE /api/nodes/:id               — file goes to vault trash, never destroyed
 Spec content     PUT  /api/nodes/:id/content         {"content":"markdown"}   (GET also available)
@@ -483,10 +556,25 @@ Areas            no dedicated routes — areas are plain nodes. Membership is th
                  POST /api/projects/:id/edges {"sourceId":"NODE","targetId":"AREA","type":"member"}
                  (remove: DELETE /api/edges/:connId/relationships/member). Load a whole district
                  in one call with GET /api/nodes/AREA_ID/scope (above).
-Backlog          GET  /api/projects/:id/backlog      — unassigned work: features/instances/components/bugs/
-                                                       questions/ideas in no WARP and not matching the Done rule,
-                                                       ordered by rank — plus warps whose stage is not done/
-                                                       not_needed. AREA membership hides nothing (geography ≠
+Backlog          GET  /api/projects/:id/backlog      — unassigned work, ordered by rank (nulls last, then
+                                                       updatedAt DESC). NINE types rank here — features,
+                                                       instances, components, bugs, questions, ideas,
+                                                       ACTIONS, THREATS and FLAWS — when they are in no
+                                                       WARP and are UNRESOLVED, where unresolved means
+                                                       matching NEITHER the Done rule NOR the Pruned rule
+                                                       (resolution is done ∪ pruned everywhere in this API;
+                                                       a pruned bug leaves the backlog exactly like a fixed
+                                                       one). Plus warps, by a different test entirely: a
+                                                       warp is backlog until its STAGE is done/not_needed —
+                                                       tags and warp membership never apply to warps.
+                                                       NOT here: feedback (review material, not scheduled
+                                                       work — the lens inbox collects it), pillars,
+                                                       principles, areas, skills (standing instructions
+                                                       are never "done"), and REFERENCES — a reference to
+                                                       another project's node is filtered out whatever its
+                                                       type, because it cannot be finished here. Schedule
+                                                       around one with a LOCAL node that \`depends\` on it.
+                                                       AREA membership hides nothing (geography ≠
                                                        scheduling); areas themselves never rank here.
 Scope            GET  /api/nodes/:id/scope?since=&content=1
                                                      — ONE DISTRICT AS ONE PAYLOAD, the context-budget
@@ -575,8 +663,139 @@ Reviews          no dedicated CRUD — the Review STAGE is the review (old /api/
                         lists in the room (lower first, fractional values insert between neighbours)
                  Close: PATCH the warp {"stage":"ship"} — the gate 409s until fully actioned
 
+Skills           GET  /api/skills?projectId=<id>     — THE WHOLE PICTURE IN ONE CALL. projectId is
+                                                       OPTIONAL: omit it and this is a CROSS-PROJECT
+                                                       query like /api/commons, because a skill
+                                                       installed to ~/.claude belongs to the machine,
+                                                       not to one project. Returns
+                                                       {rows, targets, installed}:
+                                                       rows[]      {nodeId, projectId, projectName, slug,
+                                                                    title, description, promptOnly,
+                                                                    drift:{<targetId>: state}} — one per
+                                                                    skill NODE, PLUS one per UNMANAGED
+                                                                    slug on disk with nodeId NULL and
+                                                                    drift "unmanaged" (that row IS the
+                                                                    import affordance — never hide it)
+                                                       targets[]   {id, label, kind:"repo"|"global"|"self",
+                                                                    root, skillsDir, absSkillsDir, enabled,
+                                                                    exists, writable, isGitRepo, branch}
+                                                       installed[] {targetId, slug, absPath, sha, name,
+                                                                    description, bundled, nodeId} — every
+                                                                    SKILL.md actually found on disk
+                                                     DISABLED targets are still LISTED but are never
+                                                     scanned, never drifted against and never written to,
+                                                     so they carry no drift cell at all.
+Skill targets    GET  /api/skills/targets            — the targets alone (same shape as above)
+                 POST /api/skills/targets            {"root","label?","skillsDir?","id?","enabled?"} —
+                                                     declare a root the app may write into. root must be
+                                                     ABSOLUTE and must ALREADY EXIST (400 — the app never
+                                                     creates a target root); skillsDir is relative, no
+                                                     "..", defaults ".claude/skills"; 409 when that
+                                                     absSkillsDir or that id is already declared; 64
+                                                     targets max. Returns {target, targets}.
+                                                     THIS IS THE ONLY WRITE PATH FOR THE ALLOWLIST —
+                                                     PATCH /api/settings REFUSES skillTargets, because
+                                                     this API is unauthenticated on loopback and a
+                                                     filesystem allowlist reachable that way is an
+                                                     arbitrary-write primitive.
+                 PATCH /api/skills/targets/:id       {"enabled":true|false} — turn a target off without
+                                                     losing it. "Not right now" is not "never again":
+                                                     removing and re-adding would lose the target id and
+                                                     with it every install row keyed to it.
+                 DELETE /api/skills/targets/:id      — forget the target. NOTHING on disk is deleted;
+                                                     uninstall first if that is what you meant.
+                                                     Returns {removed, targets}.
+Render a skill   GET  /api/skills/:nodeId/render     — the EXACT SKILL.md this node produces:
+                                                       {filename:"<slug>/SKILL.md", markdown, sha}.
+                                                     ?format=md sends the text itself. A pure read —
+                                                     writes nothing, touches no target. Frontmatter is
+                                                     \`name\` (the slug) then \`description\` then your
+                                                     skillOptions; the vault's own keys (id, type, links,
+                                                     tags, stage, progress) are FILTERED OUT — spec-engine
+                                                     bookkeeping must never escape into a user's repo.
+                                                     The renderer re-parses its own output and 500s
+                                                     rather than shipping frontmatter that does not round
+                                                     -trip: a half-loading SKILL.md keeps its body and
+                                                     silently loses its description, which is the one
+                                                     failure that hides. 413 over 256 KB — a skill is an
+                                                     instruction, not a corpus; put bulk in reference
+                                                     files beside SKILL.md.
+Read what is     GET  /api/skills/installed/:targetId/:slug
+installed                                            — the installed file VERBATIM: {targetId, slug,
+                                                       absPath, exists, bundled, markdown, sha,
+                                                       frontmatter, frontmatterError, body, files[]}.
+                                                     frontmatterError is SET (and frontmatter null) when
+                                                     the YAML is the half-loading kind — that is a fact to
+                                                     show, not an empty-frontmatter lie.
+Diff before you  GET  /api/skills/:nodeId/diff?target=<targetId>
+write                                                — {nodeId, targetId, slug, absPath, state, unified}.
+                                                     The diff runs disk → rendered, so \`+\` lines are
+                                                     exactly what an install would write. READ THIS
+                                                     BEFORE FORCING ANYTHING.
+Install          POST /api/skills/:nodeId/install    {"targets":["TARGET_ID",...],"force?":false} —
+                                                     targets is a NON-EMPTY ARRAY of target IDS (never a
+                                                     path; ≤64). Returns
+                                                     {nodeId, slug, sha, results:[{targetId, ok, state,
+                                                      absPath, sha, backedUpTo?, error?}]}.
+                                                     TWO PHASES. Pre-flight throws and writes NOTHING:
+                                                     the node must render, every target id must resolve
+                                                     (404) and be enabled, every root must still exist
+                                                     (400), the skill must HAVE a description (400 — a
+                                                     skill without one never fires, so installing it
+                                                     ships nothing), and no target may be \`modified\`
+                                                     unless forced. Then the write loop runs per target
+                                                     and NEVER aborts: one locked file does not cost the
+                                                     other fifteen targets their install, so read
+                                                     results[] — a 200 can still contain failures.
+                                                     Writes are atomic (temp file + rename) and each one
+                                                     is re-read from disk and checked that frontmatter
+                                                     \`name\` matches the DIRECTORY name before the sha is
+                                                     recorded.
+                                                     409 when any chosen target holds a HAND-EDITED
+                                                     SKILL.md: \`error.drift\` is an ARRAY —
+                                                     [{targetId, slug, state, absPath}] — the same
+                                                     structured-offender shape the ship gate uses. Diff
+                                                     it, adopt it, or re-send with force:true (which
+                                                     copies the old file into the vault trash first).
+                                                     An install that changes nothing reports state
+                                                     "clean" and rewrites the same bytes.
+Uninstall        POST /api/skills/:nodeId/uninstall  {"targets":["TARGET_ID",...]} — removes SKILL.md and
+                                                     the install record. Same per-target results[]. The
+                                                     DIRECTORY goes only when it is empty afterwards: a
+                                                     bundled skill's scripts/ and references/ are the
+                                                     human's files, not ours.
+Adopt a disk     POST /api/skills/:nodeId/adopt      {"targetId"} — the OTHER resolution for \`modified\`,
+edit                                                 and the non-destructive one: the hand-edited file
+                                                     wins and the NODE learns it (body, description,
+                                                     skillOptions), so the two agree again without
+                                                     anybody losing work. Returns {nodeId, targetId,
+                                                     absPath, sha, state} — state is honest: \`clean\`
+                                                     when the node now re-renders the file byte for byte,
+                                                     \`ahead\` when only YAML style differs (install
+                                                     restamps it). 409 if the file's \`name\` disagrees
+                                                     with the node's slug — adopting would move the
+                                                     node's install identity behind its back.
+Import           POST /api/skills/import             {"targetId","slug","projectId?","title?"} — turn an
+                                                     UNMANAGED SKILL.md into a node without rewriting it.
+                                                     projectId falls back to settings.skillsHomeProjectId
+                                                     (a skill on disk belongs to no repo in particular).
+                                                     Records the install immediately, so the row reads
+                                                     \`clean\` rather than presenting the human's own file
+                                                     back to them as drift. 404 with no such file, 400 on
+                                                     malformed YAML, 409 when the file's \`name\`
+                                                     disagrees with its directory (that skill half-loads
+                                                     TODAY — fix the file first).
+                 EVERY route above takes target IDS, never paths. The declared roots ARE the allowlist;
+                 an install verb that accepted a path would be an arbitrary-file-write primitive on an
+                 unauthenticated loopback API. Unknown target → 404 naming the declared ids.
+                 Slugs are validated, never sanitised — "../evil", "Foo Bar", "CON" and anything over 64
+                 characters are all 400s on the NODE (POST/PATCH nodes), long before any path is built.
+                 See § Skills for the model.
+
 Settings         GET  /api/settings                  — vault path, port, human name, flag rules,
-                                                       styleOverrides, typeOrder
+                                                       styleOverrides, typeOrder, skillTargets (READ-ONLY
+                                                       here — see POST /api/skills/targets),
+                                                       skillsIncludeGlobal, skillsHomeProjectId
                  PATCH /api/settings                 {"flags?": [...], "styleOverrides?": {...}, "typeOrder?": [...]}
                                                      flags: replace the flag-rule array (send the FULL
                                                      array, read-modify-write like tags); rule order IS
@@ -650,7 +869,7 @@ item statuses or verdict enums.
      COMPLETION  — every COMPLETABLE member of the warp (feature, instance, component, bug,
                    question, idea, action, threat, flaw, warp — a warp may member another warp)
                    is RESOLVED, same resolved-set as BLOCKS. Standing types (pillar, principle,
-                   area) are exempt — they never "done" — and so is feedback, which already
+                   area, skill) are exempt — they never "done" — and so is feedback, which already
                    carries DESIGNATION. This is what stops a warp built out of \`action\`
                    members — COVERAGE_EXEMPT, completed by REMOVAL — from shipping having been
                    reviewed and finished by nobody: complete()/waive/tag-done the member, or
@@ -678,6 +897,113 @@ stale questions…), each "discusses" its target; adopt = synthesize/convert; wa
 feedback AND prune the target with the same rationale (the waive dialog offers this in one
 gesture whenever the feedback discusses a record).
 
+## Skills — standing instructions, authored here, installed into repos
+
+A SKILL is how a kind of work gets done here. It is a node (type \`skill\`, the METHOD axis), and
+its OUTPUT is a file: \`<target-root>/.claude/skills/<slug>/SKILL.md\`. The node is the original;
+the installed file is a BUILD OUTPUT. Editing the node and re-installing is the normal loop.
+Skills are never "done": no backlog, no progress, no ship gate, no completion verb — they are
+edited, versioned and re-installed for as long as the practice lives.
+
+A PROMPT IS A SKILL. There is one node type, not two. A "prompt" is a skill whose frontmatter
+carries \`disable-model-invocation: true\` — the model may not select it on its own, so a human
+(or you) invokes it deliberately. One type, one folder, one install path, one toggle:
+
+  PATCH /api/nodes/:id {"skillOptions":{"disable-model-invocation":true}}   # → a prompt
+  PATCH /api/nodes/:id {"skillOptions":{}}                                  # → a skill again
+
+\`rows[].promptOnly\` in GET /api/skills is exactly that flag read back. Do not create a second
+type, a tag vocabulary or a naming convention to mean "prompt" — the flag is the whole mechanism.
+
+THE THREE FIELDS that make a skill node different from every other node:
+  slug            the kebab IDENTITY that names the installed directory. A FIELD, never derived
+                  live from the title — retitling a skill must not silently orphan sixteen
+                  install directories in sixteen repos. Defaults from the title AT CREATION only.
+                  VALIDATED, NEVER SANITISED: lowercase letters, digits, single hyphens, ≤64
+                  chars, not a Windows device name. Anything else is a 400 with the reason —
+                  because a sanitiser that quietly turned "../evil" into "evil" would orphan the
+                  installs it did not match, and a slug that escaped its shape would be an
+                  arbitrary-write primitive on an unauthenticated loopback API. Unique per project
+                  among skills (409 naming the node that already owns it).
+  description     the frontmatter \`description\`. For a SKILL this is THE ONLY THING a model
+                  matches on to decide the skill is relevant — write it as a trigger, not a
+                  summary ("Use when reviewing a PR for…", not "PR review helper"). For a PROMPT
+                  it is just a label. A skill with a vague description is a skill nobody invokes.
+  skillOptions    the rest of the SKILL.md frontmatter as an object — \`allowed-tools\`, \`model\`,
+                  \`disable-model-invocation\`, \`argument-hint\`, \`arguments\`. Written through
+                  verbatim; the app adds none of them and reads only the one above.
+
+TARGETS — a target is a declared ROOT the app may write into: {id, label, kind, root, skillsDir,
+absSkillsDir, enabled, exists, writable, isGitRepo, branch}. kind is \`repo\` (a checkout),
+\`global\` (~/.claude/skills, on by default) or \`self\` (this app's own repo). IDS CROSS THE
+WIRE, NEVER PATHS — the declared roots ARE the allowlist, so every skill call takes a targetId
+and a raw path where a targetId belongs is a 400. Targets are managed by POST /api/skills/targets,
+PATCH /api/skills/targets/:id (enable/disable without losing the id and its install rows) and
+DELETE /api/skills/targets/:id — and are deliberately NOT reachable through PATCH /api/settings.
+A DISABLED target is still listed but is never scanned, drifted against or written to. \`branch\`
+matters: an install writes into the working tree of whatever branch that root is checked out on
+right now, and it shows up as an untracked/modified file there — read \`branch\` before installing
+into someone's repo, and say which branch you wrote to.
+
+THE SIX DRIFT STATES. Drift is computed per (node × target) from THREE hashes: what the node
+RENDERS to now, what is ON DISK, and what we LAST WROTE (\`skill_installs.sha\`):
+
+  missing    no file at all                          → install
+  clean      disk = last = rendered                  → nothing to do
+  ahead      disk = last, the NODE moved on          → install (safe: nobody touched the file)
+  modified   disk ≠ last AND disk ≠ rendered         → HAND-EDITED. install 409s. Choose.
+  converged  disk ≠ last BUT disk = rendered         → someone hand-edited the file into exactly
+                                                       what the node now says. Install restamps
+                                                       the sha and no bytes change.
+  unmanaged  a SKILL.md with no node claiming it     → import it, or leave it alone
+
+THE FORK — this is the whole point of the state machine. When a file is \`modified\`, install
+refuses with 409 + \`error.drift\` and you pick one of two directions, both non-destructive by
+intent:
+
+  ADOPT   POST /api/skills/:nodeId/adopt {"targetId"} — the DISK wins. The hand-edit is pulled
+          back into the node (body + frontmatter) and becomes the spec. Use this when someone
+          improved the skill where they were using it: that is where the learning happened.
+  FORCE   POST /api/skills/:nodeId/install {"targets":["ID"],"force":true} — the NODE wins. The
+          hand-edit is overwritten (the old file is copied into the vault trash first, so it is
+          recoverable). Only after you have READ it — GET /api/skills/:nodeId/diff?target=ID.
+          Never force to clear a 409 you did not investigate: the 409 is telling you a human
+          changed something on purpose, at the place they were using it.
+
+UNINSTALL removes SKILL.md and the install record. The DIRECTORY goes only if SKILL.md was the
+last thing in it: a bundled skill's \`scripts/\` and \`references/\` are not ours and survive. The
+app manages SKILL.md and nothing else — \`installed[].bundled\` says when a directory holds more,
+so you can say so rather than implying the app owns the whole bundle.
+
+IMPORT is the way in for skills that already exist: POST /api/skills/import {"targetId","slug"}
+turns an unmanaged SKILL.md into a node without rewriting it. Everything hand-written in a repo
+can come under management without a migration.
+
+Recipe — author a skill and install it into a repo:
+
+  # 1. see what exists and where you are allowed to write (check each target's \`branch\`:
+  #    an install lands in whatever working tree that root is checked out on right now)
+  curl -s ${base}/api/skills
+  # 2. author the node (slug defaults from the title; description is the model's TRIGGER)
+  curl -s -X POST ${base}/api/projects/PROJ/nodes -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"type":"skill","title":"Review a PR","slug":"review-a-pr",
+         "description":"Use when reviewing a pull request for correctness and spec drift.",
+         "content":"## Steps\\n\\n1. Read the diff...\\n"}'
+  # 3. see the exact bytes before touching anyone's repo
+  curl -s ${base}/api/skills/NODE_ID/render?format=md
+  # 4. install — targets is an ARRAY OF TARGET IDS, never a path
+  curl -s -X POST ${base}/api/skills/NODE_ID/install -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"targets":["TARGET_ID"]}'
+  #    a 200 can still carry per-target failures: READ results[], do not assume.
+  # 5. later, a 409 with error.drift (an ARRAY) means a file was hand-edited. LOOK first:
+  curl -s "${base}/api/skills/NODE_ID/diff?target=TARGET_ID"          # + lines = what install would write
+  curl -s -X POST ${base}/api/skills/NODE_ID/adopt -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"targetId":"TARGET_ID"}'                                    # the DISK wins, nobody loses work
+  #   ...or re-send /install with "force":true                       # the NODE wins (old file → vault trash)
+  # 6. stop shipping it somewhere (SKILL.md only — bundled siblings stay):
+  curl -s -X POST ${base}/api/skills/NODE_ID/uninstall -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"targets":["TARGET_ID"]}'
+
 ## Recipes
 
 Create a feature with a spec, shaped by a pillar, inside the active warp:
@@ -700,7 +1026,9 @@ Create a node already linked to existing nodes, in one POST (\`linkTo\`):
   reviews) · other is warp → new -member→ warp · new is warp → selection
   -member→ new warp · warp+warp → relates · other is area → new -member→ area · new is area →
   selection -member→ new area (grouping gesture, like warp creation) · area+area → relates ·
-  new instance + any non-warp other → other -class-of→ new (the existing node is the class) ·
+  new instance + any other that is NOT a warp and NOT an area → other -class-of→ new (the
+  existing node is the class; the warp/area rules above already claimed those pairs, so an
+  instance created beside an area MEMBERS it — pass an explicit type to classify instead) ·
   new component + other feature → feature -depends→ new component (the feature is realized by
   it) · new feature + other component → new -depends→ component · other is pillar/principle →
   other -shapes→ new · new is pillar/principle → new -shapes→ other · new bug + other feature →
@@ -888,8 +1216,10 @@ Export a graph, or part of one, as ONE document (a read — writes nothing):
   curl -s -X POST "${base}/api/projects/PROJ/document?format=json" -H "X-Actor: claude-code" \
     -H "Content-Type: application/json" -d '{"nodeIds":["nd_a","nd_b"]}'
   # -> {"title":..., "markdown":"# ...", "suggestedFilename":"...md",
-  #     "stats":{"nodes":2,"chapters":2,"unplaced":0,"omittedResolved":0,"generatedAt":...}}
-  # ALWAYS read stats.unplaced and stats.omittedResolved before quoting a document as complete.
+  #     "stats":{"nodes":2,"chapters":2,"unplaced":0,"omittedResolved":0,"unknown":0,"generatedAt":...}}
+  # ALWAYS read stats.unplaced, stats.omittedResolved and stats.unknown before quoting a
+  # document as complete. stats.unknown counts ids you asked for that this project does not
+  # have — a stale id, or one pasted from another graph. The document says so too.
 
 Watch what the human is doing and react:
 

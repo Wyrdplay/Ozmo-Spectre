@@ -208,7 +208,7 @@ export function moveInList<T>(list: T[], from: number, to: number): T[] {
  *  the room: file FEEDBACK only, the six angles as the checklist. */
 export function buildSweepPrompt(apiBase: string, projectId: string, warp: SpecNode): string {
   return [
-    `SWEEP REQUEST — Ozmo Spec Engine: warp "${warp.title}" (${warp.id}) is under review.`,
+    `SWEEP REQUEST — Ozmo Spectre: warp "${warp.title}" (${warp.id}) is under review.`,
     `API: ${apiBase} — read ${apiBase}/llms.txt first; send X-Actor: <your-name> on every request.`,
     `Load the increment in one call: GET ${apiBase}/api/nodes/${warp.id}/scope?content=1`,
     '',

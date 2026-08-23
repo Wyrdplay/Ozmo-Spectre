@@ -1,4 +1,6 @@
-# Ozmo Spec Engine
+# Ozmo Spectre — The Agentic Human Canvas
+
+![The Spectre canvas](docs/spec.png)
 
 A desktop canvas for shaping software **with AI agents**. Specs live as markdown in your Obsidian
 vault; the graph of ideas → pillars/principles → features → warps → bugs/questions lives in SQLite;
@@ -27,6 +29,25 @@ That one URL teaches an agent the whole system: ontology, endpoints, the review 
 recipes. Agents send `X-Actor: <name>` and appear in the shared activity feed next to you. They can
 subscribe to `/api/events` (SSE), and even see the canvas via `/api/debug/screenshot` or point at a
 node on your screen via `POST /api/ui/focus`.
+
+## Skills and prompts
+
+The **Agentic** page is where the instructions agents follow are authored. A skill is a node like
+any other — body in the vault, links, tags, reviews — and *installing* it renders a
+`SKILL.md` into a declared repo's `.claude/skills/`. The node is the original; the installed file
+is a build output.
+
+A **prompt** is the same node with `disable-model-invocation` set: a skill the model never picks on
+its own and you invoke with `/name`. One type, one folder, one install path, one toggle.
+
+Install writes files and nothing else — no checkout, no commit, no branch switch — so a skill lands
+on whatever branch the target is currently on, and `git status` is where you find out. Targets are
+an explicit allowlist managed through `skills.addTarget`, never through the settings API: the API
+is unauthenticated on loopback, so a filesystem allowlist reachable that way would be an
+arbitrary-write primitive.
+
+The page is a matrix of skills against targets, because the real problem is fan-out rather than
+authoring — the same skill copied into a dozen repos drifts, and nothing else shows you that.
 
 ## Layout
 

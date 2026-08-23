@@ -1,8 +1,8 @@
 {
-  "name": "ozmo-spec-engine",
-  "productName": "Ozmo Spec Engine",
+  "name": "ozmo-spectre",
+  "productName": "Ozmo Spectre",
   "version": "0.1.0",
-  "description": "Spec canvas for human + AI-agent development. Graph of ideas, pillars, features, warps, bugs and questions backed by an Obsidian vault, with a REST API for agents.",
+  "description": "Ozmo Spectre - The Agentic Human Canvas. Graph of ideas, pillars, features, warps, bugs and questions backed by an Obsidian vault, with a REST API for agents.",
   "main": "./out/main/index.js",
   "private": true,
   "scripts": {

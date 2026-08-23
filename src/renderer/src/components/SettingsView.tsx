@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react'
 import { mutateSettings, overlaySettings, useStore } from '@/store'
-import { rpc } from '@/api'
+import { RpcError, rpc } from '@/api'
 import { Confirm, moveByIndex } from './widgets'
 import {
   EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
   defaultFlags, isTextGlyph, newId,
   orderedNodeTypes, relStyle, typeStyle,
   type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
-  type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type StyleOverrides,
+  type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type Project,
+  type SkillTarget, type SkillTargetConfig, type StyleOverrides,
   type WarpStage
 } from '@shared/types'
 import { INNER_GLYPH_RATIO, TEXT_GLYPH_FONT_RATIO, shapeGeometry, type ShapeGeom } from '@shared/shapes'
@@ -148,6 +149,8 @@ export function SettingsView(): React.JSX.Element {
           <ConnectionColoursCard settings={settings} />
 
           <FlagsCard flags={settings.flags} />
+
+          <SkillTargetsCard settings={settings} projects={projects} />
 
           {project && (
             <div className="settings-card" style={{ borderColor: '#3d2430' }}>
@@ -754,6 +757,212 @@ function FlagsCard({ flags }: { flags: FlagRule[] }): React.JSX.Element {
           <button className="btn sm ghost" onClick={() => commit(defaultFlags(), true)}>restore defaults</button>
         )}
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Skill targets — the roots the app may INSTALL skills into. This list is the
+// app's write surface on the user's disk, so it is the one card here that does
+// NOT autosave: `settings.update` refuses skillTargets outright (the settings
+// API is unauthenticated on loopback), and changes go through the explicit
+// skills.addTarget / skills.removeTarget verbs, which validate the root, write
+// an activity row and emit an event. The two neighbouring settings — include
+// the global root, and which project adopts imported skills — name no path and
+// ride the ordinary settings patch, but still land on an explicit click rather
+// than a debounce, because this card is about where files get written.
+
+/** Read verbs the skills layer may expose, newest name first. Unknown-method
+ *  404s fall through to the next; all-404 means the skills layer is not wired
+ *  up in this build yet, and the card renders the configured list without live
+ *  status rather than pretending it knows what is on disk. */
+const SKILL_TARGET_VERBS = ['skills.targets', 'skills.overview', 'skills.list']
+
+async function fetchSkillTargets(): Promise<SkillTarget[] | null> {
+  for (const verb of SKILL_TARGET_VERBS) {
+    try {
+      const res = await rpc<SkillTarget[] | { targets?: SkillTarget[] }>(verb)
+      const list = Array.isArray(res) ? res : res?.targets
+      if (Array.isArray(list)) return list
+    } catch (e) {
+      if (e instanceof RpcError && e.status === 404) continue
+      throw e
+    }
+  }
+  return null
+}
+
+/** Display-only join — the renderer has no `path`, and the server's resolved
+ *  absSkillsDir supersedes this the moment live status arrives. */
+function joinSkillsDir(root: string, skillsDir?: string): string {
+  const sep = root.includes('\\') ? '\\' : '/'
+  const dir = (skillsDir ?? '.claude/skills').replace(/[\\/]+/g, sep)
+  return root.replace(/[\\/]+$/, '') + sep + dir
+}
+
+function SkillTargetsCard({ settings, projects }: { settings: AppSettings; projects: Project[] }): React.JSX.Element {
+  const toast = useStore((s) => s.toast)
+  const targets: SkillTargetConfig[] = settings.skillTargets ?? []
+  const [live, setLive] = useState<SkillTarget[] | null>(null)
+  const [probing, setProbing] = useState(true)
+  const [nonce, setNonce] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const [confirmRemove, setConfirmRemove] = useState<SkillTargetConfig | null>(null)
+  const idKey = targets.map((t) => t.id).join(',')
+
+  useEffect(() => {
+    let cancelled = false
+    setProbing(true)
+    fetchSkillTargets()
+      .then((rows) => { if (!cancelled) setLive(rows) })
+      .catch(() => { if (!cancelled) setLive(null) })
+      .finally(() => { if (!cancelled) setProbing(false) })
+    return () => { cancelled = true }
+  }, [idKey, nonce])
+
+  const liveById = new Map((live ?? []).map((t) => [t.id, t]))
+
+  /** The two path-free skill settings. They go over the wire as an ordinary
+   *  patch (updateSettings accepts them — neither can name a directory), but
+   *  never through mutateSettings: nothing on this card is debounced. */
+  const patchSkillSetting = async (p: Partial<AppSettings>): Promise<void> => {
+    try {
+      // an absent value must reach the server as explicit null — updateSettings
+      // keys off `'x' in patch`, so the key has to survive the wire (same
+      // convention the store's autosave flush uses)
+      const wire: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(p)) wire[k] = v ?? null
+      const res = await rpc<{ settings: AppSettings }>('settings.update', wire)
+      useStore.setState({ settings: overlaySettings(res.settings) })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const verbMissing = (e: unknown): boolean => e instanceof RpcError && e.status === 404
+
+  const addTarget = async (): Promise<void> => {
+    const root = await window.ozmo.pickFolder()
+    if (!root) return
+    setBusy(true)
+    try {
+      await rpc('skills.addTarget', { root })
+      setNonce((n) => n + 1)
+      toast('skill target added', 'info')
+    } catch (e) {
+      toast(verbMissing(e)
+        ? 'the skills layer is not wired up in this build yet — target unchanged'
+        : e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeTarget = async (t: SkillTargetConfig): Promise<void> => {
+    try {
+      await rpc('skills.removeTarget', { id: t.id })
+      setNonce((n) => n + 1)
+      toast(`removed ${t.label}`, 'info')
+    } catch (e) {
+      toast(verbMissing(e)
+        ? 'the skills layer is not wired up in this build yet — target unchanged'
+        : e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <div className="settings-card">
+      <h2>Skill targets</h2>
+      <div className="hint">
+        Roots the app may install skills into — each writes to <code>&lt;root&gt;/.claude/skills</code>.
+        <b> Installing writes to whatever branch that root is currently checked out on</b>, so a target
+        sitting on a feature branch takes the files there, not on <code>main</code>. Check the branch on
+        each row before you install.
+      </div>
+      <div className="hint">
+        This list is deliberately not editable through the settings API: it is a list of directories the app
+        writes into, and that API is unauthenticated on loopback. Add and remove go through the skills
+        verbs, which validate the root and record the change in activity.
+      </div>
+      {targets.length === 0 && (
+        <div style={{ color: 'var(--text-faint)', fontSize: 11.5 }}>
+          no targets — installs have nowhere to land until you add one
+        </div>
+      )}
+      {targets.map((t) => {
+        const l = liveById.get(t.id)
+        const off = t.enabled === false
+        return (
+          // reusing the flag-rule block (a bordered settings sub-panel) — no new CSS
+          <div key={t.id} className="flag-rule" style={off ? { opacity: 0.55 } : undefined}>
+            <div className="flag-rule-head">
+              <span style={{ fontWeight: 600, fontSize: 12.5 }}>{t.label}</span>
+              {off && <span className="badge" title="declared but not written to">off</span>}
+              {l?.kind === 'global' && <span className="badge" title="the user-wide skills root">global</span>}
+              {probing && !l && <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>checking…</span>}
+              {l && (!l.exists
+                ? <span className="badge" style={{ color: 'var(--warn)' }} title="the root is not on disk right now">missing</span>
+                : l.isGitRepo
+                  ? <span className="badge" style={{ color: 'var(--accent)' }} title="installs land on THIS branch">{l.branch ?? 'detached'}</span>
+                  : <span className="badge" title="not a git checkout">no repo</span>)}
+              {l?.exists && !l.writable && (
+                <span className="badge" style={{ color: 'var(--danger)' }} title="the app cannot write here">read-only</span>
+              )}
+              <div className="spacer" />
+              <button className="btn sm ghost" title="Stop managing this root" onClick={() => setConfirmRemove(t)}>✕</button>
+            </div>
+            <div style={{ color: 'var(--text-faint)', fontSize: 11, wordBreak: 'break-all' }}>
+              {l?.absSkillsDir ?? joinSkillsDir(t.root, t.skillsDir)}
+            </div>
+          </div>
+        )
+      })}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="btn sm" disabled={busy} onClick={() => void addTarget()}>+ add target…</button>
+        <button className="btn sm ghost" disabled={probing} onClick={() => setNonce((n) => n + 1)}>recheck</button>
+        {!probing && live === null && (
+          <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>live status unavailable in this build</span>
+        )}
+      </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+        <input
+          type="checkbox"
+          checked={settings.skillsIncludeGlobal !== false}
+          onChange={(e) => void patchSkillSetting({ skillsIncludeGlobal: e.target.checked })}
+        />
+        include the global <code>~/.claude/skills</code> root
+      </label>
+      <div className="hint">
+        The global root is a fixed location the app already knows — this only turns it on and off, it can
+        never point anywhere else, which is why it is safe through the settings API when the target list
+        itself is not. Skills installed there are visible to every agent session on this machine, not just
+        to one repo. If you remove the global row above, this switch will not bring it back — add it again
+        like any other target.
+      </div>
+      <div className="field">
+        <label>home project for imported skills</label>
+        <select
+          className="input"
+          style={{ width: 'auto' }}
+          title="Skills imported from disk belong to no repo — they land in this project"
+          value={settings.skillsHomeProjectId ?? ''}
+          onChange={(e) => void patchSkillSetting({ skillsHomeProjectId: e.target.value || undefined })}
+        >
+          <option value="">— none —</option>
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      </div>
+
+      {confirmRemove && (
+        <Confirm
+          title={`Stop managing "${confirmRemove.label}"?`}
+          body="The app stops installing into this root. Nothing already on disk is deleted — the skill files stay exactly where they are."
+          onConfirm={() => removeTarget(confirmRemove)}
+          onClose={() => setConfirmRemove(null)}
+        />
+      )}
     </div>
   )
 }

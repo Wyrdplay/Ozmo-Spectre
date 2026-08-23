@@ -11,7 +11,7 @@ export function seedIfEmpty(): void {
   if (svc.listProjects().length > 0) return
   const actor = 'seed'
   const proj = svc.createProject({
-    name: 'Spec Engine',
+    name: 'Spectre',
     description: 'The tool, specced in the tool. Delete this project any time.'
   }, actor)
   const pid = proj.id

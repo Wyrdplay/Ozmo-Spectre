@@ -30,15 +30,51 @@ const h = (method: string, payload: (req: Request) => unknown) =>
     }
   }
 
+/**
+ * Origins allowed to reach this API from a browser: loopback only. `Origin: null`
+ * (a sandboxed iframe, a file:// page) arrives as the literal string "null" and
+ * does NOT match, deliberately.
+ */
+const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d{1,5})?$/
+
 export async function startServer(preferredPort: number, getWindow: () => BrowserWindow | null, version: string): Promise<number> {
   const app = express()
-  app.use(cors())
+
+  /**
+   * CORS: no Origin header (curl, agents, the Electron renderer) plus explicit
+   * localhost origins. Everything else is REJECTED, not merely denied a CORS
+   * header.
+   *
+   * This used to be a bare `cors()` — every origin allowed on an unauthenticated
+   * loopback API. That was already loose; with the skills allowlist it would be
+   * unacceptable, because `skills.addTarget` + `skills.install` together are a
+   * write-a-file-anywhere primitive and a bare `cors()` hands it to any web page
+   * the human happens to have open. Note that omitting the Access-Control-Allow-Origin
+   * header is NOT enough on its own: for a "simple" cross-origin POST the browser
+   * sends the request anyway and only hides the response, so the write would
+   * already have happened. Hence a 403 BEFORE any route runs.
+   *
+   * Agent workflows are unaffected: curl and every HTTP client that is not a
+   * browser send no Origin header at all.
+   */
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const origin = req.header('origin')
+    if (origin && !LOCAL_ORIGIN.test(origin)) {
+      res.status(403).json({ error: { message:
+        `origin "${origin}" is not allowed — this API is loopback-only and unauthenticated. ` +
+        'Agents should call it directly (no Origin header); browsers only from 127.0.0.1/localhost.' } })
+      return
+    }
+    next()
+  })
+  // by the time cors() runs, the origin is already known-good (or absent)
+  app.use(cors({ origin: true, credentials: false }))
   app.use(express.json({ limit: '10mb' }))
 
   const base = (): string => `http://127.0.0.1:${actualPort}`
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, app: 'ozmo-spec-engine', version, port: actualPort, at: Date.now() })
+    res.json({ ok: true, app: 'ozmo-spectre', version, port: actualPort, at: Date.now() })
   })
 
   app.get(['/llms.txt', '/api/llms.txt'], (_req, res) => {
@@ -47,7 +83,7 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
 
   app.get('/api', (_req, res) => {
     res.json({
-      name: 'Ozmo Spec Engine API',
+      name: 'Ozmo Spectre API',
       version,
       docs: `${base()}/llms.txt`,
       hint: 'Send X-Actor: <your-name> on every request. Read /llms.txt first — it is the full guide.',
@@ -62,7 +98,8 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*'
+      // the origin guard above has already vetted this (or there is none at all)
+      'Access-Control-Allow-Origin': req.header('origin') ?? '*'
     })
     res.write(`: connected\n\n`)
     const projectFilter = typeof req.query.projectId === 'string' ? req.query.projectId : null
@@ -244,6 +281,65 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
     } })
   }
   app.all(['/api/projects/:id/reviews', '/api/reviews/:id', '/api/reviews/:id/items', '/api/review-items/:id', '/api/review-items/:id/comments'], reviewsGone)
+
+  // --- skills (node → .claude/skills/<slug>/SKILL.md) ---
+  // TARGETS CROSS THE WIRE AS IDS ONLY. No route here accepts a filesystem path
+  // except POST /api/skills/targets, which validates the root and logs it — the
+  // API is unauthenticated on loopback, so a path-taking install verb would be
+  // an arbitrary-file-write primitive.
+  app.get('/api/skills/targets', h('skills.targets', () => ({})))
+  // add/remove are deliberate VERBS: PATCH /api/settings refuses `skillTargets`
+  app.post('/api/skills/targets', h('skills.addTarget', (r) => r.body))
+  // toggle a target off without losing it (and without losing its install rows)
+  app.patch('/api/skills/targets/:id', h('skills.setTargetEnabled', (r) => ({ targetId: r.params.id, enabled: r.body?.enabled })))
+  app.delete('/api/skills/targets/:id', h('skills.removeTarget', (r) => ({ id: r.params.id })))
+  // the whole page in one call. ?projectId= narrows it; omitted it is a
+  // CROSS-PROJECT query (like /api/commons) — skills installed to ~/.claude
+  // belong to the machine, not to one project
+  app.get('/api/skills', h('skills.list', (r) => ({
+    projectId: typeof r.query.projectId === 'string' && r.query.projectId.trim() !== '' ? r.query.projectId : undefined
+  })))
+  // pure preview — writes nothing. ?format=md sends the SKILL.md text itself
+  app.get('/api/skills/:nodeId/render', async (req, res, next) => {
+    try {
+      const doc = (await Promise.resolve(call('skills.render', { nodeId: req.params.nodeId }, { actor: actorOf(req) }))) as {
+        filename: string; markdown: string; sha: string
+      }
+      if (req.query.format === 'md') {
+        res.type('text/markdown; charset=utf-8')
+        res.setHeader('Content-Disposition', `inline; filename="SKILL.md"`)
+        res.send(doc.markdown)
+        return
+      }
+      res.json(doc)
+    } catch (e) {
+      next(e)
+    }
+  })
+  // the installed file verbatim + its parsed frontmatter (frontmatterError set
+  // when the YAML is the half-loading kind)
+  app.get('/api/skills/installed/:targetId/:slug', h('skills.read', (r) => ({ targetId: r.params.targetId, slug: r.params.slug })))
+  app.get('/api/skills/:nodeId/diff', h('skills.diff', (r) => ({ nodeId: r.params.nodeId, targetId: r.query.target })))
+  // 409 {error:{drift:[...]}} when a target holds a hand-edited SKILL.md, the
+  // same structured shape the ship gate uses; force:true overwrites (old file
+  // copied to the vault trash first). Per-target outcomes ride in results[].
+  app.post('/api/skills/:nodeId/install', h('skills.install', (r) => ({
+    nodeId: r.params.nodeId, targets: r.body?.targets, force: !!r.body?.force
+  })))
+  app.post('/api/skills/:nodeId/uninstall', h('skills.uninstall', (r) => ({
+    nodeId: r.params.nodeId, targets: r.body?.targets
+  })))
+  // adopt: pull a hand-edited disk file back INTO the node — the non-destructive
+  // resolution for `modified` (force is the destructive one)
+  app.post('/api/skills/:nodeId/adopt', h('skills.adopt', (r) => ({
+    nodeId: r.params.nodeId, targetId: r.body?.targetId ?? r.body?.target
+  })))
+  // import: adopt a skill that only exists on disk as a node, recording the
+  // install row so it reads `clean` straight away
+  app.post('/api/skills/import', h('skills.import', (r) => ({
+    projectId: r.body?.projectId, targetId: r.body?.targetId ?? r.body?.target,
+    slug: r.body?.slug, title: r.body?.title
+  })))
 
   // --- settings (agents read/edit flag rules with the same power as the Settings view) ---
   app.get('/api/settings', h('settings.get', () => ({})))

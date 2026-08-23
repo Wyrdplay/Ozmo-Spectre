@@ -1,6 +1,6 @@
 // Shared domain model — imported by main (node) and renderer (browser).
 
-export type NodeType = 'idea' | 'pillar' | 'principle' | 'feature' | 'instance' | 'component' | 'bug' | 'question' | 'warp' | 'area' | 'action' | 'feedback' | 'threat' | 'flaw'
+export type NodeType = 'idea' | 'pillar' | 'principle' | 'feature' | 'instance' | 'component' | 'bug' | 'question' | 'warp' | 'area' | 'action' | 'feedback' | 'threat' | 'flaw' | 'skill'
 /** The typed, directed annotations a connection can carry — each at most once per connection. */
 export type RelationshipType = 'derives' | 'class-of' | 'depends' | 'shapes' | 'blocks' | 'member' | 'addresses' | 'leads-to'
 /**
@@ -52,6 +52,16 @@ export interface SpecNode {
    *  never ranks, never joins a warp or an area. Cleared on severance, when the
    *  node materialises into an ordinary local one tagged `reference-broken`. */
   referencesNodeId?: string | null
+  /** skills only: the kebab identity that names the installed directory. A FIELD,
+   *  not derived from the title — retitling must never silently orphan 16 install
+   *  directories. Unique per project among skills. */
+  slug?: string | null
+  /** skills only: the frontmatter `description`. For a skill this is the ONLY thing
+   *  the model matches on to decide relevance; for a prompt it is just a label. */
+  description?: string | null
+  /** skills only: the remaining SKILL.md frontmatter (allowed-tools, model,
+   *  disable-model-invocation, argument-hint, arguments) as a JSON object. */
+  skillOptions?: Record<string, unknown> | null
   /** effective progress (manual, rolled up, or Done-flag-implied) — computed, never stored */
   progressComputed?: number
   /** names of the flag rules (settings) this node currently matches, in rule order — computed, never stored */
@@ -245,7 +255,96 @@ export interface AppSettings {
    * dropped, missing types append in default order. Absent = NODE_TYPE_ORDER.
    */
   typeOrder?: NodeType[]
+  /**
+   * roots the app may install skills into. NOT editable through PATCH /api/settings:
+   * the API is unauthenticated on loopback, so a filesystem allowlist reachable that
+   * way is an arbitrary-write primitive. Managed by the skills.addTarget /
+   * skills.removeTarget verbs, which validate and log.
+   */
+  skillTargets?: SkillTargetConfig[]
+  /** include ~/.claude/skills as a target — default true */
+  skillsIncludeGlobal?: boolean
+  /** project that adopts imported global/unmanaged skills (they belong to no repo) */
+  skillsHomeProjectId?: string
 }
+
+// ---------------------------------------------------------------------------
+// Skills — standing instructions agents follow, authored as nodes and INSTALLED
+// as `.claude/skills/<slug>/SKILL.md`. The node is the original; the installed
+// file is a build output. A "prompt" is the same node with model invocation
+// disabled — one type, one folder, one install path, one toggle.
+
+/** A declared root the app may write skills into. Ids, never paths, cross the wire. */
+export interface SkillTargetConfig {
+  id: string
+  label: string
+  /** absolute path to the root (a repo checkout, or the user's home for global) */
+  root: string
+  /** relative, no '..' — defaults to '.claude/skills' */
+  skillsDir?: string
+  enabled?: boolean
+}
+
+/** A target as the page sees it — config plus what is true on disk right now. */
+export interface SkillTarget extends SkillTargetConfig {
+  kind: 'repo' | 'global' | 'self'
+  /** resolved <root>/<skillsDir> */
+  absSkillsDir: string
+  exists: boolean
+  writable: boolean
+  isGitRepo: boolean
+  /** the branch this root is checked out on — install writes land HERE. null when not a repo. */
+  branch: string | null
+}
+
+/**
+ * Per (node × target) state, from three hashes: what the node renders to, what
+ * is on disk, and what we last wrote (`skill_installs.sha`).
+ *  missing    no file
+ *  clean      disk = last = rendered
+ *  ahead      disk = last, node has moved on  → install
+ *  modified   disk ≠ last and ≠ rendered (hand-edited) → diff / adopt / force
+ *  converged  disk ≠ last but = rendered (hand-edited INTO agreement) → install restamps
+ *  unmanaged  a file with no node
+ */
+export type SkillDriftState = 'missing' | 'clean' | 'ahead' | 'modified' | 'converged' | 'unmanaged'
+
+/** One installed SKILL.md found on disk. */
+export interface InstalledSkill {
+  targetId: string
+  slug: string
+  absPath: string
+  sha: string
+  /** parsed frontmatter name/description, when the file has readable YAML */
+  name: string | null
+  description: string | null
+  /** the directory holds files besides SKILL.md (scripts/, references/) — the app
+   *  manages SKILL.md only, and must say so rather than imply it owns the bundle */
+  bundled: boolean
+  /** node this file belongs to, when one claims the slug */
+  nodeId: string | null
+}
+
+/** A skill node plus its per-target drift, as the Agentic page renders it. */
+export interface SkillRow {
+  nodeId: string | null
+  projectId: string
+  projectName: string
+  slug: string
+  title: string
+  description: string
+  /** true = a prompt (disable-model-invocation); false = a skill the model may select */
+  promptOnly: boolean
+  drift: Record<string, SkillDriftState>
+}
+
+/** One call the Agentic page renders from. */
+export interface SkillsPayload {
+  rows: SkillRow[]
+  targets: SkillTarget[]
+  installed: InstalledSkill[]
+}
+
 
 // ---------------------------------------------------------------------------
 // Style overrides — user-customisable node/relationship appearance (Settings).
@@ -496,10 +595,17 @@ export const NODE_TYPES: Record<NodeType, NodeTypeMeta> = {
     label: 'Flaw', plural: 'Flaws', folder: 'Flaws', color: '#dc2626', shape: 'triangle-down', radius: 10,
     hasProgress: false,
     hint: 'The design itself is wrong — fix the spec. (A bug is the implementation diverging from a correct spec.)'
+  },
+  skill: {
+    label: 'Skill', plural: 'Skills', folder: 'Skills', color: '#22d3ee', shape: 'square', radius: 11,
+    fill: 'outline',
+    inner: { glyph: '+', color: '#22d3ee', fill: 'solid' },
+    hasProgress: false,
+    hint: 'A standing instruction agents follow — authored here, installed to .claude/skills. A prompt is the same node with model invocation disabled.'
   }
 }
 
-export const NODE_TYPE_ORDER: NodeType[] = ['pillar', 'principle', 'feature', 'instance', 'component', 'warp', 'area', 'idea', 'question', 'bug', 'threat', 'flaw', 'feedback', 'action']
+export const NODE_TYPE_ORDER: NodeType[] = ['pillar', 'principle', 'feature', 'instance', 'component', 'skill', 'warp', 'area', 'idea', 'question', 'bug', 'threat', 'flaw', 'feedback', 'action']
 
 export interface EdgeTypeMeta {
   label: string

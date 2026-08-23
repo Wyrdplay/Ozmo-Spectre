@@ -62,6 +62,8 @@ export interface DocumentResult {
     unplaced: number
     /** matched the scope but excluded by includeResolved:false */
     omittedResolved: number
+    /** asked for by id but not in this project — a stale id, or one from another graph */
+    unknown: number
     generatedAt: number
   }
 }
@@ -173,8 +175,17 @@ function linkLines(
 /** Resolve the requested scope to a node set, plus the project it belongs to. */
 function resolveScope(req: DocumentRequest): { projectId: string; ids: Set<string>; label: string } {
   if (req.nodeIds?.length) {
-    const first = svc.getNode({ id: req.nodeIds[0] })
-    return { projectId: first.projectId, ids: new Set(req.nodeIds), label: `${req.nodeIds.length} selected nodes` }
+    // the project comes from the caller when it named one (the REST route always
+    // does), else from the first id that actually resolves — one stale id at the
+    // HEAD of a selection must not 404 a document the rest of the list can still
+    // produce, when the same id anywhere else is merely counted.
+    let projectId = req.projectId
+    for (const id of req.nodeIds) {
+      if (projectId) break
+      try { projectId = svc.getNode({ id }).projectId } catch { /* counted as unknown below */ }
+    }
+    if (!projectId) throw new svc.ApiError('none of the requested nodes exist', 404)
+    return { projectId, ids: new Set(req.nodeIds), label: `${req.nodeIds.length} selected nodes` }
   }
   if (req.nodeId) {
     const root = svc.getNode({ id: req.nodeId })
@@ -209,10 +220,14 @@ export function buildDocument(req: DocumentRequest): DocumentResult {
 
   // the scope, minus anything the caller asked to leave out — counted, not hidden
   let omittedResolved = 0
+  // an explicit id list is the one scope that can name something this project does
+  // not have (a stale id, a paste from another graph). Dropping it in silence is
+  // the exact failure this generator exists to avoid, so it is counted and said.
+  let unknown = 0
   const included = new Set<string>()
   for (const id of scopeIds) {
     const n = byId.get(id)
-    if (!n) continue
+    if (!n) { unknown++; continue }
     const resolved = (n.flags ?? []).includes('Done') || (n.flags ?? []).includes('Pruned')
     if (resolved && !includeResolved) { omittedResolved++; continue }
     included.add(id)
@@ -307,11 +322,14 @@ export function buildDocument(req: DocumentRequest): DocumentResult {
     .map(([t, c]) => `${c} ${t}${c === 1 ? '' : 's'}`).join(' · ')
 
   lines.push(`# ${title}`, '')
-  lines.push(`*Ozmo Spec Engine · ${included.size} node${included.size === 1 ? '' : 's'} · ${stamp(generatedAt)}*`, '')
+  lines.push(`*Ozmo Spectre · ${included.size} node${included.size === 1 ? '' : 's'} · ${stamp(generatedAt)}*`, '')
   if (project.description) lines.push(project.description, '')
   if (summary) lines.push(summary, '')
   if (omittedResolved) {
     lines.push(`> ${omittedResolved} resolved node${omittedResolved === 1 ? '' : 's'} excluded from this document.`, '')
+  }
+  if (unknown) {
+    lines.push(`> ${unknown} requested node${unknown === 1 ? '' : 's'} could not be found in ${project.name}.`, '')
   }
 
   if (includeContents) {
@@ -375,6 +393,7 @@ export function buildDocument(req: DocumentRequest): DocumentResult {
       chapters: tree.length,
       unplaced: unplaced.length,
       omittedResolved,
+      unknown,
       generatedAt
     }
   }

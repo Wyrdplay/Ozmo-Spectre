@@ -6,6 +6,7 @@ import { ListsView } from './components/ListsView'
 import { BacklogView } from './components/BacklogView'
 import { WarpsView } from './components/WarpsView'
 import { ReviewsView } from './components/ReviewsView'
+import { AgenticView } from './components/AgenticView'
 import { ActivityView } from './components/ActivityView'
 import { SettingsView } from './components/SettingsView'
 import { Inspector } from './components/Inspector'
@@ -61,6 +62,7 @@ export default function App(): React.JSX.Element {
         {view === 'backlog' && <BacklogView />}
         {view === 'warps' && <WarpsView />}
         {view === 'reviews' && <ReviewsView />}
+        {view === 'agentic' && <AgenticView />}
         {view === 'activity' && <ActivityView />}
         {view === 'settings' && <SettingsView />}
       </div>

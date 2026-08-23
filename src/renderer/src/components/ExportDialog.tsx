@@ -21,7 +21,7 @@ interface DocResult {
   title: string
   markdown: string
   suggestedFilename: string
-  stats: { nodes: number; chapters: number; unplaced: number; omittedResolved: number; generatedAt: number }
+  stats: { nodes: number; chapters: number; unplaced: number; omittedResolved: number; unknown: number; generatedAt: number }
 }
 
 export function ExportDialog({ initialScope, onClose }: {
@@ -169,6 +169,11 @@ export function ExportDialog({ initialScope, onClose }: {
           {doc.stats.omittedResolved > 0 && (
             <span className="warn" title="excluded by the resolved-nodes option above">
               {' · '}{doc.stats.omittedResolved} omitted
+            </span>
+          )}
+          {doc.stats.unknown > 0 && (
+            <span className="warn" title="asked for by id but not in this project — a stale id, or one from another graph. Said in the document too.">
+              {' · '}{doc.stats.unknown} not found
             </span>
           )}
         </div>

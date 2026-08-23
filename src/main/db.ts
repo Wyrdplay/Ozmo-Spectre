@@ -149,6 +149,22 @@ function migrate(): void {
       sha TEXT NOT NULL, content TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_node_revisions_node ON node_revisions(node_id, at);
+
+    -- Where a skill node has been installed, and the sha of exactly what WE wrote
+    -- there. Drift is this sha vs the file on disk vs what the node renders to now.
+    -- 1-to-N and written at a completely different cadence from the node, so it is
+    -- a table and NEVER frontmatter (which would rewrite the vault file on every
+    -- install and let the watcher fold it straight back).
+    CREATE TABLE IF NOT EXISTS skill_installs (
+      node_id      TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+      target_id    TEXT NOT NULL,
+      abs_path     TEXT NOT NULL,
+      sha          TEXT NOT NULL,
+      installed_at INTEGER NOT NULL,
+      installed_by TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (node_id, target_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_installs_target ON skill_installs(target_id);
   `)
   // Guarded column adds — CREATE TABLE IF NOT EXISTS never touches existing tables.
   const nodeCols = all<{ name: string }>('PRAGMA table_info(nodes)').map((c) => c.name)
@@ -178,6 +194,11 @@ function migrate(): void {
   // local node carrying the `reference-broken` tag.
   if (!nodeCols.includes('shared')) db.run('ALTER TABLE nodes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0')
   if (!nodeCols.includes('references_node_id')) db.run('ALTER TABLE nodes ADD COLUMN references_node_id TEXT')
+  // skills. `slug` is the installed identity and must survive a retitle, so like
+  // `shared` it is a column rather than anything tag- or title-derived.
+  if (!nodeCols.includes('slug')) db.run('ALTER TABLE nodes ADD COLUMN slug TEXT')
+  if (!nodeCols.includes('description')) db.run('ALTER TABLE nodes ADD COLUMN description TEXT')
+  if (!nodeCols.includes('skill_options')) db.run('ALTER TABLE nodes ADD COLUMN skill_options TEXT')
   const activityCols = all<{ name: string }>('PRAGMA table_info(activity)').map((c) => c.name)
   if (!activityCols.includes('detail')) db.run('ALTER TABLE activity ADD COLUMN detail TEXT')
   if (!hadRevisions) backfillRevisions()

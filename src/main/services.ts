@@ -46,11 +46,31 @@ interface NodeRow {
   progress: number | null; rank: number | null; pinned: number; x: number | null; y: number | null
   file_path: string; created_at: number; updated_at: number; created_by: string
   shared?: number; references_node_id?: string | null
+  /** skills: the kebab install identity, the frontmatter description, and the
+   *  remaining SKILL.md frontmatter as a JSON string */
+  slug?: string | null; description?: string | null; skill_options?: string | null
   annotation_count?: number
 }
 
+/** skill_options is stored as JSON text; a corrupt value must never crash a read. */
+function parseSkillOptions(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  try {
+    const v = JSON.parse(raw)
+    return vault.isPlainObject(v) && Object.keys(v).length ? v : null
+  } catch {
+    return null
+  }
+}
+
 function mapNode(r: NodeRow, tags: string[] = []): SpecNode {
+  // the skill fields are spread in only when SET, so payloads for the other
+  // fourteen node types are byte-identical to what they were before skills
+  const skillOptions = parseSkillOptions(r.skill_options)
   return {
+    ...(r.slug ? { slug: r.slug } : {}),
+    ...(r.description ? { description: r.description } : {}),
+    ...(skillOptions ? { skillOptions } : {}),
     id: r.id, projectId: r.project_id, type: r.type as NodeType, title: r.title,
     stage: r.stage ?? null, progress: r.progress ?? null, rank: r.rank ?? null, tags,
     x: r.x, y: r.y, pinned: !!r.pinned, filePath: r.file_path,
@@ -202,10 +222,17 @@ function frontmatterFor(r: NodeRow): vault.NodeFrontmatter {
       ? `[[${vault.sanitizeFileName(l.title)}]]`
       : `[[${l.file_path.replace(/\\/g, '/').replace(/\.md$/, '')}]]`
   ))]
+  // `name` on disk IS the slug (see vault.NodeFrontmatter): the file's title is
+  // its filename, so the install identity would otherwise be unrecoverable from
+  // the vault. Omitted when unset, which is every non-skill node.
   return {
     id: r.id, type: r.type,
+    name: r.slug ?? null,
+    description: r.description ?? null,
     stage: r.type === 'warp' ? r.stage : null,
-    progress: r.progress, tags, links
+    progress: r.progress,
+    skill: parseSkillOptions(r.skill_options),
+    tags, links
   }
 }
 
@@ -323,6 +350,7 @@ export async function deleteProject(p: { id: string }, actor: string): Promise<{
           OR source_id IN (SELECT id FROM nodes WHERE project_id = ?)
           OR target_id IN (SELECT id FROM nodes WHERE project_id = ?)`,
       [p.id, p.id, p.id])
+    db.run('DELETE FROM skill_installs WHERE node_id IN (SELECT id FROM nodes WHERE project_id = ?)', [p.id])
     db.run('DELETE FROM nodes WHERE project_id = ?', [p.id])
     db.run('DELETE FROM activity WHERE project_id = ?', [p.id])
     db.run('DELETE FROM projects WHERE id = ?', [p.id])
@@ -579,6 +607,71 @@ export function listNodes(p: { projectId: string; type?: string; status?: string
     .map((n) => decorated.get(n.id) ?? n)
 }
 
+// ---------------------------------------------------------------------------
+// Skill fields — slug / description / skillOptions.
+//
+// The slug names a DIRECTORY the installer creates inside someone's repo, so it
+// is VALIDATED AND REJECTED, never sanitised: quietly rewriting a slug would
+// orphan every directory already installed under the old one, and a slug that
+// escaped its shape (`../`, a Windows device name) would be an arbitrary-write
+// primitive on an unauthenticated loopback API.
+
+export const DESCRIPTION_MAX = 4096
+
+/** Throw a 400 unless `slug` is a usable kebab identity. Returns it unchanged. */
+export function validateSlug(slug: unknown): string {
+  const problem = vault.slugProblem(slug)
+  need(!problem, problem ?? '', 400)
+  return slug as string
+}
+
+/** Throw a 409 when another SKILL in the project already owns this slug. */
+function assertSlugFree(projectId: string, slug: string, exceptId?: string): void {
+  const clash = db.get<{ id: string; title: string }>(
+    "SELECT id, title FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ? AND id <> ?",
+    [projectId, slug, exceptId ?? '']
+  )
+  need(!clash, `slug "${slug}" already belongs to "${clash?.title}" (${clash?.id}) in this project — ` +
+    'a slug is the installed directory name, so it can only be claimed once', 409)
+}
+
+/** Derive a free slug for a new skill from its title (create-time default only). */
+function derivedSlugFor(projectId: string, title: string): string | null {
+  const base = vault.deriveSlug(title)
+  if (!base) return null
+  let candidate = base
+  let i = 2
+  while (db.get<{ id: string }>(
+    "SELECT id FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ?", [projectId, candidate]
+  )) {
+    const suffix = `-${i++}`
+    candidate = base.slice(0, vault.SLUG_MAX - suffix.length).replace(/-+$/g, '') + suffix
+    if (i > 200) return null
+  }
+  return vault.isValidSlug(candidate) ? candidate : null
+}
+
+/** JSON text for the skill_options column, or null. Rejects non-objects. */
+function normalizeSkillOptions(v: unknown): string | null {
+  if (v === null || v === undefined) return null
+  need(vault.isPlainObject(v), 'skillOptions must be an object of SKILL.md frontmatter keys')
+  const obj = v as Record<string, unknown>
+  if (!Object.keys(obj).length) return null
+  try {
+    return JSON.stringify(obj)
+  } catch {
+    throw new ApiError('skillOptions must be JSON-serialisable', 400)
+  }
+}
+
+function normalizeDescription(v: unknown): string | null {
+  if (v === null || v === undefined) return null
+  need(typeof v === 'string', 'description must be a string')
+  const s = (v as string).trim()
+  need(s.length <= DESCRIPTION_MAX, `description must be ${DESCRIPTION_MAX} characters or fewer`)
+  return s || null
+}
+
 export interface LinkToEntry {
   nodeId: string
   type?: EdgeType
@@ -589,6 +682,7 @@ export function createNode(
   p: {
     projectId: string; type: NodeType; title: string; status?: string; stage?: string; tags?: string[]; content?: string
     progress?: number | null; x?: number; y?: number; pinned?: boolean; linkTo?: LinkToEntry[]
+    slug?: string | null; description?: string | null; skillOptions?: Record<string, unknown> | null
   },
   actor: string
 ): SpecNode {
@@ -603,6 +697,20 @@ export function createNode(
     need((WARP_STAGES as string[]).includes(p.stage), `invalid stage "${p.stage}" (valid: ${WARP_STAGES.join(', ')})`)
   }
   const stage = p.type === 'warp' ? p.stage ?? 'concept' : null
+
+  // skill identity. An explicit slug is validated and must be free; a skill
+  // created without one gets a slug derived from its title, because a skill with
+  // no slug has no install directory and could never be installed at all.
+  let slug: string | null = null
+  if (p.slug !== undefined && p.slug !== null) {
+    slug = validateSlug(p.slug)
+    assertSlugFree(p.projectId, slug)
+  } else if (p.type === 'skill') {
+    slug = derivedSlugFor(p.projectId, p.title.trim())
+    need(slug, `could not derive a slug from "${p.title}" — pass an explicit slug (lowercase letters, digits, hyphens)`, 400)
+  }
+  const description = normalizeDescription(p.description)
+  const skillOptions = normalizeSkillOptions(p.skillOptions)
 
   // validate linkTo up front — a bad target fails the whole request before anything is created
   const linkTo = p.linkTo ?? []
@@ -623,15 +731,17 @@ export function createNode(
   const title = p.title.trim()
   const tags = [...new Set((p.tags ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean))]
   const filePath = vault.createNodeFile(proj.folder, meta.folder, title,
-    { id, type: p.type, stage, progress: p.progress ?? null, tags, links: [] },
+    { id, type: p.type, name: slug, description, stage, progress: p.progress ?? null,
+      skill: parseSkillOptions(skillOptions), tags, links: [] },
     p.content ?? '')
   // legacy shim: when the orphaned NOT NULL status column survived migration, feed it ''
   const legacy = db.hasLegacyStatusColumn()
   db.tx(() => {
     db.run(
-      `INSERT INTO nodes (id, project_id, type, title, ${legacy ? 'status, ' : ''}stage, progress, pinned, x, y, file_path, created_at, updated_at, created_by)
-       VALUES (?,?,?,?,${legacy ? '?,' : ''}?,?,?,?,?,?,?,?,?)`,
-      [id, p.projectId, p.type, title, ...(legacy ? [''] : []), stage, p.progress ?? null, p.pinned ? 1 : 0, p.x ?? null, p.y ?? null, filePath, t, t, actor]
+      `INSERT INTO nodes (id, project_id, type, title, ${legacy ? 'status, ' : ''}stage, progress, pinned, x, y, file_path, slug, description, skill_options, created_at, updated_at, created_by)
+       VALUES (?,?,?,?,${legacy ? '?,' : ''}?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, p.projectId, p.type, title, ...(legacy ? [''] : []), stage, p.progress ?? null, p.pinned ? 1 : 0, p.x ?? null, p.y ?? null, filePath,
+        slug, description, skillOptions, t, t, actor]
     )
     for (const tag of tags) db.run('INSERT INTO node_tags (node_id, tag) VALUES (?,?)', [id, tag])
   })
@@ -707,7 +817,11 @@ export function setContent(p: { id: string; content: string }, actor: string): {
 }
 
 export function updateNode(
-  p: { id: string; title?: string; status?: string; stage?: string; progress?: number | null; rank?: number | null; tags?: string[]; x?: number | null; y?: number | null; pinned?: boolean },
+  p: {
+    id: string; title?: string; status?: string; stage?: string; progress?: number | null; rank?: number | null
+    tags?: string[]; x?: number | null; y?: number | null; pinned?: boolean
+    slug?: string | null; description?: string | null; skillOptions?: Record<string, unknown> | null
+  },
   actor: string
 ): SpecNode {
   need(p.status === undefined, STATUS_GONE)
@@ -717,7 +831,7 @@ export function updateNode(
     // POSITION and nothing else. Title/tags/progress/stage describe the node, and
     // those belong to the owner; rank never applies because a reference is not
     // this project's work to schedule.
-    const owned: (keyof typeof p)[] = ['title', 'tags', 'progress', 'stage', 'rank']
+    const owned: (keyof typeof p)[] = ['title', 'tags', 'progress', 'stage', 'rank', 'slug', 'description', 'skillOptions']
     const attempted = owned.filter((k) => p[k] !== undefined)
     need(attempted.length === 0,
       `"${r.title}" is a reference — ${attempted.join('/')} belong${attempted.length === 1 ? 's' : ''} to the ` +
@@ -776,17 +890,45 @@ export function updateNode(
     rank = p.rank // ordering metadata — not activity-logged, like x/y
   }
 
+  // Skill fields. A re-slug is a RENAME of the install directory, so it is logged
+  // like a retitle — anything already installed under the old slug is stale and
+  // the installer, not this write, is what reconciles it.
+  let slug = r.slug ?? null
+  if (p.slug !== undefined) {
+    if (p.slug === null) {
+      need(r.type !== 'skill', `"${r.title}" is a skill — clearing its slug would orphan every directory it is installed into`, 400)
+      slug = null
+    } else {
+      slug = validateSlug(p.slug)
+      if (slug !== r.slug) assertSlugFree(r.project_id, slug, p.id)
+    }
+    if (slug !== (r.slug ?? null)) changes.push(`slug → ${slug ?? 'cleared'}`)
+  }
+  let description = r.description ?? null
+  if (p.description !== undefined) {
+    description = normalizeDescription(p.description)
+    if (description !== (r.description ?? null)) changes.push('description updated')
+  }
+  let skillOptions = r.skill_options ?? null
+  if (p.skillOptions !== undefined) {
+    skillOptions = normalizeSkillOptions(p.skillOptions)
+    if (skillOptions !== (r.skill_options ?? null)) changes.push('skill options updated')
+  }
+
   // tag replacement is state change now — log exactly what came and went
   const prevTags = p.tags !== undefined ? tagsFor([p.id]).get(p.id) ?? [] : []
   const nextTags = p.tags !== undefined ? [...new Set(p.tags.map((s) => s.trim().toLowerCase()).filter(Boolean))] : []
 
   db.tx(() => {
     db.run(
-      'UPDATE nodes SET title = ?, stage = ?, progress = ?, rank = ?, x = ?, y = ?, pinned = ?, file_path = ?, updated_at = ? WHERE id = ?',
+      // a FIXED-COLUMN update: every column named here is written on every call,
+      // so a column left out is silently reset to its pre-read value on any edit.
+      // slug/description/skill_options default to the row's current values above.
+      'UPDATE nodes SET title = ?, stage = ?, progress = ?, rank = ?, x = ?, y = ?, pinned = ?, file_path = ?, slug = ?, description = ?, skill_options = ?, updated_at = ? WHERE id = ?',
       [title, stage, progress, rank,
         p.x !== undefined ? p.x : r.x, p.y !== undefined ? p.y : r.y,
         p.pinned !== undefined ? (p.pinned ? 1 : 0) : r.pinned,
-        filePath, now(), p.id]
+        filePath, slug, description, skillOptions, now(), p.id]
     )
     if (p.tags !== undefined) {
       db.run('DELETE FROM node_tags WHERE node_id = ?', [p.id])
@@ -827,6 +969,10 @@ function deleteNodeRows(id: string): void {
       db.run(`DELETE FROM edge_relationships WHERE edge_id IN (${edgeIds.map(() => '?').join(',')})`, edgeIds)
     }
     db.run('DELETE FROM node_revisions WHERE node_id = ?', [id])
+    // would cascade too, but cascades are NOT load-bearing here (sql.js export()
+    // resets the foreign_keys pragma — see db.ts persistNow); smoke's orphan-zero
+    // guard reads these rows directly
+    db.run('DELETE FROM skill_installs WHERE node_id = ?', [id])
     db.run('DELETE FROM nodes WHERE id = ?', [id]) // edges + tags cascade
   })
 }
@@ -1446,6 +1592,18 @@ export async function convertNode(p: { id: string; type?: string }, actor: strin
 
   const stage = to === 'warp' ? 'concept' : null
   db.run('UPDATE nodes SET type = ?, stage = ?, updated_at = ? WHERE id = ?', [to, stage, now(), p.id])
+  // A skill with no slug has no install directory and could never be installed,
+  // so converting INTO a skill mints one exactly as createNode does — unless the
+  // node already carries a free slug (converting out and back keeps its identity).
+  if (to === 'skill') {
+    const keep = r.slug && vault.isValidSlug(r.slug) && !db.get(
+      "SELECT 1 FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ? AND id <> ?", [r.project_id, r.slug, p.id])
+    if (!keep) {
+      const derived = derivedSlugFor(r.project_id, r.title)
+      need(derived, `converting "${r.title}" to a skill needs a slug and none could be derived from its title — rename it first`, 400)
+      db.run('UPDATE nodes SET slug = ? WHERE id = ?', [derived, p.id])
+    }
+  }
 
   // Relocate the file to the new type's folder and rewrite its frontmatter
   // (type swapped, stage added/removed) while the watcher cannot misread the
@@ -2544,6 +2702,42 @@ export function registerWatcherHandlers(): void {
         if (fm.progress !== undefined && fm.progress !== r.progress && fm.progress != null && fm.progress >= 0 && fm.progress <= 100) {
           updates.push('progress = ?')
           params.push(fm.progress)
+        }
+        // `name` in the file is the SLUG. A hand-typed one may be malformed or
+        // already claimed, and this is a WATCHER CALLBACK — refusing means
+        // logging and leaving the DB alone (the next app write puts the real slug
+        // back in the file); it must never throw and never rename a directory
+        // out from under another skill.
+        if (fm.name != null && fm.name !== (r.slug ?? null)) {
+          const problem = vault.slugProblem(fm.name)
+          const clash = problem ? null : db.get<{ id: string; title: string }>(
+            "SELECT id, title FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ? AND id <> ?",
+            [r.project_id, fm.name, change.id]
+          )
+          if (problem || clash) {
+            console.warn(`[vault] ignoring slug "${fm.name}" from ${change.relPath}:`,
+              problem ?? `already claimed by "${clash?.title}" (${clash?.id})`)
+          } else {
+            updates.push('slug = ?')
+            params.push(fm.name)
+          }
+        }
+        if (fm.description != null) {
+          const desc = fm.description.trim()
+          if (desc.length > DESCRIPTION_MAX) {
+            console.warn(`[vault] ignoring description from ${change.relPath}: over ${DESCRIPTION_MAX} characters`)
+          } else if (desc !== (r.description ?? null) && !(desc === '' && r.description == null)) {
+            updates.push('description = ?')
+            params.push(desc || null)
+          }
+        }
+        if (fm.skill != null) {
+          // stored normalised so the comparison is against what WE would write
+          const next = Object.keys(fm.skill).length ? JSON.stringify(fm.skill) : null
+          if (next !== (r.skill_options ?? null)) {
+            updates.push('skill_options = ?')
+            params.push(next)
+          }
         }
         if (updates.length) {
           updates.push('updated_at = ?')

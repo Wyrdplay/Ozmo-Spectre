@@ -3,6 +3,7 @@
    annotations, reviews, activity, search, events. Cleans up after itself. */
 
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 
@@ -41,6 +42,11 @@ console.log(`smoke → ${BASE}`)
   const llms = await req('GET', '/llms.txt')
   ok('llms.txt served', llms.status === 200 && String(llms.json).includes('Agent Guide'))
   ok('llms.txt teaches tags + flags', String(llms.json).includes('State is TAGS') && String(llms.json).includes('FLAGS'))
+  // agents ACT on this document, so an ontology it does not teach is an ontology
+  // they will not use — and the prompt/skill collapse is the part they get wrong
+  ok('llms.txt teaches skills: the METHOD axis and prompt-is-a-skill',
+    String(llms.json).includes('METHOD') && String(llms.json).includes('## Skills') &&
+    String(llms.json).includes('disable-model-invocation'))
   const disco = await req('GET', '/api')
   ok('discovery', disco.status === 200 && Array.isArray(disco.json.resources))
 }
@@ -1456,6 +1462,13 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
   ok('review→ship 409 on undesignated feedback', gate.status === 409, JSON.stringify(gate.status))
   ok('409 offenders name the feedback', gate.json.error?.offenders?.undesignated?.some((o) => o.id === fb1.json.id),
     JSON.stringify(gate.json.error?.offenders))
+  // the review page mirrors these five groups client-side and renders them BEFORE
+  // the close is pressed — an absent group would silently drop a whole requirement
+  // from the advisory list, so the 409 always carries all five, empty or not
+  ok('409 carries all five offender groups the review page mirrors',
+    ['uncovered', 'undesignated', 'pendingActions', 'blockers', 'incomplete']
+      .every((k) => Array.isArray(gate.json.error?.offenders?.[k])),
+    JSON.stringify(Object.keys(gate.json.error?.offenders ?? {})))
   const back = await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'implement' })
   ok('backward restage always free', back.status === 200 && back.json.stage === 'implement')
   await req('PATCH', `/api/nodes/${rfW.json.id}`, { stage: 'review' })
@@ -2698,6 +2711,20 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     sel.json.stats.nodes === 2 && sel.json.markdown.includes('\n# Doc Component\n') &&
     !/\n#+ Doc Feature\n/.test(sel.json.markdown),
     JSON.stringify(sel.json?.stats))
+  // an id the project does not have is the third way a node can go missing, after
+  // the depth cap and the resolved filter. It is COUNTED and SAID, like the others.
+  const ghost = await req('POST', `/api/projects/${dpid}/document?format=json`, { nodeIds: [comp.id, 'nd_deadbeef00'] })
+  ok('document: an id this project does not have is counted, not silently dropped',
+    ghost.json.stats.nodes === 1 && ghost.json.stats.unknown === 1, JSON.stringify(ghost.json?.stats))
+  ok('document: the document itself says a requested node was not found',
+    ghost.json.markdown.includes('1 requested node could not be found'), ghost.json.markdown.slice(0, 400))
+  ok('document: a clean scope reports zero unknown', sel.json.stats.unknown === 0, JSON.stringify(sel.json?.stats))
+  // ...and a stale id at the HEAD of the list is the same kind of miss, not a 404
+  const ghostFirst = await req('POST', `/api/projects/${dpid}/document?format=json`, { nodeIds: ['nd_deadbeef00', comp.id] })
+  ok('document: a stale id at the head of a selection is counted, not fatal',
+    ghostFirst.status === 200 && ghostFirst.json.stats.unknown === 1 && ghostFirst.json.stats.nodes === 1,
+    `${ghostFirst.status} ${JSON.stringify(ghostFirst.json?.stats)}`)
+
   ok('document: a link to a node outside the document is KEPT but marked',
     sel.json.markdown.includes('required by \u2192 Doc Feature *(not in this document)*'), sel.json.markdown)
   // ...and in a whole-project export, where everything IS present, the marker never appears
@@ -2726,6 +2753,38 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     without.json.stats.omittedResolved === 1 && without.json.markdown.includes('excluded from this document'),
     JSON.stringify(without.json?.stats))
 
+  // DETERMINISM — same graph, same bytes. A document people diff or send twice
+  // must not churn; the only clock in the output is a date stamp.
+  const d1 = await req('GET', `/api/projects/${dpid}/document`)
+  const d2 = await req('GET', `/api/projects/${dpid}/document`)
+  ok('document: the generator is deterministic — same graph, same bytes',
+    typeof d1.json === 'string' && d1.json === d2.json, `${(d1.json ?? '').length} vs ${(d2.json ?? '').length}`)
+
+  // TWO PARENTS — the component is in a second area as well. It renders ONCE and
+  // the other containment is restored as a cross-reference, because the nesting
+  // can only show one of them and `member` is deliberately absent from the links.
+  const area2 = await mk('area', 'Doc Area Two')
+  await req('POST', `/api/projects/${dpid}/edges`, { sourceId: comp.id, targetId: area2.id, type: 'member' })
+  const two = await req('GET', `/api/projects/${dpid}/document?format=json`)
+  ok('document: a node under two parents renders exactly once',
+    (two.json.markdown.match(/\n#+ Doc Component\n/g) ?? []).length === 1, two.json.markdown)
+  ok('document: the other parent becomes an "Also under" cross-reference',
+    /\*Also under: Doc Area( Two)?\.\*/.test(two.json.markdown), two.json.markdown)
+
+  // THE DEPTH CAP — nesting bottoms out, and what the walk cannot reach is
+  // DISCLOSED in a trailing section and counted, never silently dropped.
+  let deep = await mk('area', 'Deep 0')
+  for (let i = 1; i <= 9; i++) {
+    const next = await mk('area', `Deep ${i}`, { linkTo: [{ nodeId: deep.id, type: 'member', outgoing: true }] })
+    deep = next
+  }
+  const capped = await req('GET', `/api/projects/${dpid}/document?format=json`)
+  ok('document: nothing past the nesting depth cap is dropped — it is counted',
+    capped.json.stats.unplaced > 0, JSON.stringify(capped.json?.stats))
+  ok('document: the unreached nodes land in "Also in this document"',
+    capped.json.markdown.includes('## Also in this document') && capped.json.markdown.includes('Deep 9'),
+    capped.json.markdown.slice(-600))
+
   // it is a READ: generating a document must not touch the graph
   const before = (await req('GET', `/api/projects/${dpid}/activity`)).json.length
   await req('GET', `/api/projects/${dpid}/document`)
@@ -2733,6 +2792,397 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   ok('document: exporting writes nothing to the activity log', before === after, `${before} -> ${after}`)
 
   await req('DELETE', `/api/projects/${dpid}`)
+}
+
+// --- SKILLS: standing instructions authored as nodes and INSTALLED as
+// .claude/skills/<slug>/SKILL.md inside declared repo roots.
+//
+// This is the ONE block where the app writes OUTSIDE the vault, into somebody's
+// git checkout, driven by an unauthenticated loopback API. So it is written
+// defensively and it must NEVER touch a real repo: it mints a throwaway root
+// under os.tmpdir() that it owns outright, declares THAT as the target, and
+// removes both the target registration and the directory tree at the end. Every
+// call here goes through a targetId; a raw path is a probe, not a convenience.
+{
+  // Route shapes live here and nowhere else in this block. server.ts belongs to
+  // another work package, so if the paths land differently this is a one-place fix.
+  const R = {
+    list: '/api/skills',
+    targets: '/api/skills/targets',
+    target: (t) => `/api/skills/targets/${t}`,
+    render: (n) => `/api/skills/${n}/render`,
+    read: (t, slug) => `/api/skills/installed/${t}/${slug}`,
+    diff: (n, t) => `/api/skills/${n}/diff?target=${t}`,
+    install: (n) => `/api/skills/${n}/install`,
+    uninstall: (n) => `/api/skills/${n}/uninstall`,
+    adopt: (n) => `/api/skills/${n}/adopt`,
+    import: '/api/skills/import'
+  }
+  const skRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ozmo-smoke-skills-'))
+  const skillsRel = path.join('.claude', 'skills')
+  const skDirFor = (slug) => path.join(skRoot, skillsRel, slug)
+  const skFileFor = (slug) => path.join(skDirFor(slug), 'SKILL.md')
+  let targetId = ''
+  // A missing file is a FAILED CHECK, never a thrown suite. Everything after this
+  // block — the project cleanup and the row-level orphan sweep — has to run even
+  // when nothing here works, or one absent endpoint hides every later result.
+  const readIf = (p) => { try { return fs.readFileSync(p, 'utf8') } catch { return '' } }
+  const mtimeIf = (p) => { try { return fs.statSync(p).mtimeMs } catch { return -1 } }
+  const errMsg = (r) => String(r?.json?.error?.message ?? '')
+
+  const sp = await req('POST', '/api/projects', { name: `skills-${Date.now()}`, description: 'skills fixture' })
+  const spid = sp.json.id
+  const payload = async () => (await req('GET', R.list)).json
+  const driftOf = (pl, nodeId, tId) => pl?.rows?.find((r) => r.nodeId === nodeId)?.drift?.[tId]
+
+  try {
+    // ---- targets: the allowlist. Ids cross the wire; paths never do. -------
+    const addT = await req('POST', R.targets, { label: 'smoke temp root', root: skRoot })
+    ok('skills: a temp root is accepted as a target',
+      addT.status === 200 && !!addT.json?.target?.id, JSON.stringify(addT.json))
+    targetId = addT.json?.target?.id ?? ''
+    // `exists` reports the SKILLS DIR, not the root — a fresh repo has no
+    // .claude/skills until its first install, and reporting false for the root
+    // would make that first install impossible. The root is guaranteed by
+    // addTarget (a missing root is a 400), so writable+absSkillsDir is the check.
+    ok('skills: the target resolves what is true on disk right now',
+      addT.json?.target?.exists === false && addT.json?.target?.writable === true &&
+      addT.json?.target?.isGitRepo === false &&
+      String(addT.json?.target?.absSkillsDir ?? '').includes('.claude'),
+      JSON.stringify(addT.json?.target))
+    // an absolute root is the only path this API ever accepts, and only here
+    const relRoot = await req('POST', R.targets, { label: 'relative', root: 'some/relative/path' })
+    ok('skills: a relative root is refused', relRoot.status === 400, JSON.stringify(relRoot.json))
+    // ..-climbing skillsDir would escape the very root that bounds the allowlist
+    const climb = await req('POST', R.targets, { label: 'climb', root: skRoot, skillsDir: '../../elsewhere' })
+    ok('skills SAFETY: a skillsDir containing ".." is a 400 — it would climb out of the root',
+      climb.status === 400 && /\.\./.test(errMsg(climb)), `${climb.status} ${JSON.stringify(climb.json)}`)
+    // declaring the same place twice would give two ids to one directory
+    const dupRoot = await req('POST', R.targets, { label: 'again', root: skRoot })
+    ok('skills: declaring the same skills dir twice is a 409', dupRoot.status === 409, JSON.stringify(dupRoot.json))
+    // a target is the app's write allowlist, so a root that is not there is refused
+    // OUTRIGHT rather than created — silently mkdir-ing a path someone typed wrong
+    // is how you end up writing a skill tree into C:\ or a mount point
+    const badRoot = await req('POST', R.targets, { label: 'nope', root: path.join(skRoot, 'does', 'not', 'exist') })
+    ok('skills: a root that does not exist is a 400, not an mkdir', badRoot.status === 400, JSON.stringify(badRoot.json))
+    const listed = await payload()
+    ok('skills: the payload carries rows, targets and installed',
+      Array.isArray(listed.rows) && Array.isArray(listed.targets) && Array.isArray(listed.installed),
+      JSON.stringify(listed).slice(0, 200))
+    ok('skills: the new target is in the payload', (listed.targets ?? []).some((t) => t.id === targetId))
+    const justTargets = await req('GET', R.targets)
+    ok('skills: GET /api/skills/targets returns the targets on their own',
+      justTargets.status === 200 && Array.isArray(justTargets.json) &&
+      justTargets.json.some((t) => t.id === targetId), JSON.stringify(justTargets.json).slice(0, 200))
+
+    // ---- the node: slug is an IDENTITY, not a derivation ------------------
+    const mkSkill = await req('POST', `/api/projects/${spid}/nodes`, {
+      type: 'skill', title: 'Review A PR',
+      description: 'Use when reviewing a pull request for correctness and spec drift.',
+      content: '## Steps\n\n1. Read the diff.\n2. Check it against the spec.\n'
+    })
+    ok('skills: a skill node is created', mkSkill.status === 200 && mkSkill.json.type === 'skill', JSON.stringify(mkSkill.json))
+    const skill = mkSkill.json
+    ok('skills: the slug defaults from the title, kebabbed', skill.slug === 'review-a-pr', JSON.stringify(skill.slug))
+    // THE ORPHAN HAZARD: a slug derived live from the title would silently rename
+    // the install directory in every repo the moment anyone retitles the node.
+    const retitled = await req('PATCH', `/api/nodes/${skill.id}`, { title: 'Review A Pull Request' })
+    ok('skills: retitling NEVER moves the slug (installs would orphan)',
+      retitled.status === 200 && retitled.json.slug === 'review-a-pr', JSON.stringify(retitled.json?.slug))
+    // one directory name, one owner
+    const dupSlug = await req('POST', `/api/projects/${spid}/nodes`, {
+      type: 'skill', title: 'Something Else', slug: 'review-a-pr'
+    })
+    ok('skills: a second skill cannot claim the same slug (409)', dupSlug.status === 409, JSON.stringify(dupSlug.json))
+
+    // ---- SAFETY PROBES: the slug names a directory inside someone's repo, and
+    // this API is unauthenticated on loopback. Every one of these must be a
+    // REFUSAL with a reason, never a sanitisation — quietly turning "../evil"
+    // into "evil" would orphan the installs it did not match AND hide the attempt.
+    // each must fail ON THE SLUG — a 400 for some other reason would let a real
+    // sanitisation regression sail straight through this block unnoticed
+    const evil = await req('POST', `/api/projects/${spid}/nodes`, { type: 'skill', title: 'Evil', slug: '../evil' })
+    ok('skills SAFETY: a traversing slug "../evil" is a 400, not a sanitisation',
+      evil.status === 400 && /slug/i.test(errMsg(evil)), `${evil.status} ${JSON.stringify(evil.json)}`)
+    const reserved = await req('POST', `/api/projects/${spid}/nodes`, { type: 'skill', title: 'Con', slug: 'CON' })
+    ok('skills SAFETY: the Windows device name "CON" is a 400',
+      reserved.status === 400 && /reserved|device|slug/i.test(errMsg(reserved)),
+      `${reserved.status} ${JSON.stringify(reserved.json)}`)
+    const spaced = await req('POST', `/api/projects/${spid}/nodes`, { type: 'skill', title: 'Spaced', slug: 'Foo Bar' })
+    ok('skills SAFETY: "Foo Bar" (spaces + capitals) is a 400',
+      spaced.status === 400 && /slug/i.test(errMsg(spaced)), `${spaced.status} ${JSON.stringify(spaced.json)}`)
+    const ghostTarget = await req('POST', R.install(skill.id), { targets: ['tgt_not_a_real_target'] })
+    ok('skills SAFETY: an unknown targetId is a 404 the API OWNS (not a route miss)',
+      ghostTarget.status === 404 && errMsg(ghostTarget) !== '',
+      `${ghostTarget.status} ${JSON.stringify(ghostTarget.json)}`)
+    // THE MOST IMPORTANT ONE. The declared roots ARE the allowlist; an install
+    // that accepted a path would let anything on loopback write anywhere on disk.
+    const rawPath = await req('POST', R.install(skill.id), { targets: [skDirFor('review-a-pr')] })
+    ok('skills SAFETY: an install carrying a raw absolute path instead of a targetId is a 400',
+      rawPath.status === 400 && errMsg(rawPath) !== '', `${rawPath.status} ${JSON.stringify(rawPath.json)}`)
+    // ...and so is the other shape of the same mistake: a root instead of an id
+    const rootPath = await req('POST', R.install(skill.id), { targets: [skRoot] })
+    ok('skills SAFETY: a raw ROOT in targets is a 400 too — ids are the only currency',
+      rootPath.status === 400, `${rootPath.status} ${JSON.stringify(rootPath.json)}`)
+    const emptyTargets = await req('POST', R.install(skill.id), { targets: [] })
+    ok('skills SAFETY: an empty targets array is a 400, not a silent no-op',
+      emptyTargets.status === 400, `${emptyTargets.status} ${JSON.stringify(emptyTargets.json)}`)
+    ok('skills SAFETY: none of the rejected installs wrote anything to disk', !fs.existsSync(skFileFor('review-a-pr')))
+
+    // ---- RENDER: the exact bytes, before anyone's repo is touched ----------
+    const rend = await req('GET', R.render(skill.id))
+    ok('skills: render returns the SKILL.md this node produces',
+      rend.status === 200 && typeof rend.json.markdown === 'string' && rend.json.markdown.startsWith('---'),
+      JSON.stringify(rend.json).slice(0, 300))
+    const md = String(rend.json?.markdown ?? '')
+    const fm = md.slice(0, md.indexOf('\n---', 3) + 1)
+    ok('skills render: the filename is <slug>/SKILL.md', rend.json?.filename === 'review-a-pr/SKILL.md',
+      JSON.stringify(rend.json?.filename))
+    ok('skills render: `name:` is the SLUG, not the title', /^name:\s*review-a-pr\s*$/m.test(fm), fm)
+    ok('skills render: `description:` is present — it is all a model matches on',
+      /^description:\s*\S/m.test(fm), fm)
+    // SKILL.md is not a vault file. Leaking the vault's own frontmatter would put
+    // this app's internal ids into a repo and confuse the format's real consumer.
+    // The `fm !== ''` guard matters: an empty render would pass all three vacuously.
+    ok('skills render: NO `id:` leaks from the vault frontmatter', fm !== '' && !/^id:/m.test(fm), fm)
+    ok('skills render: NO `links:` leaks from the vault frontmatter', fm !== '' && !/^links:/m.test(fm), fm)
+    ok('skills render: NO `type:` leaks from the vault frontmatter', fm !== '' && !/^type:/m.test(fm), fm)
+    ok('skills render: NO `tags:` leaks either', fm !== '' && !/^tags:/m.test(fm), fm)
+    // ?format=md is the same bytes, for `curl -o SKILL.md`
+    const rendMd = await req('GET', `${R.render(skill.id)}?format=md`)
+    ok('skills render: ?format=md sends the text itself', rendMd.status === 200 && String(rendMd.json) === md,
+      String(rendMd.json).slice(0, 120))
+    // a skill with no description never fires, so installing one ships nothing
+    const noDesc = await req('POST', `/api/projects/${spid}/nodes`, { type: 'skill', title: 'No Description Here' })
+    const noDescInstall = await req('POST', R.install(noDesc.json?.id), { targets: [targetId] })
+    ok('skills: installing a skill with NO description is refused — it would never fire',
+      noDescInstall.status === 400 && /description/i.test(errMsg(noDescInstall)),
+      `${noDescInstall.status} ${JSON.stringify(noDescInstall.json)}`)
+    ok('skills: and that refusal wrote no directory', !fs.existsSync(skDirFor('no-description-here')))
+
+    // ---- INSTALL → UNCHANGED → AHEAD --------------------------------------
+    const inst = await req('POST', R.install(skill.id), { targets: [targetId] })
+    ok('skills: install lands the file in the target', inst.status === 200 && fs.existsSync(skFileFor('review-a-pr')),
+      `${inst.status} ${JSON.stringify(inst.json)}`)
+    // a 200 is NOT success: the write loop never aborts, so per-target outcomes
+    // ride in results[] and a caller that ignores them can miss every failure
+    ok('skills: the per-target result says ok and clean',
+      inst.json?.results?.[0]?.ok === true && inst.json?.results?.[0]?.state === 'clean',
+      JSON.stringify(inst.json?.results))
+    ok('skills: what is on disk is exactly what render said it would be',
+      md !== '' && readIf(skFileFor('review-a-pr')) === md)
+    ok('skills: drift is clean straight after an install', driftOf(await payload(), skill.id, targetId) === 'clean',
+      String(driftOf(await payload(), skill.id, targetId)))
+    // installing twice is not an edit — an idempotent verb must say so and touch nothing
+    const before2 = readIf(skFileFor('review-a-pr'))
+    const again = await req('POST', R.install(skill.id), { targets: [targetId] })
+    ok('skills: installing an unchanged skill still reports clean',
+      again.status === 200 && again.json?.results?.[0]?.state === 'clean', JSON.stringify(again.json?.results))
+    ok('skills: the unchanged install produced identical bytes',
+      before2 !== '' && readIf(skFileFor('review-a-pr')) === before2)
+    ok('skills: drift is still clean after the second install',
+      driftOf(await payload(), skill.id, targetId) === 'clean',
+      String(driftOf(await payload(), skill.id, targetId)))
+    // the NODE moves on while the file sits untouched — safe to overwrite
+    await req('PATCH', `/api/nodes/${skill.id}`, { description: 'Use when reviewing a PR for spec drift and correctness.' })
+    ok('skills: a node edited past its install reads "ahead", not "modified"',
+      driftOf(await payload(), skill.id, targetId) === 'ahead',
+      String(driftOf(await payload(), skill.id, targetId)))
+    const inst2 = await req('POST', R.install(skill.id), { targets: [targetId] })
+    ok('skills: installing over "ahead" just writes (nobody touched the file)',
+      inst2.status === 200 && readIf(skFileFor('review-a-pr')).includes('spec drift and correctness'),
+      JSON.stringify(inst2.json))
+
+    // ---- MODIFIED: the 409 fork. A hand-edit is EVIDENCE, not noise -------
+    if (fs.existsSync(skFileFor('review-a-pr'))) {
+      fs.writeFileSync(skFileFor('review-a-pr'), readIf(skFileFor('review-a-pr')) + '\n3. Check the tests too.\n')
+    }
+    ok('skills: a hand-edited file reads "modified"', driftOf(await payload(), skill.id, targetId) === 'modified',
+      String(driftOf(await payload(), skill.id, targetId)))
+    const clash = await req('POST', R.install(skill.id), { targets: [targetId] })
+    ok('skills: installing over a hand-edited file is a 409, never a silent overwrite',
+      clash.status === 409, `${clash.status} ${JSON.stringify(clash.json)}`)
+    // error.drift is an ARRAY, the same structured-offender shape the ship gate
+    // uses — one entry per target that would have been clobbered
+    ok('skills: the 409 body carries error.drift as a per-target list',
+      Array.isArray(clash.json?.error?.drift) &&
+      clash.json.error.drift.some((d) => d.targetId === targetId && d.state === 'modified' && d.absPath),
+      JSON.stringify(clash.json?.error?.drift))
+    ok('skills: the refused install left the hand-edit intact',
+      readIf(skFileFor('review-a-pr')).includes('Check the tests too'))
+    // LOOK before you choose: the diff runs disk -> rendered, so + is what install would write
+    const df = await req('GET', R.diff(skill.id, targetId))
+    ok('skills: diff reports the state and a unified patch',
+      df.status === 200 && df.json?.state === 'modified' && typeof df.json?.unified === 'string' &&
+      df.json.unified.includes('Check the tests too'), JSON.stringify(df.json).slice(0, 300))
+    // and the raw installed file is readable verbatim, frontmatter parsed
+    const rd = await req('GET', R.read(targetId, 'review-a-pr'))
+    ok('skills: the installed file reads back verbatim with its frontmatter parsed',
+      rd.status === 200 && rd.json?.exists === true && rd.json?.frontmatterError === null &&
+      rd.json?.frontmatter?.name === 'review-a-pr', JSON.stringify(rd.json?.frontmatter))
+    // ADOPT — the disk wins, because that is where the learning happened
+    const adopted = await req('POST', R.adopt(skill.id), { targetId })
+    ok('skills: adopt pulls the hand-edit back into the node',
+      adopted.status === 200 && adopted.json?.state === 'clean', JSON.stringify(adopted.json))
+    const body = await req('GET', `/api/nodes/${skill.id}/content`)
+    ok('skills: the adopted text IS the node body now',
+      String(body.json?.content ?? '').includes('Check the tests too'), String(body.json?.content ?? '').slice(0, 300))
+    ok('skills: drift is clean after adopting', driftOf(await payload(), skill.id, targetId) === 'clean',
+      String(driftOf(await payload(), skill.id, targetId)))
+
+    // ---- UNINSTALL: the app owns SKILL.md and NOTHING else ----------------
+    const sibling = path.join(skDirFor('review-a-pr'), 'reference.md')
+    fs.mkdirSync(skDirFor('review-a-pr'), { recursive: true })
+    fs.writeFileSync(sibling, '# a bundled file the app did not write\n')
+    const unin = await req('POST', R.uninstall(skill.id), { targets: [targetId] })
+    ok('skills: uninstall removes SKILL.md', unin.status === 200 && !fs.existsSync(skFileFor('review-a-pr')),
+      `${unin.status} ${JSON.stringify(unin.json)}`)
+    // THE EXPENSIVE KIND OF HELPFULNESS: deleting somebody's scripts/ because it
+    // happened to sit next to a file we wrote
+    ok('skills: a bundled sibling file SURVIVES uninstall — the app never owned it', fs.existsSync(sibling))
+    ok('skills: the directory is kept because it was not empty', fs.existsSync(skDirFor('review-a-pr')))
+    ok('skills: drift is "missing" once the install is gone',
+      driftOf(await payload(), skill.id, targetId) === 'missing',
+      String(driftOf(await payload(), skill.id, targetId)))
+
+    // ---- UNMANAGED → IMPORT: the way in for skills already in a repo ------
+    fs.mkdirSync(skDirFor('hand-written'), { recursive: true })
+    fs.writeFileSync(skFileFor('hand-written'),
+      '---\nname: hand-written\ndescription: Use when someone wrote this by hand before the app existed.\n---\n\nDo the thing.\n')
+    const withUnmanaged = await payload()
+    const found = (withUnmanaged.installed ?? []).find((i) => i.slug === 'hand-written' && i.targetId === targetId)
+    ok('skills: a SKILL.md no node claims shows up as installed with nodeId null',
+      found && found.nodeId === null, JSON.stringify(found))
+    const beforeImport = await payload()
+    ok('skills: an unclaimed slug also gets its OWN row — that row IS the import affordance',
+      (beforeImport.rows ?? []).some((r) => r.slug === 'hand-written' && r.nodeId === null &&
+        r.drift?.[targetId] === 'unmanaged'),
+      JSON.stringify((beforeImport.rows ?? []).find((r) => r.slug === 'hand-written')))
+    const imported = await req('POST', R.import, { targetId, slug: 'hand-written', projectId: spid })
+    const impNode = imported.json?.node
+    ok('skills: import adopts an unmanaged file as a node without rewriting it',
+      imported.status === 200 && impNode?.slug === 'hand-written' && impNode?.type === 'skill',
+      JSON.stringify(imported.json))
+    ok('skills: the imported node keeps the file\'s description verbatim',
+      String(impNode?.description ?? '').includes('wrote this by hand'), JSON.stringify(impNode?.description))
+    ok('skills: import did NOT rewrite the file it adopted',
+      readIf(skFileFor('hand-written')).includes('Do the thing.'))
+    const afterImport = await payload()
+    ok('skills: the file is no longer unmanaged — a node claims it now',
+      !!impNode?.id && (afterImport.installed ?? []).find((i) => i.slug === 'hand-written')?.nodeId === impNode.id,
+      JSON.stringify((afterImport.installed ?? []).find((i) => i.slug === 'hand-written')))
+    // ...and it reads `clean` at once: presenting the human's own file back to
+    // them as drift would be the first thing they distrusted about this feature
+    ok('skills: an imported skill reads clean immediately, not as drift',
+      driftOf(afterImport, impNode?.id, targetId) === 'clean',
+      String(driftOf(afterImport, impNode?.id, targetId)))
+    // a directory whose frontmatter `name` disagrees with it HALF-LOADS today;
+    // importing it would launder a live bug into the graph
+    fs.mkdirSync(skDirFor('mismatched'), { recursive: true })
+    fs.writeFileSync(skFileFor('mismatched'), '---\nname: something-else\ndescription: Mismatched.\n---\n\nBody.\n')
+    const mism = await req('POST', R.import, { targetId, slug: 'mismatched', projectId: spid })
+    ok('skills SAFETY: importing a file whose name disagrees with its directory is a 409',
+      mism.status === 409, `${mism.status} ${JSON.stringify(mism.json)}`)
+
+    // ---- A PROMPT IS A SKILL, one type, one toggle ------------------------
+    const promptPatch = await req('PATCH', `/api/nodes/${skill.id}`, {
+      skillOptions: { 'disable-model-invocation': true }
+    })
+    ok('skills: disable-model-invocation is just a skillOptions key',
+      promptPatch.status === 200 && promptPatch.json.skillOptions?.['disable-model-invocation'] === true,
+      JSON.stringify(promptPatch.json?.skillOptions))
+    const pl = await payload()
+    ok('skills: promptOnly is that flag read back — NOT a second node type',
+      pl.rows?.find((r) => r.nodeId === skill.id)?.promptOnly === true,
+      JSON.stringify(pl.rows?.find((r) => r.nodeId === skill.id)))
+    const rend2 = await req('GET', R.render(skill.id))
+    ok('skills: the toggle reaches the rendered frontmatter',
+      String(rend2.json?.markdown ?? '').includes('disable-model-invocation'),
+      String(rend2.json?.markdown ?? '').slice(0, 300))
+
+    // ---- a DISABLED target is remembered but inert -----------------------
+    const off = await req('PATCH', R.target(targetId), { enabled: false })
+    ok('skills: a target can be disabled without being forgotten',
+      off.status === 200, JSON.stringify(off.json))
+    const whileOff = await payload()
+    ok('skills: a disabled target is still LISTED (the decision was made once)',
+      (whileOff.targets ?? []).some((t) => t.id === targetId && t.enabled === false),
+      JSON.stringify((whileOff.targets ?? []).find((t) => t.id === targetId)))
+    // `off.status === 200 &&` keeps these honest: with the toggle unimplemented,
+    // an absent drift cell and a 404 install would both "pass" for the wrong reason
+    ok('skills: but it is not scanned, so it carries no drift cell',
+      off.status === 200 && driftOf(whileOff, skill.id, targetId) === undefined,
+      String(driftOf(whileOff, skill.id, targetId)))
+    const offInstall = await req('POST', R.install(skill.id), { targets: [targetId] })
+    ok('skills: and it is never an install destination while off',
+      off.status === 200 && offInstall.status >= 400 && errMsg(offInstall) !== '',
+      `${offInstall.status} ${JSON.stringify(offInstall.json)}`)
+    await req('PATCH', R.target(targetId), { enabled: true })
+
+    // a standing instruction is never "done", so it is not schedulable work
+    const bl = await req('GET', `/api/projects/${spid}/backlog`)
+    // `skill.id &&` keeps this honest: with no skill in the project the absence
+    // of one in the backlog proves nothing at all
+    ok('skills: a skill never ranks in the backlog (METHOD is not work)',
+      !!skill.id && !(bl.json ?? []).some((n) => n.type === 'skill'),
+      JSON.stringify((bl.json ?? []).map((n) => n.type)))
+
+    // ---- FRONTMATTER ROUND-TRIP REGRESSION --------------------------------
+    // The exact hazard the vault whitelist creates: serialize() rebuilds
+    // frontmatter from the DB row and DROPS anything it does not know, and
+    // refreshNodeFile runs on every node update AND every edge change. So a key
+    // hand-added in Obsidian that the DB never adopted does not merely fail to
+    // stick — it EVAPORATES the next time anyone touches an unrelated tag.
+    {
+      const stg = await req('GET', '/api/settings')
+      const vaultPath = String(stg.json?.vaultPath ?? '')
+      const plain = await req('POST', `/api/projects/${spid}/nodes`, {
+        type: 'skill', title: 'Round Trip Probe', slug: 'round-trip-probe',
+        content: '## Body\n\nUntouched.\n'
+      })
+      const abs = vaultPath && plain.json?.filePath ? path.join(vaultPath, plain.json.filePath) : ''
+      if (!abs || !fs.existsSync(abs)) {
+        ok('frontmatter round-trip: the node file is reachable on disk', false, abs)
+      } else {
+        ok('frontmatter round-trip: a skill created without one has no description key',
+          !/^description:/m.test(readIf(abs)), readIf(abs).slice(0, 200))
+        // 1. the Obsidian edit
+        const raw = readIf(abs)
+        const HAND = 'Use when hand-editing frontmatter in Obsidian must survive.'
+        fs.writeFileSync(abs, raw.replace(/^(type:.*)$/m, `$1\ndescription: ${HAND}`))
+        await new Promise((r) => setTimeout(r, 1500)) // chokidar awaitWriteFinish is 350ms
+        const adoptedNode = await req('GET', `/api/nodes/${plain.json.id}`)
+        ok('frontmatter round-trip: the watcher ADOPTS a hand-added description into the DB',
+          String(adoptedNode.json?.description ?? '') === HAND, JSON.stringify(adoptedNode.json?.description))
+        // 2. the unrelated write that rebuilds the file from the DB row
+        const tagged = await req('PATCH', `/api/nodes/${plain.json.id}`, { tags: ['probe', 'round-trip'] })
+        ok('frontmatter round-trip: the unrelated tags PATCH landed',
+          tagged.status === 200 && tagged.json.tags.includes('round-trip'), JSON.stringify(tagged.json?.tags))
+        const after = readIf(abs)
+        ok('frontmatter round-trip: the description SURVIVED the refresh (this is the regression)',
+          after.includes(`description: ${HAND}`), after.slice(0, 400))
+        ok('frontmatter round-trip: and the tags were rewritten alongside it, not instead of it',
+          /round-trip/.test(after) && /probe/.test(after), after.slice(0, 400))
+      }
+    }
+  } catch (e) {
+    // an unexpected throw in here must never swallow the rest of the suite —
+    // the orphan sweep at the tail is the last line of defence for the DB
+    ok('skills: the block ran to completion without throwing', false, String(e))
+  } finally {
+    // ---- CLEAN UP AFTER OURSELVES, whatever happened above ----------------
+    if (targetId) {
+      const rm = await req('DELETE', R.target(targetId))
+      ok('skills: the temp target is removed from the allowlist', rm.status === 200, JSON.stringify(rm.json))
+      const gone = await payload()
+      ok('skills: it is gone from the payload', !(gone.targets ?? []).some((t) => t.id === targetId))
+      // forgetting a target must NOT delete anyone's files — uninstall is the verb for that
+      ok('skills: removing a target left the files on disk alone', fs.existsSync(skFileFor('hand-written')))
+    }
+    await req('DELETE', `/api/projects/${spid}`)
+    fs.rmSync(skRoot, { recursive: true, force: true })
+    ok('skills: the throwaway root is gone — nothing was left in tmp', !fs.existsSync(skRoot), skRoot)
+  }
 }
 
 // cleanup
@@ -2765,8 +3215,21 @@ ok('project gone', gone.status === 404)
       stmt.free()
       return n
     }
+    // skill_installs arrived with skills; an app that predates them has no such
+    // table, so probe rather than assume (a missing table throws in sql.js and
+    // would take the whole orphan sweep with it).
+    const hasTable = (name) =>
+      count("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", [name]) > 0
+    const hasSkillInstalls = hasTable('skill_installs')
+    ok('row-level: the skill_installs table exists', hasSkillInstalls)
     const orphans = {
       nodes: count('SELECT COUNT(*) FROM nodes WHERE project_id NOT IN (SELECT id FROM projects)'),
+      // an install row outliving its node is a stale write record pointing at a
+      // file in somebody's repo — exactly the kind of orphan that made the
+      // sql.js foreign_keys bug expensive, so it is swept like every other child
+      ...(hasSkillInstalls
+        ? { skill_installs: count('SELECT COUNT(*) FROM skill_installs WHERE node_id NOT IN (SELECT id FROM nodes)') }
+        : {}),
       edges: count('SELECT COUNT(*) FROM edges WHERE project_id NOT IN (SELECT id FROM projects) OR source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)'),
       edge_relationships: count('SELECT COUNT(*) FROM edge_relationships WHERE edge_id NOT IN (SELECT id FROM edges)'),
       node_tags: count('SELECT COUNT(*) FROM node_tags WHERE node_id NOT IN (SELECT id FROM nodes)'),
@@ -2818,11 +3281,17 @@ ok('project gone', gone.status === 404)
       `SELECT COUNT(*) FROM (SELECT min(source_id, target_id) a, max(source_id, target_id) b, COUNT(*) c
         FROM edges GROUP BY a, b HAVING c > 1)`)
     ok('row-level: no duplicate pairs in the edges table', dbDupPairs === 0, `${dbDupPairs} duplicated`)
+    // deleting a project must take its skill install records with it too —
+    // their nodes are gone, so any surviving row is by definition an orphan
+    const skillInstallTerm = hasSkillInstalls
+      ? '+ (SELECT COUNT(*) FROM skill_installs WHERE node_id NOT IN (SELECT id FROM nodes))'
+      : ''
     const leftover = count(
       `SELECT (SELECT COUNT(*) FROM projects WHERE id IN (?,?))
             + (SELECT COUNT(*) FROM nodes WHERE project_id IN (?,?))
             + (SELECT COUNT(*) FROM edges WHERE project_id IN (?,?))
-            + (SELECT COUNT(*) FROM activity WHERE project_id IN (?,?))`,
+            + (SELECT COUNT(*) FROM activity WHERE project_id IN (?,?))
+            ${skillInstallTerm}`,
       [pid, probeProjectId, pid, probeProjectId, pid, probeProjectId, pid, probeProjectId])
     ok('row-level: deleted projects left zero rows', leftover === 0, `${leftover} rows remain (pid=${pid}, probe=${probeProjectId}, db=${dbFile})`)
     sdb.close()

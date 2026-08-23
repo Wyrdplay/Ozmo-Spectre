@@ -1,4 +1,5 @@
 import * as svc from './services'
+import * as skills from './skills'
 import { buildDocument } from './document'
 import { getSettings, updateSettings } from './settings'
 import { emitEvent } from './events'
@@ -90,6 +91,28 @@ export const registry: Record<string, Handler> = {
   // reviews are NODES now — nodes.create type review, nodes.waive, nodes.pass,
   // nodes.requestSweep; the review-table methods retired with the review-nodes
   // migration
+
+  // SKILLS — the node is the original, `.claude/skills/<slug>/SKILL.md` is a
+  // build output. `skills.list` is one call the page renders from and, like
+  // commons.list, is a cross-project QUERY when projectId is omitted.
+  // Targets cross the wire as IDS ONLY; addTarget/removeTarget are the only
+  // write path for the allowlist (PATCH /api/settings refuses skillTargets).
+  'skills.targets': () => skills.listTargets(),
+  'skills.list': (p) => skills.listSkills(p),
+  'skills.render': (p) => skills.renderSkillById(p),
+  'skills.read': (p) => skills.readInstalled(p),
+  'skills.diff': (p) => skills.diffSkill(p),
+  'skills.install': (p, c) => skills.installSkill(p, c.actor),
+  'skills.uninstall': (p, c) => skills.uninstallSkill(p, c.actor),
+  'skills.import': (p, c) => skills.importSkill(p, c.actor),
+  // adopt is the non-destructive resolution for `modified`: the disk edit wins
+  // and the node learns it, instead of force throwing the human's work away
+  'skills.adopt': (p, c) => skills.adoptSkill(p, c.actor),
+  'skills.addTarget': (p, c) => skills.addTarget(p, c.actor),
+  // a disabled target is still LISTED (the Settings card renders it) but is
+  // never scanned, never drifted against and never written to
+  'skills.setTargetEnabled': (p, c) => skills.setTargetEnabled(p, c.actor),
+  'skills.removeTarget': (p, c) => skills.removeTarget(p, c.actor),
 
   'activity.list': (p) => svc.listActivity(p),
   'search.run': (p) => svc.search(p),
