@@ -345,6 +345,100 @@ export interface SkillsPayload {
   installed: InstalledSkill[]
 }
 
+// ---------------------------------------------------------------------------
+// Fog — what the spec does not yet absorb.
+//
+// Not a node type: a LENS over types that already exist (question, threat,
+// flaw, bug, feedback). The HEALTH and JUDGMENT axes are occupied, and a `fog`
+// type would crowd them for nothing.
+//
+// Class is DERIVED from what the item is, so fog cannot rot by someone
+// forgetting to tag. Sharpness is NOT derived — it is the one judgement an
+// agent must not make on the human's behalf.
+
+/**
+ * What would clear this piece of fog. Three classes, three different next moves:
+ *  unknown     nobody knows the answer      → go and find out
+ *  undecided   the options are known, nobody has chosen → a human decides
+ *  unabsorbed  we know what is wrong; the spec does not say so yet → do the work
+ */
+export type FogClass = 'unknown' | 'undecided' | 'unabsorbed'
+
+/** The node types that can be fog. A lens, never a new type. */
+export const FOG_TYPES: NodeType[] = ['question', 'threat', 'flaw', 'bug', 'feedback']
+
+/** One unabsorbed item, with everything needed to triage it without a second call. */
+export interface FogItem {
+  id: string
+  type: NodeType
+  title: string
+  fogClass: FogClass
+  /** true when the item carries the `hazy` tag — it cannot be phrased sharply yet.
+   *  Hand-applied on purpose: "can you state the question precisely NOW, not
+   *  answer it now" is a human's call. */
+  hazy: boolean
+  /** containing area / warp, when it has one. Unlocated fog makes every density
+   *  figure a lie, so the report counts it separately rather than hiding it. */
+  areaId: string | null
+  areaTitle: string | null
+  warpId: string | null
+  warpTitle: string | null
+  /** unresolved nodes holding this one down — empty means it is on the frontier */
+  blockedBy: { id: string; title: string; type: NodeType }[]
+  /** unresolved nodes this one holds down */
+  blocks: { id: string; title: string; type: NodeType }[]
+  tags: string[]
+  createdAt: number
+  /** ms since created — fog that has sat a long time is its own signal */
+  age: number
+  /** the markdown body; present only when the caller asks for prose (`bodies=1`).
+   *  Carrying it is the point: the class says what KIND of fog, the prose says
+   *  what it actually asks. */
+  body?: string
+}
+
+/** Fog density for one district. */
+export interface FogArea {
+  id: string
+  title: string
+  members: number
+  total: number
+  byClass: Record<FogClass, number>
+  /** fog items per member — size-independent, so districts compare honestly */
+  density: number
+}
+
+/**
+ * A meta-observation about the fog itself, not about any one item. Reported so
+ * the shape of the pile is visible: "everything is takeable" usually means no
+ * prerequisite order was ever recorded, not that the work is genuinely parallel.
+ */
+export interface FogSignal {
+  kind: 'no-decision-order' | 'unlocated-fog' | 'stale-fog' | 'undesignated-feedback'
+  detail: string
+  count: number
+}
+
+/** What `GET /api/projects/:id/fog` answers. */
+export interface FogReport {
+  projectId: string
+  at: number
+  counts: {
+    total: number
+    byClass: Record<FogClass, number>
+    byType: Record<string, number>
+    frontier: number
+    blocked: number
+    unlocated: number
+    hazy: number
+  }
+  areas: FogArea[]
+  /** takeable right now — nothing unresolved is holding these down */
+  frontier: FogItem[]
+  blocked: FogItem[]
+  signals: FogSignal[]
+}
+
 
 // ---------------------------------------------------------------------------
 // Style overrides — user-customisable node/relationship appearance (Settings).

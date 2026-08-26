@@ -16,6 +16,16 @@ import { matchesAllTokens } from '@shared/fuzzy'
 import { useStore } from '@/store'
 import { rpc } from '@/api'
 import {
+  FOG_CLASSES, FOG_CLASS_META, FOG_HAZE, FOG_RING_WIDTH, buildFogIndex, fogStats,
+  type FogEntry, type FogStats
+} from '@/lib/fog'
+import {
+  BAND_META, FRONTIER_BAND, buildCertaintyLayout, certaintyBand, lensDisplaces,
+  type CertaintyLayout, type CertaintyNodeInput, type CertaintyRing, type LensId
+} from '@/lib/lens'
+import { LensSection } from './FogLens'
+import { LensSwitch } from './LensSwitch'
+import {
   Confirm, FilterSection, FlagFilterChips, TagFilterChips, hiddenFlagNames, moveByIndex,
   nodeMatchesFlagFilter, nodeMatchesTagFilter, undimFlagNames
 } from './widgets'
@@ -220,6 +230,9 @@ export function GraphView(): React.JSX.Element {
     /** world-space pointer start — the base for group deltas */
     wx0: number
     wy0: number
+    /** a displacing lens is on: the press still selects and still opens menus,
+     *  but it cannot MOVE anything. See onPointerDown for why. */
+    frozen: boolean
   } | null>(null)
   /** shift-press on a node, still ambiguous: >3px of movement = link rubber band,
    *  release in place = toggle selection membership */
@@ -231,6 +244,18 @@ export function GraphView(): React.JSX.Element {
    *  PATCH can't snap the node back to its pre-drag spot. */
   const pendingDropRef = useRef(new Map<string, { x: number; y: number; until: number }>())
   const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null)
+  // ── lens displacement ─────────────────────────────────────────────────
+  // The certainty lens's arrangement, and how far the canvas has slid into it.
+  // Refs, not state: the draw loop, the hit index and every coordinate helper
+  // read them at frame/pointer rate, and a re-render per animation step would
+  // be absurd. `pos` is a plain Map lookup, so a lit lens costs one Map.get per
+  // node the canvas was already going to touch.
+  const lensLayoutRef = useRef<CertaintyLayout | null>(null)
+  /** 0 = everything home · 1 = fully displaced. Eased in the draw loop, so the
+   *  map SLIDES between the two readings instead of teleporting — the whole
+   *  point of preserving bearing is that you can follow a node across. */
+  const lensPhaseRef = useRef(0)
+  const lensTargetRef = useRef(0)
   const linkDragRef = useRef<{ sourceId: string; wx: number; wy: number } | null>(null)
   const topologyRef = useRef('')
   const fittedProjectRef = useRef<string | null>(null)
@@ -376,6 +401,66 @@ export function GraphView(): React.JSX.Element {
   const areaHealthRef = useRef(areaHealth)
   areaHealthRef.current = areaHealth
 
+  // ── fog lens ────────────────────────────────────────────────────────────
+  // A LENS, in the same sense as the relationship chips: it changes what the
+  // canvas emphasises and NOTHING else — no node leaves the graph, the
+  // simulation is untouched, nothing is written. Every derived structure is a
+  // memo; the draw loop only ever does a Map.get per node it was already
+  // painting, so the lens neither defeats viewport culling nor makes a frame
+  // recompute the world.
+  /** THE active lens — at most one. `fog` paints; `certainty` places. */
+  const lens = useStore((s) => s.lens)
+  const fogLens = lens === 'fog'
+  const fogReport = useStore((s) => s.fog)
+  const hiddenFogClasses = useStore((s) => s.hiddenFogClasses)
+  const refreshFog = useStore((s) => s.refreshFog)
+  /** resolved-ness is whatever the user's own dim rules say (Done, Pruned) —
+   *  the fallback derivation must not invent a second vocabulary for it */
+  const dimFlagNames = useMemo(
+    () => new Set((settingsFlags ?? []).filter((f) => f.treatment === 'dim').map((f) => f.name)),
+    [settingsFlags]
+  )
+  const fogIndex = useMemo(
+    () => buildFogIndex(graph.nodes, fogReport, dimFlagNames),
+    [graph.nodes, fogReport, dimFlagNames]
+  )
+  const fogCounts = useMemo<FogStats>(
+    () => fogStats(fogIndex, containerInfo.areaMembers),
+    [fogIndex, containerInfo.areaMembers]
+  )
+  /** what the lens LIFTS: the index minus the classes switched off. null = the
+   *  draw loop skips every fog branch outright — which is also what NOTHING TO
+   *  LIFT resolves to. A lens with an empty subject must not grey the whole
+   *  canvas out and look broken; it leaves the map alone and the panel says
+   *  there is no fog. */
+  const fogLit = useMemo<Map<string, FogEntry> | null>(() => {
+    if (!fogLens || !fogIndex.byId.size) return null
+    if (!hiddenFogClasses.length) return fogIndex.byId
+    const hid = new Set(hiddenFogClasses)
+    const m = new Map<string, FogEntry>()
+    for (const [id, e] of fogIndex.byId) if (!hid.has(e.fogClass)) m.set(id, e)
+    return m.size ? m : null
+  }, [fogLens, fogIndex, hiddenFogClasses])
+  const fogLitRef = useRef(fogLit)
+  fogLitRef.current = fogLit
+  const fogIndexRef = useRef(fogIndex)
+  fogIndexRef.current = fogIndex
+  const dimFlagNamesRef = useRef(dimFlagNames)
+  dimFlagNamesRef.current = dimFlagNames
+  /** per-district fog, for the hull labels and the district haze */
+  const fogAreaRef = useRef(fogCounts.byArea)
+  fogAreaRef.current = fogCounts.byArea
+  // ONE place asks for the report: mount with a lens already on (it persists
+  // per machine), switching lens, and switching project under it all land here.
+  // BOTH lenses want it — fog paints the classes, certainty places by them.
+  useEffect(() => {
+    if (lens && projectId) void refreshFog()
+  }, [lens, projectId, refreshFog])
+  /** the certainty layout's rings, published for the legend. State (not the
+   *  ref) precisely so the panel's counts come from the SAME layout the canvas
+   *  drew — the fog chips set that precedent and it is worth keeping. */
+  const [certaintyRings, setCertaintyRings] = useState<CertaintyRing[] | null>(null)
+
   const [autoPin, setAutoPin] = useState(true)
   const autoPinRef = useRef(autoPin)
   autoPinRef.current = autoPin
@@ -432,6 +517,35 @@ export function GraphView(): React.JSX.Element {
     }
   }, [])
 
+  // ── displayed position ──────────────────────────────────────────────────
+  // WHERE A NODE IS DRAWN, which is not where it lives. Home position while no
+  // lens displaces; the lens's ring seat once one does; the eased blend between
+  // them mid-slide.
+  //
+  // EVERYTHING that reads a position for the SCREEN goes through these: the
+  // draw loop, the cull rect, the hit quadtree, edge and badge hit-testing,
+  // fit and focus. Anything that reads a position to WRITE it (drag persist,
+  // pin, centroid placement of a new node) keeps reading n.x/n.y — the home
+  // layout is the only thing that ever gets saved.
+  const px = (n: SimNode): number => {
+    const L = lensLayoutRef.current
+    const p = lensPhaseRef.current
+    const hx = n.x ?? 0
+    if (!L || p <= 0.0005) return hx
+    const t = L.pos.get(n.id)
+    return t ? hx + (t.x - hx) * p : hx
+  }
+  const py = (n: SimNode): number => {
+    const L = lensLayoutRef.current
+    const p = lensPhaseRef.current
+    const hy = n.y ?? 0
+    if (!L || p <= 0.0005) return hy
+    const t = L.pos.get(n.id)
+    return t ? hy + (t.y - hy) * p : hy
+  }
+  /** is a lens moving nodes right now (including mid-slide, either way)? */
+  const lensDisplacing = (): boolean => lensTargetRef.current > 0 || lensPhaseRef.current > 0.02
+
   const fitView = useCallback((): void => {
     const canvas = canvasRef.current
     const nodes = nodesRef.current.filter(
@@ -439,8 +553,10 @@ export function GraphView(): React.JSX.Element {
         nodeMatchesTagFilter(n.data.tags, tagFilterRef.current)
     )
     if (!canvas || !nodes.length) return
-    const xs = nodes.map((n) => n.x ?? 0)
-    const ys = nodes.map((n) => n.y ?? 0)
+    // fit what is ON SCREEN — under a displacing lens that is the rings, not
+    // the home layout hiding behind them
+    const xs = nodes.map((n) => px(n))
+    const ys = nodes.map((n) => py(n))
     const minX = Math.min(...xs) - 80
     const maxX = Math.max(...xs) + 80
     const minY = Math.min(...ys) - 80
@@ -567,8 +683,8 @@ export function GraphView(): React.JSX.Element {
       const k = Math.max(transformRef.current.k, 0.9)
       targetTransformRef.current = {
         k,
-        x: canvas.clientWidth / 2 - (n.x ?? 0) * k,
-        y: canvas.clientHeight / 2 - (n.y ?? 0) * k
+        x: canvas.clientWidth / 2 - px(n) * k,
+        y: canvas.clientHeight / 2 - py(n) * k
       }
     }
     setFocusNode(null)
@@ -646,7 +762,10 @@ export function GraphView(): React.JSX.Element {
     for (let i = 0; i < nodes.length; i++) order.set(nodes[i], i)
     let maxR = 0
     for (const n of nodes) maxR = Math.max(maxR, stylesRef.current.node[n.data.type].radius)
-    const tree = quadtree<SimNode>().x((n) => n.x ?? 0).y((n) => n.y ?? 0).addAll(nodes)
+    // indexed on DISPLAYED positions: under a displacing lens the stored
+    // positions are not where anything is, and a quadtree built on them would
+    // hand back the node that USED to be under the pointer
+    const tree = quadtree<SimNode>().x(px).y(py).addAll(nodes)
     hitIndexRef.current = { tree, order, maxR }
     return hitIndexRef.current
   }
@@ -670,8 +789,8 @@ export function GraphView(): React.JSX.Element {
         while (leaf) {
           const n = leaf.data
           const r = styles.node[n.data.type].radius + 6
-          const dx = (n.x ?? 0) - wx
-          const dy = (n.y ?? 0) - wy
+          const dx = px(n) - wx
+          const dy = py(n) - wy
           if (dx * dx + dy * dy <= r * r) {
             const idx = order.get(n) ?? -1
             if (idx > bestIdx) {
@@ -699,18 +818,18 @@ export function GraphView(): React.JSX.Element {
     for (const l of cachedVisibleLinks()) {
       const s = l.source as SimNode
       const e = l.target as SimNode
-      const x1 = (s.x ?? 0) * t.k + t.x
-      const y1 = (s.y ?? 0) * t.k + t.y
-      const x2 = (e.x ?? 0) * t.k + t.x
-      const y2 = (e.y ?? 0) * t.k + t.y
+      const x1 = px(s) * t.k + t.x
+      const y1 = py(s) * t.k + t.y
+      const x2 = px(e) * t.k + t.x
+      const y2 = py(e) * t.k + t.y
       if (outc(x1, y1) & outc(x2, y2)) continue
       const len2 = (x2 - x1) ** 2 + (y2 - y1) ** 2
       if (len2 < 1) continue
       let u = ((cx - x1) * (x2 - x1) + (cy - y1) * (y2 - y1)) / len2
       u = Math.max(0.06, Math.min(0.94, u))
-      const px = x1 + u * (x2 - x1)
-      const py = y1 + u * (y2 - y1)
-      if ((px - cx) ** 2 + (py - cy) ** 2 < 49) return l
+      const nx = x1 + u * (x2 - x1)
+      const ny = y1 + u * (y2 - y1)
+      if ((nx - cx) ** 2 + (ny - cy) ** 2 < 49) return l
     }
     return null
   }
@@ -728,12 +847,83 @@ export function GraphView(): React.JSX.Element {
       if (!count) continue
       const r = stylesRef.current.node[n.data.type].radius * t.k * (info.collapsed.has(n.id) ? COLLAPSED_SCALE : 1)
       const bw = containerBadgeWidth(count)
-      const bx = (n.x ?? 0) * t.k + t.x + r + bw / 2 + 4
-      const by = (n.y ?? 0) * t.k + t.y - r - 8
+      const bx = px(n) * t.k + t.x + r + bw / 2 + 4
+      const by = py(n) * t.k + t.y - r - 8
       if (Math.abs(cx - bx) <= bw / 2 + 2 && Math.abs(cy - by) <= CONTAINER_BADGE_H / 2 + 2) return n
     }
     return null
   }
+
+  // ── the certainty lens ──────────────────────────────────────────────────
+  //
+  // Radius is certainty; angle is preserved. Each node keeps its bearing from
+  // the centre and slides along that ray, so the hand-built map survives and
+  // switching the lens off slides everything home.
+  //
+  // It writes NOTHING. This is view state exactly like the relationship
+  // filters — which is what makes the idea affordable at all: a real re-layout
+  // would be one markdown rewrite and one event PER NODE, so 500 nodes is 500
+  // vault writes. See lib/lens.ts for the ring geometry.
+  //
+  // Rebuilt on a LAYOUT EPOCH — lens on, graph change, fog change, filter
+  // change, collapse, restyle — never per frame. The simulation carrying on
+  // underneath does not force a rebuild: the rings are what is on screen, and
+  // a layout that re-derived itself from a drifting sim would shimmer.
+  const rebuildCertainty = useCallback((): void => {
+    const index = fogIndexRef.current
+    const dim = dimFlagNamesRef.current
+    const inputs: CertaintyNodeInput[] = []
+    for (const n of nodesRef.current) {
+      // a node the filters took off the canvas takes no seat on a ring: the
+      // counts on the guides have to be the counts you can see
+      if (!nodeVisible(n)) continue
+      const settled = (n.data.flags ?? []).some((f) => dim.has(f))
+      inputs.push({
+        id: n.id,
+        x: n.x ?? 0,
+        y: n.y ?? 0,
+        band: certaintyBand(index.byId.get(n.id), settled)
+      })
+    }
+    // ring spacing from the LARGEST node the styles can produce, so an area
+    // hexagon on a crowded ring still clears its neighbours
+    let maxR = 0
+    for (const key in stylesRef.current.node) maxR = Math.max(maxR, stylesRef.current.node[key as NodeType].radius)
+    const layout = buildCertaintyLayout(inputs, maxR + 24)
+    lensLayoutRef.current = layout
+    setCertaintyRings(layout.rings)
+    hitIndexRef.current = null
+  }, [])
+
+  useEffect(() => {
+    // whether the canvas is displaced comes from the LENS REGISTRY, not from a
+    // second copy of the rule here — a third lens declares `displaces` and the
+    // frozen-position guards below pick it up with no further edit
+    lensTargetRef.current = lensDisplaces(lens) ? 1 : 0
+    if (lens !== 'certainty') {
+      setCertaintyRings(null)
+      return
+    }
+    rebuildCertainty()
+  }, [
+    lens, rebuildCertainty, graphVersion, fogIndex, dimFlagNames,
+    typeFilters, flagHidden, tagHidden, collapsedContainerIds, styles
+  ])
+
+  // A lens that MOVES nodes changes the extent of the picture — the rings of a
+  // 468-node project reach far past whatever the home layout occupied. Fitting
+  // after the slide is the difference between "the canvas rearranged itself"
+  // and "everything vanished". Only for the displacing lens; fog leaves the
+  // camera alone because it leaves the positions alone.
+  const prevLensRef = useRef<LensId | null>(null)
+  useEffect(() => {
+    const prev = prevLensRef.current
+    prevLensRef.current = lens
+    if (prev === lens) return
+    if (lens !== 'certainty' && prev !== 'certainty') return
+    const timer = setTimeout(() => fitView(), 430)
+    return () => clearTimeout(timer)
+  }, [lens, fitView])
 
   // ── rendering ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -827,10 +1017,104 @@ export function GraphView(): React.JSX.Element {
       // find lens: fm non-null while a non-empty query is live
       const find = findStateRef.current
       const fm = find.matches
+      // fog lens: non-null while it is on. One snapshot per frame, then one
+      // Map.get per node already being painted — no extra pass, no extra
+      // allocation, and every fog branch below is skipped outright when off.
+      const fogL = fogLitRef.current
+      const fogAreas = fogAreaRef.current
       const cinfo = containerInfoRef.current
+
+      // certainty lens: ease the slide between the home map and the rings. Both
+      // directions run through here, so switching the lens off is the same
+      // motion in reverse — which is what lets you follow a node home.
+      const lensTgt = lensTargetRef.current
+      if (Math.abs(lensTgt - lensPhaseRef.current) > 0.0015) {
+        lensPhaseRef.current += (lensTgt - lensPhaseRef.current) * 0.16
+        hitIndexRef.current = null
+      } else if (lensPhaseRef.current !== lensTgt) {
+        lensPhaseRef.current = lensTgt
+        hitIndexRef.current = null
+        // fully home again: drop the arrangement rather than keeping a stale
+        // one alive behind a phase of 0
+        if (lensTgt === 0) lensLayoutRef.current = null
+      }
+      const lensL = lensLayoutRef.current
+      const lensPhase = lensL ? lensPhaseRef.current : 0
 
       // positions moved this frame -> the hit index is stale (see hitIndexRef)
       if ((simRef.current?.alpha() ?? 0) > 0.001) hitIndexRef.current = null
+
+      // -- CERTAINTY RINGS: quiet guides, drawn under everything -----------
+      // The gradient has to be READABLE rather than implied: without the
+      // boundaries a reader sees an arrangement and has to guess what the
+      // distances mean. One circle per band, named with its live count, and
+      // ONE of them brighter -- the frontier, where the spec stops answering,
+      // which is the question the whole lens exists to put on screen.
+      if (lensL && lensPhase > 0.02 && lensL.rings.length) {
+        const gx = lensL.cx * t.k + t.x
+        const gy = lensL.cy * t.k + t.y
+        ctx.font = '600 small-caps 10.5px Inter, system-ui, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'alphabetic'
+        // A ring guide runs THROUGH the nodes it bounds, so its name lands on
+        // top of them — the inner bands worst, where the population is densest
+        // and the name matters most. Each label gets the same dark backing pill
+        // the edge labels use, which is the difference between a legend and a
+        // smear.
+        const ringLabel = (text: string, baseline: number, color: string, alpha: number): void => {
+          const tw = ctx.measureText(text).width
+          ctx.globalAlpha = lensPhase * 0.85
+          ctx.fillStyle = 'rgba(11,14,20,0.92)'
+          ctx.beginPath()
+          ctx.roundRect(gx - tw / 2 - 6, baseline - 11, tw + 12, 15, 4)
+          ctx.fill()
+          ctx.globalAlpha = alpha
+          ctx.fillStyle = color
+          ctx.fillText(text, gx, baseline)
+        }
+        for (const ring of lensL.rings) {
+          const rr = ring.outer * t.k
+          if (rr < 4) continue
+          const bm = BAND_META[ring.band]
+          const isFrontier = ring.band === FRONTIER_BAND
+          ctx.strokeStyle = bm.color
+          ctx.globalAlpha = lensPhase * (isFrontier ? 0.5 : 0.15)
+          ctx.lineWidth = isFrontier ? 1.6 : 1
+          if (isFrontier) ctx.setLineDash([7 * t.k, 5 * t.k])
+          ctx.beginPath()
+          ctx.arc(gx, gy, rr, 0, Math.PI * 2)
+          ctx.stroke()
+          ctx.setLineDash([])
+          // the band names itself just INSIDE its own outer edge, at twelve
+          // o-clock: one column of labels, each at its own radius, so they read
+          // top-to-bottom as the gradient they describe. Dropped when the band
+          // is too thin on screen to hold one, so the column can never collide
+          // with itself as you zoom out.
+          if (rr > 26 && (ring.outer - ring.inner) * t.k > 22) {
+            ringLabel(`${bm.label} · ${ring.count}`, gy - rr + 14, bm.color, lensPhase * (ring.count ? 0.85 : 0.45))
+          }
+        }
+        // THE one boundary worth naming — set OFF the twelve-o-clock column, on
+        // its own line at 45 degrees, so it reads as a border across the bands
+        // rather than as one more band in the list (and so it cannot collide
+        // with the two labels either side of it as the fog bands narrow)
+        const fr = lensL.frontier * t.k
+        if (fr > 30 && t.k > 0.18) {
+          const fx = gx + Math.cos(-Math.PI / 4) * fr
+          const fy = gy + Math.sin(-Math.PI / 4) * fr
+          const text = 'the frontier'
+          const tw = ctx.measureText(text).width
+          ctx.globalAlpha = lensPhase * 0.85
+          ctx.fillStyle = 'rgba(11,14,20,0.92)'
+          ctx.beginPath()
+          ctx.roundRect(fx - tw / 2 - 6, fy - 8, tw + 12, 15, 4)
+          ctx.fill()
+          ctx.globalAlpha = lensPhase * 0.9
+          ctx.fillStyle = BAND_META[FRONTIER_BAND].color
+          ctx.fillText(text, fx, fy + 3)
+        }
+        ctx.globalAlpha = 1
+      }
 
 
       // ── area district hulls — geography, painted FIRST: over the grid, under
@@ -838,7 +1122,12 @@ export function GraphView(): React.JSX.Element {
       // EXPANDED area over its VISIBLE members (fewer than 3 → enclosing
       // circle), in the area's colour at low alpha, labelled at the top edge
       // in small caps with the district's health counts.
-      if (cinfo.areaMembers.size) {
+      // A district hull is a claim about GEOGRAPHY, and under a displacing lens
+      // there is none: its members are scattered across every ring, so the hull
+      // becomes a blob over the whole canvas that means nothing. It fades out
+      // with the slide instead of surviving as noise.
+      const hullA = 1 - lensPhase
+      if (cinfo.areaMembers.size && hullA > 0.02) {
         const byId = new Map(nodesRef.current.map((n) => [n.id, n]))
         for (const areaNode of nodesRef.current) {
           if (!cinfo.areaMembers.has(areaNode.id)) continue
@@ -847,13 +1136,13 @@ export function GraphView(): React.JSX.Element {
           const memberPts: { x: number; y: number }[] = []
           for (const mid of cinfo.areaMembers.get(areaNode.id) ?? []) {
             const m = byId.get(mid)
-            if (m && nodeVisible(m)) memberPts.push({ x: (m.x ?? 0) * t.k + t.x, y: (m.y ?? 0) * t.k + t.y })
+            if (m && nodeVisible(m)) memberPts.push({ x: px(m) * t.k + t.x, y: py(m) * t.k + t.y })
           }
           if (!memberPts.length) continue
           const color = st.node[areaNode.data.type].color
           const pad = HULL_PAD * t.k
           // the area's own anchor joins the blob so the district contains its label-bearer
-          const pts = [...memberPts, { x: (areaNode.x ?? 0) * t.k + t.x, y: (areaNode.y ?? 0) * t.k + t.y }]
+          const pts = [...memberPts, { x: px(areaNode) * t.k + t.x, y: py(areaNode) * t.k + t.y }]
           let topY: number
           let midX: number
           ctx.beginPath()
@@ -877,28 +1166,59 @@ export function GraphView(): React.JSX.Element {
             midX = cxm
           }
           ctx.fillStyle = color
-          ctx.globalAlpha = 0.07
+          ctx.globalAlpha = 0.07 * hullA
           ctx.fill()
+          // DISTRICT FOG DENSITY. The hull path is still current after the fill,
+          // so a second wash costs nothing: a neutral haze whose weight is the
+          // district's fog PER MEMBER. Density, not count — otherwise the
+          // biggest district always looks the foggiest, which tells you only
+          // that it is big. A district reads as foggy before a number is read.
+          const fogArea = fogL ? fogAreas.get(areaNode.id) : undefined
+          if (fogArea) {
+            ctx.fillStyle = FOG_HAZE
+            ctx.globalAlpha = Math.min(0.15, 0.03 + fogArea.density * 0.22) * hullA
+            ctx.fill()
+          }
           ctx.strokeStyle = color
-          ctx.globalAlpha = 0.18
+          ctx.globalAlpha = 0.18 * hullA
           ctx.lineWidth = 1
           ctx.stroke()
           ctx.globalAlpha = 1
-          // label: AREA TITLE · health counts — quiet small caps above the top edge
+          // label: AREA TITLE · health counts — quiet small caps above the top
+          // edge. The shipped Hazy rule rides here for free ("· 3 hazy": items
+          // nobody can phrase sharply yet); the lens adds its own segment below,
+          // and the two do NOT double up — hazy is the sharpness axis, fog is
+          // the whole pile.
           const health = areaHealthRef.current.get(areaNode.id) ?? []
           const segs: { text: string; color: string }[] = [
-            { text: areaNode.data.title, color: color },
+            { text: areaNode.data.title, color },
             ...health.map((h) => ({ text: ` · ${h.count} ${h.name.toLowerCase()}`, color: h.color }))
           ]
+          if (fogArea) {
+            segs.push({ text: ` · ${fogArea.total} fog`, color: FOG_HAZE })
+            if (t.k > 0.6) {
+              // per-class breakdown as bare numbers in the class colours, in the
+              // legend's order — three more WORDS on every district would be
+              // noise, three numbers are a shape you learn to read
+              segs.push({ text: ' (', color: FOG_HAZE })
+              FOG_CLASSES.forEach((c, i) => {
+                if (i) segs.push({ text: '/', color: FOG_HAZE })
+                segs.push({ text: String(fogArea.byClass[c]), color: FOG_CLASS_META[c].color })
+              })
+              segs.push({ text: ')', color: FOG_HAZE })
+            }
+          }
           ctx.font = '600 small-caps 10.5px Inter, system-ui, sans-serif'
           ctx.textAlign = 'left'
           ctx.textBaseline = 'alphabetic'
           const total = segs.reduce((s2, seg) => s2 + ctx.measureText(seg.text).width, 0)
           let lx = midX - total / 2
           const ly = topY - 6
-          const labelDim = fm !== null && !fm.has(areaNode.id)
+          // a district with no fog is a district that is DONE arguing with
+          // itself — under the lens its label recedes with everything else settled
+          const labelDim = (fm !== null && !fm.has(areaNode.id)) || (fogL !== null && !fogArea)
           for (const seg of segs) {
-            ctx.globalAlpha = labelDim ? 0.15 : seg === segs[0] ? 0.75 : 0.95
+            ctx.globalAlpha = (labelDim ? 0.15 : seg === segs[0] ? 0.75 : 0.95) * hullA
             ctx.fillStyle = seg.color
             ctx.fillText(seg.text, lx, ly)
             lx += ctx.measureText(seg.text).width
@@ -920,10 +1240,10 @@ export function GraphView(): React.JSX.Element {
           const a = byId.get(rr.fromId)
           const b = byId.get(rr.hubId)
           if (!a || !b || !nodeVisible(a) || !nodeVisible(b)) continue
-          const rax = (a.x ?? 0) * t.k + t.x
-          const ray = (a.y ?? 0) * t.k + t.y
-          const rbx = (b.x ?? 0) * t.k + t.x
-          const rby = (b.y ?? 0) * t.k + t.y
+          const rax = px(a) * t.k + t.x
+          const ray = py(a) * t.k + t.y
+          const rbx = px(b) * t.k + t.x
+          const rby = py(b) * t.k + t.y
           if (segmentOffscreen(rax, ray, rbx, rby)) continue
           ctx.beginPath()
           ctx.moveTo(rax, ray)
@@ -943,10 +1263,10 @@ export function GraphView(): React.JSX.Element {
         const e = l.target as SimNode
         const rels = edgeRelationships(l.data)
         const single = rels.length === 1 ? st.rel[rels[0].type] : null
-        const x1 = (s.x ?? 0) * t.k + t.x
-        const y1 = (s.y ?? 0) * t.k + t.y
-        const x2 = (e.x ?? 0) * t.k + t.x
-        const y2 = (e.y ?? 0) * t.k + t.y
+        const x1 = px(s) * t.k + t.x
+        const y1 = py(s) * t.k + t.y
+        const x2 = px(e) * t.k + t.x
+        const y2 = py(e) * t.k + t.y
         const dx = x2 - x1
         const dy = y2 - y1
         const dist = Math.hypot(dx, dy) || 1
@@ -964,8 +1284,20 @@ export function GraphView(): React.JSX.Element {
         const isHover = hover.edge === l
         // find lens: edges fade out unless BOTH endpoints match
         const findEdgeDim = fm !== null && !(fm.has(s.id) && fm.has(e.id))
+        // fog lens: a connection with a fog end is a TETHER — what the fog holds
+        // down, or what holds the fog down. Those stay legible (one end lit at
+        // half weight, both ends lit at full) because the shape of the fog is
+        // largely in what it is attached to; settled-to-settled lines recede
+        // with their endpoints rather than surviving as a grey mesh.
+        const fogEnds = fogL === null ? 0 : (fogL.has(s.id) ? 1 : 0) + (fogL.has(e.id) ? 1 : 0)
         const lineColor = single ? single.color : rels.length === 0 ? st.rel.relates.color : MULTI_REL_COLOR
-        const baseAlpha = findEdgeDim ? 0.1 : isSel || isHover ? 0.95 : rels.length >= 2 ? 0.72 : 0.55
+        let baseAlpha = findEdgeDim ? 0.1 : isSel || isHover ? 0.95 : rels.length >= 2 ? 0.72 : 0.55
+        if (fogL !== null && !isSel && !isHover) baseAlpha *= fogEnds === 2 ? 1 : fogEnds === 1 ? 0.55 : 0.13
+        // Arranging by certainty ignores link structure, so edges span the rings
+        // and crossings get WORSE -- the honest, accepted cost of this lens.
+        // They recede rather than vanish: the mesh would otherwise drown the one
+        // thing the lens is drawing, and hover still lights any single line.
+        if (lensPhase > 0.02 && !isSel && !isHover) baseAlpha *= 1 - 0.55 * lensPhase
         ctx.strokeStyle = isSel ? '#e6eaf2' : lineColor
         ctx.globalAlpha = baseAlpha
         ctx.lineWidth = (isSel ? 2.4 : 1.4) * Math.max(t.k, 0.7)
@@ -1003,7 +1335,9 @@ export function GraphView(): React.JSX.Element {
             const vx = fwd ? ux : -ux
             const vy = fwd ? uy : -uy
             ctx.strokeStyle = isSel ? '#e6eaf2' : st.rel[r.type].color
-            ctx.globalAlpha = findEdgeDim ? 0.1 : Math.min(1, baseAlpha + 0.2)
+            // the usual +0.2 lift would make a chevron the BRIGHTEST thing on a
+            // fog-receded line; under the lens it shrinks with the line it rides
+            ctx.globalAlpha = findEdgeDim ? 0.1 : Math.min(1, baseAlpha + (fogL !== null && fogEnds === 0 ? 0.03 : 0.2))
             ctx.lineWidth = 2 * Math.max(t.k, 0.75)
             ctx.lineJoin = 'round'
             ctx.lineCap = 'round'
@@ -1052,7 +1386,7 @@ export function GraphView(): React.JSX.Element {
           ctx.lineWidth = 1.6
           ctx.setLineDash([6, 5])
           ctx.beginPath()
-          ctx.moveTo((s.x ?? 0) * t.k + t.x, (s.y ?? 0) * t.k + t.y)
+          ctx.moveTo(px(s) * t.k + t.x, py(s) * t.k + t.y)
           ctx.lineTo(ld.wx * t.k + t.x, ld.wy * t.k + t.y)
           ctx.stroke()
           ctx.setLineDash([])
@@ -1063,8 +1397,11 @@ export function GraphView(): React.JSX.Element {
       // nodes
       for (const n of visibleNodes()) {
         const meta = st.node[n.data.type]
-        const cx = (n.x ?? 0) * t.k + t.x
-        const cy = (n.y ?? 0) * t.k + t.y
+        // DISPLAYED, so the cull rect culls what is actually on screen: culling
+        // against stored positions under a displacing lens would both drop
+        // nodes that are visible and paint ones that are not
+        const cx = px(n) * t.k + t.x
+        const cy = py(n) * t.k + t.y
         if (centreOffscreen(cx, cy)) continue
         const containedCount = cinfo.membersOf.get(n.id)?.length ?? 0
         const isCollapsedHub = containedCount > 0 && cinfo.collapsed.has(n.id)
@@ -1077,11 +1414,18 @@ export function GraphView(): React.JSX.Element {
         const dim = nodeDimmed(n)
         // find lens: matches render full-strength, everything else recedes to 0.15
         const isMatch = fm !== null && fm.has(n.id)
-        const baseAlpha = fm === null ? (dim ? 0.5 : 1) : isMatch ? 1 : 0.15
+        // fog lens: fog keeps whatever alpha it already had; everything settled
+        // recedes to a fifth of it. MULTIPLIED rather than assigned, so the lens
+        // composes with find and with the dim rules instead of overriding them —
+        // two lenses at once still read correctly, and a done-tagged question
+        // stays quieter than a live one.
+        const fog = fogL === null ? undefined : fogL.get(n.id)
+        let baseAlpha = fm === null ? (dim ? 0.5 : 1) : isMatch ? 1 : 0.15
+        if (fogL !== null && !fog) baseAlpha *= 0.2
 
         ctx.globalAlpha = baseAlpha
         ctx.shadowColor = meta.color
-        ctx.shadowBlur = (isSel || isHover ? 22 : 9) * Math.min(t.k, 1.4)
+        ctx.shadowBlur = (isSel || isHover ? 22 : fog ? 17 : 9) * Math.min(t.k, 1.4)
         ctx.fillStyle = meta.color
         ctx.strokeStyle = meta.color
 
@@ -1141,20 +1485,65 @@ export function GraphView(): React.JSX.Element {
 
         // flag rings: every fired ring-treatment rule draws a dashed ring in its
         // color (stacked outward when several fire)
-        {
-          let ringIdx = 0
-          for (const fname of n.data.flags ?? []) {
-            const rule = flagRulesRef.current.get(fname)
-            if (rule?.treatment !== 'ring') continue
-            ctx.strokeStyle = rule.color ?? '#f87171'
-            ctx.lineWidth = 2 * t.k
-            ctx.setLineDash([3 * t.k, 3 * t.k])
-            ctx.beginPath()
-            ctx.arc(cx, cy, r + (5 + ringIdx * 4) * t.k, 0, Math.PI * 2)
-            ctx.stroke()
-            ctx.setLineDash([])
-            ringIdx++
+        let ringIdx = 0
+        for (const fname of n.data.flags ?? []) {
+          const rule = flagRulesRef.current.get(fname)
+          if (rule?.treatment !== 'ring') continue
+          ctx.strokeStyle = rule.color ?? '#f87171'
+          ctx.lineWidth = 2 * t.k
+          ctx.setLineDash([3 * t.k, 3 * t.k])
+          ctx.beginPath()
+          ctx.arc(cx, cy, r + (5 + ringIdx * 4) * t.k, 0, Math.PI * 2)
+          ctx.stroke()
+          ctx.setLineDash([])
+          ringIdx++
+        }
+        // FOG HALO — the class mark, stacked OUTSIDE any flag ring (ringIdx is
+        // shared with the loop above) so the two vocabularies never collide.
+        // Told apart by FORM and WEIGHT, never by colour alone:
+        //   unknown     thin dotted ring, mostly gaps  nobody knows the answer
+        //   undecided   two bold arcs, two gaps        a split: nobody has chosen
+        //   unabsorbed  one heavy continuous ring      closed: known, just not written down
+        // Ink rises with how much IS known — the same ordinal ramp the chips
+        // list, so the encoding is learnable from the legend in one look and
+        // survives greyscale, where the three colours would not.
+        // `hazy` items (the shipped Hazy rule's tag) draw the same ring
+        // SOFTENED — a real blur, not a fourth colour: an item
+        // that cannot be phrased sharply yet is literally out of focus.
+        if (fog && t.k > 0.22) {
+          const cm = FOG_CLASS_META[fog.fogClass]
+          const kk = Math.max(t.k, 0.7)
+          const hr = r + (5 + ringIdx * 4) * t.k + 3.5
+          ctx.strokeStyle = cm.color
+          ctx.globalAlpha = baseAlpha * 0.92
+          ctx.lineWidth = Math.max(1, FOG_RING_WIDTH[cm.form] * kk)
+          if (fog.hazy) {
+            ctx.shadowColor = cm.color
+            ctx.shadowBlur = 7 * Math.min(t.k, 1.4)
           }
+          if (cm.form === 'dotted') {
+            ctx.setLineDash([1.4 * kk, 3.2 * kk])
+            ctx.lineCap = 'round'
+            ctx.beginPath()
+            ctx.arc(cx, cy, hr, 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.lineCap = 'butt'
+            ctx.setLineDash([])
+          } else if (cm.form === 'split') {
+            // two equal arcs with two equal gaps — the same proportions the chip
+            // swatch draws, so the legend and the canvas are literally one shape
+            for (const from of [-Math.PI * 0.92, Math.PI * 0.08]) {
+              ctx.beginPath()
+              ctx.arc(cx, cy, hr, from, from + Math.PI * 0.62)
+              ctx.stroke()
+            }
+          } else {
+            ctx.beginPath()
+            ctx.arc(cx, cy, hr, 0, Math.PI * 2)
+            ctx.stroke()
+          }
+          ctx.shadowBlur = 0
+          ctx.globalAlpha = baseAlpha
         }
         if (isSel) {
           ctx.strokeStyle = '#e6eaf2'
@@ -1259,26 +1648,33 @@ export function GraphView(): React.JSX.Element {
 
       // labels (screen-space, constant size); find matches keep labels at any zoom,
       // non-matches lose theirs entirely while the lens is active
-      if (t.k > 0.32 || fm !== null) {
+      if (t.k > 0.32 || fm !== null || fogL !== null) {
         ctx.font = '11px Inter, system-ui, sans-serif'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'top'
         for (const n of visibleNodes()) {
           const isMatch = fm !== null && fm.has(n.id)
           if (fm !== null && !isMatch) continue
+          // under the fog lens, fog keeps its name at ANY zoom — zoomed out, the
+          // only words left on the map are the ones nobody has settled
+          const isFog = fogL !== null && fogL.has(n.id)
           const meta = st.node[n.data.type]
           const rScale = cinfo.collapsed.has(n.id) && (cinfo.membersOf.get(n.id)?.length ?? 0) > 0 ? COLLAPSED_SCALE : 1
-          const cx = (n.x ?? 0) * t.k + t.x
-          const cy = (n.y ?? 0) * t.k + t.y + meta.radius * rScale * t.k + 6
+          const cx = px(n) * t.k + t.x
+          const cy = py(n) * t.k + t.y + meta.radius * rScale * t.k + 6
           if (centreOffscreen(cx, cy)) continue
           const isSel = selIds !== null && selIds.length === 1 && selIds[0] === n.id
-          if (!isMatch) {
+          if (!isMatch && !isFog) {
             if (t.k <= 0.32) continue
             if (t.k < 0.55 && !isSel && hover.node !== n && n.data.type !== 'pillar' && n.data.type !== 'warp') continue
           }
           let title = n.data.title
           if (title.length > 26) title = title.slice(0, 25) + '…'
-          ctx.fillStyle = isSel ? '#e6eaf2' : nodeDimmed(n) ? 'rgba(139,148,167,0.55)' : 'rgba(230,234,242,0.82)'
+          ctx.fillStyle = isSel
+            ? '#e6eaf2'
+            : fogL !== null && !isFog
+              ? 'rgba(139,148,167,0.22)'
+              : nodeDimmed(n) ? 'rgba(139,148,167,0.55)' : 'rgba(230,234,242,0.82)'
           ctx.fillText(title, cx, cy)
         }
       }
@@ -1363,12 +1759,26 @@ export function GraphView(): React.JSX.Element {
 
     if (node) {
       const sel = selectionRef.current
+      // THE SHARPEST HAZARD IN THIS FILE. Under a displacing lens every node is
+      // standing somewhere it does not live. A drag would move it in lens space
+      // and drag-end would PATCH those coordinates into the vault — writing the
+      // ring arrangement over the hand-built map the lens exists to preserve,
+      // silently, one node at a time.
+      //
+      // So position drags are REFUSED, not deferred and not remapped: there is
+      // no honest inverse of the ring mapping (a node's radius comes from its
+      // CLASS, not from where it was), and "I moved it and it snapped back"
+      // would be worse than a press that plainly does nothing. Everything that
+      // is not a position still works — click to select, shift to link,
+      // right-click menus, Ctrl+P pinning (which saves the HOME position and is
+      // therefore still correct).
+      const frozen = lensDisplacing()
       // pointer-down on a member of a 2+ selection drags the whole selection
       const group =
-        sel?.kind === 'nodes' && sel.ids.length >= 2 && sel.ids.includes(node.id)
+        !frozen && sel?.kind === 'nodes' && sel.ids.length >= 2 && sel.ids.includes(node.id)
           ? nodesRef.current.filter((n) => sel.ids.includes(n.id)).map((n) => ({ n, x0: n.x ?? 0, y0: n.y ?? 0 }))
           : null
-      dragRef.current = { node, moved: false, group, wx0: wx, wy0: wy }
+      dragRef.current = { node, moved: false, group, wx0: wx, wy0: wy, frozen }
       e.currentTarget.setPointerCapture(e.pointerId)
       return
     }
@@ -1399,6 +1809,16 @@ export function GraphView(): React.JSX.Element {
     }
     const drag = dragRef.current
     if (drag) {
+      // frozen (a lens is displacing): the gesture is still LIVE — it keeps
+      // deferring graph merges exactly as a real drag does, so nothing rebuilds
+      // under the pointer — it simply moves nothing and warms no simulation
+      if (drag.frozen) {
+        if (!drag.moved && Math.abs(wx - drag.wx0) + Math.abs(wy - drag.wy0) > 4) {
+          drag.moved = true
+          lensNotice('positions are frozen while a lens is arranging the canvas — switch the lens off to move nodes')
+        }
+        return
+      }
       if (!drag.moved) {
         drag.moved = true
         // warm-but-damped: 0.22 sustained kept neighbors oscillating (jitter);
@@ -1476,7 +1896,7 @@ export function GraphView(): React.JSX.Element {
         // No preset edge type — QuickAdd's matrix derives it from the type pair and keeps
         // following along while the human changes the new node's type (same as the
         // create-linked-from-selection path). Dropping back on the source cancels.
-        showQuickAdd({ x: wx, y: wy }, [{ nodeId: ld.sourceId }])
+        showQuickAdd(dropPoint(wx, wy), [{ nodeId: ld.sourceId }])
       }
       return
     }
@@ -1484,10 +1904,12 @@ export function GraphView(): React.JSX.Element {
     const drag = dragRef.current
     if (drag) {
       dragRef.current = null
-      simRef.current?.alphaTarget(0).velocityDecay(0.35)
+      if (!drag.frozen) simRef.current?.alphaTarget(0).velocityDecay(0.35)
       if (!drag.moved) {
         // plain click — even on a member of a bigger selection — selects just it
         selectNode(drag.node.id)
+      } else if (drag.frozen) {
+        // refused above; nothing moved, so there is nothing to persist
       } else if (drag.group) {
         for (const m of drag.group) persistDrop(m.n)
       } else {
@@ -1532,7 +1954,7 @@ export function GraphView(): React.JSX.Element {
     const cy = e.clientY - rect.top
     const { x, y } = toWorld(cx, cy)
     if (hitContainerBadge(cx, cy)) return // fast badge clicks must not spawn quick-add
-    if (!hitNode(x, y)) showQuickAdd({ x, y })
+    if (!hitNode(x, y)) showQuickAdd(dropPoint(x, y))
   }
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>): void => {
@@ -1702,8 +2124,8 @@ export function GraphView(): React.JSX.Element {
         const k = Math.max(transformRef.current.k, 0.9)
         targetTransformRef.current = {
           k,
-          x: canvas.clientWidth / 2 - (saved?.x ?? hub?.x ?? 0) * k,
-          y: canvas.clientHeight / 2 - (saved?.y ?? hub?.y ?? 0) * k
+          x: canvas.clientWidth / 2 - (saved?.x ?? (hub ? px(hub) : 0)) * k,
+          y: canvas.clientHeight / 2 - (saved?.y ?? (hub ? py(hub) : 0)) * k
         }
       }
       return
@@ -1713,8 +2135,8 @@ export function GraphView(): React.JSX.Element {
       const k = Math.max(transformRef.current.k, 0.9)
       targetTransformRef.current = {
         k,
-        x: canvas.clientWidth / 2 - (n.x ?? 0) * k,
-        y: canvas.clientHeight / 2 - (n.y ?? 0) * k
+        x: canvas.clientWidth / 2 - px(n) * k,
+        y: canvas.clientHeight / 2 - py(n) * k
       }
     }
   }
@@ -1731,6 +2153,29 @@ export function GraphView(): React.JSX.Element {
     }
     setSelectionPositions(positions)
   }, [selectedIds, setSelectionPositions])
+
+  /** last time the "a lens is holding the layout" notice was shown — repeated
+   *  attempts should not stack toasts, but the first one has to land */
+  const lensNoticeRef = useRef(0)
+  const lensNotice = (msg: string): void => {
+    const now = Date.now()
+    if (now - lensNoticeRef.current < 6000) return
+    lensNoticeRef.current = now
+    toast(msg)
+  }
+
+  /**
+   * A world point taken from the POINTER is a real layout position only while
+   * nothing is displacing the canvas. Under the certainty lens the pointer is
+   * in lens space, and saving those numbers would drop a new node somewhere it
+   * was never put. Undefined instead: the node is created unplaced and the
+   * simulation seats it, which is wrong about nothing.
+   */
+  const dropPoint = (x: number, y: number): { x: number; y: number } | undefined => {
+    if (!lensDisplacing()) return { x, y }
+    lensNotice('a lens is arranging the canvas — the new node will be placed by the layout, not where you clicked')
+    return undefined
+  }
 
   const relayout = (): void => {
     for (const n of nodesRef.current) {
@@ -1978,15 +2423,40 @@ export function GraphView(): React.JSX.Element {
           <FlagFilterChips reorderable />
           <TagFilterChips />
         </FilterSection>
+
+        {/* the LENS section — last, because a lens sits over everything above
+            it rather than being another bucket: it takes nothing off the
+            canvas, it decides how the canvas is painted. Only the PARAMETERS
+            are here; the switch is with the controls, bottom-right, because a
+            lens is a mode rather than a filter. Every figure comes from the
+            same index / layout the draw loop paints from, so the panel can
+            never disagree with the picture. */}
+        <LensSection stats={fogCounts} source={fogIndex.source} rings={certaintyRings} />
       </div>
 
-      {/* controls live in their own bar, bottom-right (faykarta): filters above, controls here */}
+      {/* controls live in their own bar, bottom-right (faykarta): filters above, controls here.
+          The lens switcher leads it — modes first, then the one-shot actions,
+          because a lens changes what every button below it operates on. */}
       <div className="graph-controls">
+        <LensSwitch />
+        <div className="divider" />
         <button className={`btn sm ${autoPin ? '' : 'ghost'}`} title="Pin nodes where you drop them" onClick={() => setAutoPin(!autoPin)}>
           ⌖ pin
         </button>
         <button className="btn sm ghost" title="Fit graph to view" onClick={fitView}>fit</button>
-        <button className="btn sm ghost" title="Release unpinned nodes and re-run layout" onClick={relayout}>re-layout</button>
+        {/* re-layout works on the HOME positions, which a displacing lens is
+            currently hiding — running it would look like a button that does
+            nothing. Disabled and says why, rather than lying. */}
+        <button
+          className="btn sm ghost"
+          title={lensDisplaces(lens)
+            ? 'Unavailable while a lens is arranging the canvas — it would re-run the layout you cannot see'
+            : 'Release unpinned nodes and re-run layout'}
+          disabled={lensDisplaces(lens)}
+          onClick={relayout}
+        >
+          re-layout
+        </button>
         <div className="divider" />
         <button className="btn sm primary" onClick={() => showQuickAdd()}>+ node</button>
       </div>

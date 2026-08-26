@@ -1,0 +1,73 @@
+/* ── Fog lens ────────────────────────────────────────────────────────────
+   The toolbar controls for the canvas fog lens. Everything here is new; the
+   shipped design system (styles.css) is untouched, and the chips reuse its
+   .filter-chip so the fog section reads as one more row of the same bar.
+
+   Palette note: the fog ramp is ONE hue at three lightnesses, not three hues.
+   The classes are told apart on canvas by the FORM of their halo (dotted /
+   split / solid) and by its weight; colour only reinforces that, so the whole
+   lens survives greyscale and the common colour-vision deficiencies. */
+
+:root {
+  --fog-unknown: #7d8ba3;
+  --fog-undecided: #a9b6c9;
+  --fog-unabsorbed: #e2e8f2;
+  --fog-lit: rgba(169, 182, 201, 0.16);
+  --fog-lit-edge: rgba(169, 182, 201, 0.45);
+}
+
+.fog-section-body { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+
+/* the lens switch itself — deliberately not coloured like a type or a flag:
+   it turns a MODE on, it does not add or remove a bucket */
+.filter-chip.fog-lens {
+  gap: 6px;
+  color: var(--text-dim);
+  background: var(--bg-active);
+}
+.filter-chip.fog-lens:hover { color: var(--text); }
+.filter-chip.fog-lens.on {
+  color: var(--fog-unabsorbed);
+  background: var(--fog-lit);
+  box-shadow: inset 0 0 0 1px var(--fog-lit-edge);
+}
+/* the switch's own mark: a filled dot when lit, a hollow one when not — so the
+   state is legible without reading the colour */
+.filter-chip.fog-lens .pip {
+  width: 7px; height: 7px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+}
+.filter-chip.fog-lens.on .pip { background: currentColor; }
+
+.fog-class-chips { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* one chip per class, carrying the SAME ring the canvas draws — the row is the
+   legend, so the encoding is learned in the place it is used */
+.filter-chip.fog-class { gap: 6px; font-weight: 600; }
+.filter-chip.fog-class .fog-swatch { flex: none; display: block; }
+.filter-chip.fog-class .n { font-variant-numeric: tabular-nums; opacity: 0.75; }
+
+/* the report readout: totals when the endpoint answers, one honest line when it
+   does not. Never an error style — a missing report is a missing extra. */
+.fog-readout {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--text-faint); line-height: 1.5;
+  max-width: 340px;
+}
+.fog-readout .n { color: var(--text-dim); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fog-readout .sep { opacity: 0.4; }
+/* a figure that dominates the picture says so. Not an error colour: unlocated
+   fog is a fact about the map, not a fault in it. */
+.fog-readout .loud { color: var(--text-dim); }
+.fog-readout .loud .n { color: var(--fog-unabsorbed); }
+.fog-readout .signal { color: var(--text-dim); }
+.fog-readout .signal::before { content: '· '; opacity: 0.4; }
+
+.fog-note { font-size: 10.5px; color: var(--text-faint); line-height: 1.45; max-width: 340px; }
+.fog-note .em { color: var(--text-dim); }
+
+.fog-retry {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--accent); font: inherit; font-weight: 700;
+}
+.fog-retry:hover { text-decoration: underline; }

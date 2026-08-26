@@ -159,6 +159,21 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   // blast radius: blocks (while unresolved) + reversed depends, transitive,
   // grouped by type, annotated with containing areas + open warps
   app.get('/api/nodes/:id/impact', h('impact.get', (r) => ({ id: r.params.id })))
+  // fog: the same district question asked about UNCERTAINTY — every open
+  // question/threat/flaw/bug/undesignated-feedback, classified, located, split
+  // into frontier vs blocked, with signals about the shape of the pile.
+  // ?bodies=1 carries each item's markdown so one call replaces N+1 fetches.
+  const fogFlags = (r: Request): { bodies: boolean; limit?: number } => ({
+    bodies: r.query.bodies === '1' || r.query.bodies === 'true',
+    limit: typeof r.query.limit === 'string' && r.query.limit.trim() !== '' ? Number(r.query.limit) : undefined
+  })
+  app.get('/api/projects/:id/fog', h('fog.get', (r) => ({
+    projectId: r.params.id,
+    areaId: typeof r.query.area === 'string' && r.query.area.trim() !== '' ? r.query.area.trim() : undefined,
+    ...fogFlags(r)
+  })))
+  // :id is a CONTAINER — an area or a warp (400 otherwise, with the pointer)
+  app.get('/api/nodes/:id/fog', h('fog.node', (r) => ({ id: r.params.id, ...fogFlags(r) })))
 
   // THE DOCUMENT EXPORT — a graph, a container, a selection or a query, flattened
   // into one markdown document. `?format=md` (the default) sends the text itself so

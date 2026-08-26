@@ -1,4 +1,5 @@
 import * as svc from './services'
+import * as fog from './fog'
 import * as skills from './skills'
 import { buildDocument } from './document'
 import { getSettings, updateSettings } from './settings'
@@ -87,6 +88,11 @@ export const registry: Record<string, Handler> = {
   // markdown document. One generator; IPC, REST and the vault write all adapt to it.
   'document.build': (p) => buildDocument(p as never),
   'impact.get': (p) => svc.getImpact(p),
+  // FOG — the third district lens beside scope (what is here) and impact (what
+  // breaks): what is still UNABSORBED here. Same resolution predicate as the
+  // ship gate, so fog and the gate can never disagree about "settled".
+  'fog.get': (p) => fog.getFog(p),
+  'fog.node': (p) => fog.getNodeFog(p),
 
   // reviews are NODES now — nodes.create type review, nodes.waive, nodes.pass,
   // nodes.requestSweep; the review-table methods retired with the review-nodes

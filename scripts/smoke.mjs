@@ -47,6 +47,13 @@ console.log(`smoke → ${BASE}`)
   ok('llms.txt teaches skills: the METHOD axis and prompt-is-a-skill',
     String(llms.json).includes('METHOD') && String(llms.json).includes('## Skills') &&
     String(llms.json).includes('disable-model-invocation'))
+  // fog is a LENS, and the two things an agent can get wrong about it are
+  // inventing a `fog` node type and setting `hazy` for the human. Both are
+  // taught here or not at all.
+  ok('llms.txt teaches fog: a lens not a type, the three classes, hands off `hazy`',
+    String(llms.json).includes('## Fog') && String(llms.json).includes('A LENS, NOT A TYPE') &&
+    String(llms.json).includes('unabsorbed') && String(llms.json).includes('YOU MUST NOT SET IT') &&
+    String(llms.json).includes('no-decision-order'))
   const disco = await req('GET', '/api')
   ok('discovery', disco.status === 200 && Array.isArray(disco.json.resources))
 }
@@ -3182,6 +3189,250 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     await req('DELETE', `/api/projects/${spid}`)
     fs.rmSync(skRoot, { recursive: true, force: true })
     ok('skills: the throwaway root is gone — nothing was left in tmp', !fs.existsSync(skRoot), skRoot)
+  }
+}
+
+// --- FOG: what the spec does not yet absorb. A LENS over question|threat|flaw|
+// bug|feedback, never a node type. Its own project, so the classification, the
+// densities and the signals are asserted against a known shape.
+{
+  const fp = await req('POST', '/api/projects', { name: `fog-${Date.now()}`, description: 'fog fixture' })
+  const fpid = fp.json.id
+  const mk = async (type, title, extra = {}) =>
+    (await req('POST', `/api/projects/${fpid}/nodes`, { type, title, ...extra })).json
+  const report = async (q = '') => (await req('GET', `/api/projects/${fpid}/fog${q}`)).json
+  const itemOf = (r, id) => [...(r.frontier ?? []), ...(r.blocked ?? [])].find((i) => i.id === id)
+  const onFrontier = (r, id) => (r.frontier ?? []).some((i) => i.id === id)
+  const inFog = (r, id) => !!itemOf(r, id)
+  const signal = (r, kind) => (r.signals ?? []).find((s) => s.kind === kind)
+  const inArea = (id) => ({ linkTo: [{ nodeId: id }] })
+
+  try {
+    const area = await mk('area', 'Fog District')
+    const quiet = await mk('area', 'Quiet District')
+    const warp = await mk('warp', 'Fog Warp')
+    // a NON-fog member, so the district's density is not trivially 1.0
+    await mk('feature', 'Fog Feature', inArea(area.id))
+    await mk('feature', 'Quiet Feature', inArea(quiet.id))
+
+    // one of each fog type. Seven questions, because the no-decision-order
+    // signal only speaks above a floor of six (below that, everything really
+    // can be takeable at once).
+    const qCache = await mk('question', 'Which cache backend?', {
+      content: '## Options\n\nRedis, or the embedded store. UNIQUE-FOG-PROSE-MARKER\n', ...inArea(area.id)
+    })
+    const qChoice = await mk('question', 'Which retry policy?', { tags: ['undecided'], ...inArea(area.id) })
+    const qX = []
+    for (let i = 0; i < 5; i++) qX.push(await mk('question', `Open question ${i}`, inArea(area.id)))
+    const threat = await mk('threat', 'The vendor may sunset the API', inArea(area.id))
+    const flaw = await mk('flaw', 'The auth model is wrong', { tags: ['hazy'], ...inArea(area.id) })
+    // warp-only members: located in TIME but not in space — deliberately, so
+    // `unlocated` (which counts by AREA) has something honest to report
+    const bug = await mk('bug', 'Reload loses scroll', { linkTo: [{ nodeId: warp.id }] })
+    const fb = await mk('feedback', 'The spec drifted from the build', { linkTo: [{ nodeId: warp.id }] })
+    // designated feedback is NOT fog — it was absorbed into what it derived
+    const fbDone = await mk('feedback', 'This one became work', { linkTo: [{ nodeId: warp.id }] })
+    const act = await mk('action', 'Realign the spec', { linkTo: [{ nodeId: fbDone.id }] })
+
+    // ---- 1. CLASSIFICATION: derived from what the item IS ------------------
+    const r1 = await report()
+    ok('fog: the report comes back for a project', typeof r1?.counts?.total === 'number', JSON.stringify(r1).slice(0, 200))
+    ok('fog: a plain question is `unknown`', itemOf(r1, qCache.id)?.fogClass === 'unknown', itemOf(r1, qCache.id)?.fogClass)
+    ok('fog: the `undecided` TAG overrides a question\'s unknown — the one hand-applied class',
+      itemOf(r1, qChoice.id)?.fogClass === 'undecided', itemOf(r1, qChoice.id)?.fogClass)
+    // a threat is a plan endangered by something nobody has PINNED DOWN, so
+    // going and finding out is what retires it: unknown, not unabsorbed
+    ok('fog: a threat is `unknown` (find out, not do the work)',
+      itemOf(r1, threat.id)?.fogClass === 'unknown', itemOf(r1, threat.id)?.fogClass)
+    ok('fog: a flaw is `unabsorbed`', itemOf(r1, flaw.id)?.fogClass === 'unabsorbed', itemOf(r1, flaw.id)?.fogClass)
+    ok('fog: a bug is `unabsorbed`', itemOf(r1, bug.id)?.fogClass === 'unabsorbed', itemOf(r1, bug.id)?.fogClass)
+    ok('fog: UNDESIGNATED feedback is `unabsorbed`',
+      itemOf(r1, fb.id)?.fogClass === 'unabsorbed', itemOf(r1, fb.id)?.fogClass)
+    ok('fog: DESIGNATED feedback is not fog at all — it was absorbed into what it derived',
+      !inFog(r1, fbDone.id))
+    ok('fog: an action is never fog — the lens is five types, not "everything open"', !inFog(r1, act.id))
+    ok('fog: a feature is never fog', !r1.frontier.concat(r1.blocked).some((i) => i.type === 'feature'))
+
+    // ---- 2. hazy FOLLOWS THE TAG AND IS NEVER INFERRED ---------------------
+    // "can you state the question precisely NOW" is the human's call: the only
+    // thing that sets hazy is the `hazy` tag they hung on the node themselves.
+    ok('fog: hazy is true exactly where the `hazy` tag is', itemOf(r1, flaw.id)?.hazy === true)
+    ok('fog: hazy is NEVER inferred — an untagged question is sharp however vague it reads',
+      itemOf(r1, qCache.id)?.hazy === false && itemOf(r1, threat.id)?.hazy === false)
+    ok('fog: counts.hazy counts exactly the tagged ones', r1.counts.hazy === 1, String(r1.counts.hazy))
+    const hazyElsewhere = r1.frontier.concat(r1.blocked).filter((i) => i.hazy).length
+    ok('fog: no other item acquired hazy along the way', hazyElsewhere === 1, String(hazyElsewhere))
+
+    // ---- 3. THE COUNTS RECONCILE -------------------------------------------
+    const sums = (o) => Object.values(o ?? {}).reduce((a, b) => a + b, 0)
+    ok('fog: frontier + blocked === total', r1.counts.frontier + r1.counts.blocked === r1.counts.total,
+      JSON.stringify(r1.counts))
+    ok('fog: byClass sums to total', sums(r1.counts.byClass) === r1.counts.total, JSON.stringify(r1.counts.byClass))
+    ok('fog: byType sums to total', sums(r1.counts.byType) === r1.counts.total, JSON.stringify(r1.counts.byType))
+    ok('fog: byType keys are raw node types, feedable straight back into NODE_TYPES',
+      r1.counts.byType.question === 7 && r1.counts.byType.threat === 1 && r1.counts.byType.flaw === 1 &&
+      r1.counts.byType.bug === 1 && r1.counts.byType.feedback === 1, JSON.stringify(r1.counts.byType))
+    ok('fog: the arrays match the counts when nothing is limited',
+      r1.frontier.length === r1.counts.frontier && r1.blocked.length === r1.counts.blocked)
+    ok('fog: nothing is blocked yet, so everything is takeable', r1.counts.blocked === 0)
+    // unlocated counts by AREA — a warp member with no area is honestly unlocated
+    ok('fog: warp-only members count as unlocated (density is measured against geography)',
+      r1.counts.unlocated === 2 && itemOf(r1, bug.id)?.areaId === null &&
+      itemOf(r1, bug.id)?.warpTitle === 'Fog Warp', JSON.stringify({ u: r1.counts.unlocated }))
+    ok('fog: a located item names both containers it has', itemOf(r1, qCache.id)?.areaTitle === 'Fog District')
+    ok('fog: age is milliseconds-since-created, already computed', itemOf(r1, qCache.id)?.age >= 0 &&
+      itemOf(r1, qCache.id)?.age < r1.at, String(itemOf(r1, qCache.id)?.age))
+
+    // ---- 4. DISTRICT DENSITY ----------------------------------------------
+    const dist = (r1.areas ?? []).find((a) => a.id === area.id)
+    ok('fog: the district reports members, fog and a size-independent density',
+      dist?.members === 10 && dist?.total === 9 && dist?.density === 0.9,
+      JSON.stringify(dist))
+    ok('fog: byClass per district sums to its total', sums(dist?.byClass) === dist?.total, JSON.stringify(dist?.byClass))
+    const quietRow = (r1.areas ?? []).find((a) => a.id === quiet.id)
+    ok('fog: a district with NO fog is still listed — zero is information too',
+      quietRow?.total === 0 && quietRow?.members === 1, JSON.stringify(quietRow))
+
+    // ---- 5. bodies=1 — the whole reason to call this instead of N+1 --------
+    ok('fog: without bodies the prose is ABSENT, not empty', itemOf(r1, qCache.id)?.body === undefined)
+    const rb = await report('?bodies=1')
+    ok('fog: bodies=1 carries each item\'s markdown inline',
+      String(itemOf(rb, qCache.id)?.body ?? '').includes('UNIQUE-FOG-PROSE-MARKER'),
+      String(itemOf(rb, qCache.id)?.body ?? '').slice(0, 120))
+    ok('fog: bodies=1 carries prose for the blocked list too, not just the frontier',
+      rb.frontier.concat(rb.blocked).every((i) => typeof i.body === 'string'))
+
+    // ---- 6. BLOCKING MOVES AN ITEM OFF THE FRONTIER ------------------------
+    const blocker = await mk('bug', 'The blocking bug')
+    await req('POST', `/api/projects/${fpid}/edges`, { sourceId: blocker.id, targetId: qCache.id, type: 'blocks' })
+    const r2 = await report()
+    ok('fog: an unresolved blocks-source moves its target off the frontier',
+      !onFrontier(r2, qCache.id) && r2.blocked.some((i) => i.id === qCache.id))
+    ok('fog: the blocked item names what is holding it down',
+      itemOf(r2, qCache.id)?.blockedBy?.some((b) => b.id === blocker.id), JSON.stringify(itemOf(r2, qCache.id)?.blockedBy))
+    ok('fog: and the blocker names what it holds down',
+      itemOf(r2, blocker.id)?.blocks?.some((b) => b.id === qCache.id))
+    ok('fog: frontier + blocked still === total with a block in play',
+      r2.counts.frontier + r2.counts.blocked === r2.counts.total, JSON.stringify(r2.counts))
+    // resolving the SOURCE is enough — nobody has to go and delete the edge.
+    // Same suppression the Blocked flag rule and the ship gate apply.
+    await req('PATCH', `/api/nodes/${blocker.id}`, { tags: ['fixed'] })
+    const r3 = await report()
+    ok('fog: resolving the blocker puts the item back on the frontier — no edge surgery',
+      onFrontier(r3, qCache.id) && itemOf(r3, qCache.id)?.blockedBy?.length === 0)
+    ok('fog: and the resolved blocker has itself left the fog', !inFog(r3, blocker.id))
+
+    // ---- 7. THE no-decision-order SIGNAL -----------------------------------
+    // Everything on the frontier usually means nobody recorded prerequisite
+    // ORDER between the decisions — not that the work is genuinely parallel.
+    const s1 = signal(r3, 'no-decision-order')
+    ok('fog: no-decision-order fires when no question blocks another question',
+      s1?.count === 7, JSON.stringify(s1))
+    ok('fog: and it SAYS the frontier is overstated rather than just counting',
+      /almost never true/.test(s1?.detail ?? ''), s1?.detail)
+    // one recorded prerequisite orders TWO questions — the signal narrows
+    await req('POST', `/api/projects/${fpid}/edges`, { sourceId: qCache.id, targetId: qChoice.id, type: 'blocks' })
+    const r4 = await report()
+    const s2 = signal(r4, 'no-decision-order')
+    ok('fog: one question→question `blocks` takes both of them out of the unordered count',
+      s2?.count === 5, JSON.stringify(s2))
+    ok('fog: the wording changes from "not one" to "a small minority"',
+      !/almost never true/.test(s2?.detail ?? '') && /minority/.test(s2?.detail ?? ''), s2?.detail)
+    ok('fog: recording the order also moves the dependent question off the frontier',
+      !onFrontier(r4, qChoice.id))
+    // order the remaining five and the signal goes silent entirely
+    for (let i = 0; i < qX.length - 1; i++) {
+      await req('POST', `/api/projects/${fpid}/edges`, { sourceId: qX[i].id, targetId: qX[i + 1].id, type: 'blocks' })
+    }
+    await req('POST', `/api/projects/${fpid}/edges`, { sourceId: qChoice.id, targetId: qX[0].id, type: 'blocks' })
+    const r5 = await report()
+    ok('fog: with every open question ordered, no-decision-order stops firing',
+      signal(r5, 'no-decision-order') === undefined, JSON.stringify(r5.signals?.map((s) => s.kind)))
+    ok('fog: the ordered questions are now a chain — one takeable head, the rest blocked',
+      r5.frontier.filter((i) => i.type === 'question').length === 1, String(r5.counts.frontier))
+    ok('fog: undesignated-feedback names the observation nobody designated',
+      signal(r5, 'undesignated-feedback')?.count === 1, JSON.stringify(signal(r5, 'undesignated-feedback')))
+    ok('fog: unlocated-fog reports the items in no district',
+      signal(r5, 'unlocated-fog')?.count === r5.counts.unlocated, JSON.stringify(signal(r5, 'unlocated-fog')))
+    ok('fog: nothing here is stale yet — the signal is absent, not zero',
+      signal(r5, 'stale-fog') === undefined)
+
+    // ---- 8. SCOPING: the same report about ONE container -------------------
+    const areaFog = (await req('GET', `/api/nodes/${area.id}/fog`)).json
+    ok('fog: a node-scoped report covers exactly that district',
+      areaFog.counts.total === 9 && inFog(areaFog, qCache.id) && !inFog(areaFog, bug.id),
+      JSON.stringify(areaFog.counts))
+    ok('fog: a scoped report reconciles too', areaFog.counts.frontier + areaFog.counts.blocked === areaFog.counts.total)
+    ok('fog: a scoped report lists only the districts represented, not every area',
+      (areaFog.areas ?? []).length === 1 && areaFog.areas[0].id === area.id,
+      JSON.stringify((areaFog.areas ?? []).map((a) => a.id)))
+    const warpFog = (await req('GET', `/api/nodes/${warp.id}/fog?bodies=1`)).json
+    ok('fog: scoping reaches a WARP as well as an area — what is unabsorbed in this increment',
+      warpFog.counts.total === 2 && inFog(warpFog, bug.id) && inFog(warpFog, fb.id) && !inFog(warpFog, qCache.id),
+      JSON.stringify(warpFog.counts))
+    ok('fog: bodies=1 works on the scoped route too',
+      warpFog.frontier.concat(warpFog.blocked).every((i) => typeof i.body === 'string'))
+    // area= narrows the project report the same way, but takes an AREA only
+    const viaQuery = (await req('GET', `/api/projects/${fpid}/fog?area=${area.id}`)).json
+    ok('fog: ?area= narrows the project report identically', viaQuery.counts.total === areaFog.counts.total)
+    const areaIsWarp = await req('GET', `/api/projects/${fpid}/fog?area=${warp.id}`)
+    ok('fog: ?area= refuses a warp and POINTS at the route that takes one',
+      areaIsWarp.status === 400 && /nodes\/.*\/fog/.test(areaIsWarp.json?.error?.message ?? ''),
+      JSON.stringify(areaIsWarp.json?.error?.message))
+    const notContainer = await req('GET', `/api/nodes/${qCache.id}/fog`)
+    ok('fog: the node route refuses a non-container with a 400 that names the type',
+      notContainer.status === 400 && /question/.test(notContainer.json?.error?.message ?? ''),
+      JSON.stringify(notContainer.json?.error?.message))
+
+    // ---- 9. limit TRIMS THE ARRAYS, NEVER THE COUNTS ----------------------
+    const lim = await report('?limit=2')
+    ok('fog: limit caps the frontier and blocked ARRAYS',
+      lim.frontier.length <= 2 && lim.blocked.length <= 2)
+    ok('fog: but the counts stay true about the whole scope — exact numbers, bounded queue',
+      lim.counts.total === r5.counts.total && lim.counts.frontier === r5.counts.frontier,
+      JSON.stringify(lim.counts))
+    const badLimit = await req('GET', `/api/projects/${fpid}/fog?limit=0`)
+    ok('fog: a non-positive limit is a 400, not a silently empty report', badLimit.status === 400)
+
+    // ---- 10. FOG AND THE SHIP GATE NEVER DISAGREE ABOUT WHAT IS SETTLED ----
+    // Resolution is not redefined by the lens: it is the SAME done ∪ pruned set
+    // the gate computes. Each terminal verb is checked against BOTH.
+    const gate = await req('PATCH', `/api/nodes/${warp.id}`, { stage: 'ship' })
+    ok('fog: the gate holds the warp on the undesignated feedback', gate.status === 409 &&
+      gate.json.error?.offenders?.undesignated?.some((o) => o.id === fb.id),
+      JSON.stringify(gate.json.error?.offenders?.undesignated))
+    ok('fog: and the fog report names the very same feedback', inFog(r5, fb.id))
+
+    const answered = await req('POST', `/api/nodes/${qCache.id}/answer`, { answer: 'Redis — 4ms p99.' })
+    ok('fog: the question answers', answered.status === 200)
+    const pruned = await req('POST', `/api/nodes/${threat.id}/prune`, { note: 'the vendor renewed' })
+    ok('fog: the threat prunes', pruned.status === 200)
+    const waived = await req('POST', `/api/nodes/${fb.id}/waive`, { note: 'already covered by the spec' })
+    ok('fog: the feedback waives', waived.status === 200)
+
+    const r6 = await report()
+    ok('fog: an ANSWERED question leaves the fog', !inFog(r6, qCache.id))
+    ok('fog: a PRUNED node leaves the fog', !inFog(r6, threat.id))
+    ok('fog: a WAIVED feedback leaves the fog', !inFog(r6, fb.id))
+    const gate2 = await req('PATCH', `/api/nodes/${warp.id}`, { stage: 'ship' })
+    ok('fog: and the gate agrees the waived feedback is settled — one predicate, not two',
+      !(gate2.json.error?.offenders?.undesignated ?? []).some((o) => o.id === fb.id),
+      JSON.stringify(gate2.json.error?.offenders?.undesignated))
+    ok('fog: the counts followed the three resolutions down', r6.counts.total === r5.counts.total - 3,
+      JSON.stringify({ before: r5.counts.total, after: r6.counts.total }))
+    ok('fog: and still reconcile afterwards',
+      r6.counts.frontier + r6.counts.blocked === r6.counts.total &&
+      sums(r6.counts.byClass) === r6.counts.total, JSON.stringify(r6.counts))
+    // answering the head of the chain releases what it was gating — the same
+    // suppression, arriving from the positive terminal verb this time
+    ok('fog: answering the head of a decision chain frees the question it gated',
+      onFrontier(r6, qChoice.id), JSON.stringify(itemOf(r6, qChoice.id)?.blockedBy))
+  } catch (e) {
+    ok('fog: the block ran to completion without throwing', false, String(e))
+  } finally {
+    const rm = await req('DELETE', `/api/projects/${fpid}`)
+    ok('fog: the fixture project is deleted', rm.status === 200)
+    ok('fog: and it is gone', (await req('GET', `/api/projects/${fpid}`)).status === 404)
   }
 }
 

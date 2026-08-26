@@ -91,6 +91,93 @@ a skill is part of *how the product gets built* and its artifact lands outside t
 entirely, in someone's repo. Two existing types were genuinely wrong for it; that, rather than
 the tidiness of a nine-row table, is the argument.
 
+### Fog — a lens, not a type
+
+The axes rule is only useful while it can still refuse a type. **Fog** is the refusal, and it
+came one section after the invention, which is the honest way round.
+
+Fog is **what the spec does not yet absorb**: the open `question`, the live `threat`, the
+unfixed `flaw`, the standing `bug`, the `feedback` nobody has designated. The first instinct was
+a `fog` node type, and the axes table said no. HEALTH already holds "what is wrong or unknown"
+and JUDGMENT already holds "observations about built reality" — a `fog` type would not claim an
+empty axis, it would put a fifth name on things those two axes already carry, and every item
+would then have to be filed twice or filed wrong. So fog is a **lens**: a query over types that
+already exist, computed on read, storing nothing.
+
+That choice has a consequence worth stating, because it is the whole reason the feature is
+trustworthy. Nothing has to be *tagged* as fog for the fog report to see it. A lens over
+existing types cannot rot; a `fog` type, or a `hazy` tag as the primary mechanism, would go stale
+the first time someone filed a question without remembering the ritual, and a fog report that
+silently under-reports is worse than none.
+
+**Three classes, derived from what the item is.** The classes are not severity — they are three
+genuinely different *next moves*, which is what makes the split worth drawing:
+
+| Class | What it means | What clears it |
+|---|---|---|
+| `unknown` | Nobody knows the answer | Go and find out — research, a spike, a measurement |
+| `undecided` | The options are known; nobody has chosen | A **human** decides. An agent researching harder does not help |
+| `unabsorbed` | We know what is wrong; the spec does not say so yet | Do the work — edit the spec, fix the code |
+
+Derivation, from the type and one tag:
+
+| Item | Class | Why |
+|---|---|---|
+| `question` | `unknown` | The default: an unknown needing an answer |
+| `question` + `undecided` tag | `undecided` | The one hand-applied input, because it is genuinely invisible from the type — "which cache do we use" and "how fast is the cache" are both questions, and only one is answerable by going and looking |
+| `threat` | `unknown` | A plan endangered by something *nobody has pinned down*. Going and finding out is what retires it — that is the `unknown` move, not the `unabsorbed` one |
+| `flaw`, `bug` | `unabsorbed` | Both say "we already know something is wrong" (the spec, or the code). The work is missing, not the knowledge |
+| `feedback`, undesignated | `unabsorbed` | An observation nobody turned into work. Designated feedback is not fog at all — it has already been absorbed into what it derived, and counting both would double-count one uncertainty |
+
+Resolution is **not redefined** by the lens: "settled" means exactly the `done ∪ pruned` set the
+flag rules and the ship gate compute. `answer` stamps `answered` (a Done condition) and `waive`
+stamps `pruned`, so an answered question and a waived feedback fall out of the fog through the
+same predicate that stops holding the gate — one implementation, no chance of the two disagreeing.
+Cross-project references are excluded outright: a node that cannot be answered, fixed or waived
+here is not this project's fog, which is the same call the backlog already makes.
+
+**Sharpness is NOT derived.** The `hazy` tag sets `hazy` on an item, and that is the single
+judgement in the feature an agent must not make for the human. The test is *"can you state the
+question precisely now"* — not *"can you answer it now"*. Everything in the report is unanswered
+by construction, so answerability would flag all of it and mean nothing; phrasability is the real
+distinction, and it is the kind of call that reads differently from inside the problem than from
+outside it. Deriving `hazy` would mean an agent guessing at a human's clarity about their own
+work. So: class is computed and cannot rot, sharpness is hand-applied and can — and that
+asymmetry is deliberate rather than an oversight to tidy up later.
+
+**The frontier** is fog that nothing unresolved is blocking: what is takeable *right now*. The
+same resolution suppression the flag rules use applies, so a blocker that is done or pruned stops
+holding its target down and the item returns to the frontier by itself. `frontier + blocked`
+always equals `total` — an item is on one list or the other, never both, never neither.
+
+The frontier's most useful reading is the pathological one, which is why the report carries the
+`no-decision-order` signal. When *everything* is on the frontier, the honest interpretation is
+almost never "this work is genuinely parallel" — it is "nobody ever recorded which decision has
+to come first". Measured on a live project the day this shipped: 43 open questions, 19 `blocks`
+relationships starting at a question, and **every one of them pointing at work rather than at
+another question**. That graph says the questions gate the building, which is true, but it says
+nothing at all about which question gates which — so the frontier reads as 43 takeable decisions
+when the real number is smaller and ordered. The fix is a habit, not a feature: when one decision
+genuinely gates another, record `question —blocks→ question`.
+
+The signal only fires above a floor of six open questions: five or fewer genuinely can all be
+takeable at once, so below that the absence of recorded order is a coincidence and above it it is
+a claim. A hazy item is a related case handled the other way — it stays *in* the frontier, because
+it is genuinely unblocked and its count is the honest measure of how much of the pile is
+unspeakable, but it sorts below work that can start now.
+
+**Fog is reported, never gated.** There is no fog check in the ship gate, and there will not be
+one. Every existing gate category — uncovered members, undesignated feedback, pending actions,
+blockers, incomplete members — is a *fact about the graph*: you can point at the edge or the tag
+that decides it, and a human who disagrees with the verdict is disagreeing about the data, not
+about taste. "Is this fog?" is not that kind of fact. It shades into judgement at the edges: a
+question whose answer is obvious to the person who filed it, a bug already fixed but not yet
+tagged, feedback that means to be a note. A 409 on a judgement call does not teach people to
+resolve their fog — it teaches them to satisfy the checker, by not filing the question, by
+tagging things resolved early, by keeping uncertainty out of the graph where the tool cannot see
+it. That is precisely the outcome the feature exists to prevent, so fog *informs* the decision
+to ship and never makes it.
+
 ### State: tags + flags (no status enum)
 
 Nodes have **no status field** — this tool tracks the Spec, not tasks. State is expressed in

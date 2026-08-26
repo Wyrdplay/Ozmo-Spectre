@@ -2,8 +2,11 @@ import { create } from 'zustand'
 import {
   edgeRelationships,
   type AppInfo, type AppSettings, type Project, type GraphPayload, type SpecNode, type WarpSummary,
-  type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule, type SkillsPayload
+  type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule, type FogClass,
+  type FogReport, type SkillsPayload
 } from '@shared/types'
+import { FOG_CLASSES } from './lib/fog'
+import { LENSES, type LensId } from './lib/lens'
 import { RpcError, rpc } from './api'
 
 export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'agentic' | 'activity' | 'settings'
@@ -36,6 +39,7 @@ export interface Toast {
 let toastSeq = 1
 let graphRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let fogRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 // canvas container-collapse is per-machine UI state, persisted per project.
 // A CONTAINER is a class (node with class-of instances) or an area (member
@@ -75,9 +79,33 @@ const saveHelpOpen = (open: boolean): void => {
   } catch { /* storage full/unavailable — it just reopens collapsed */ }
 }
 
-/** The graph filter bar's three sections. */
-export type FilterSectionId = 'types' | 'links' | 'tags'
-const FILTER_SECTION_IDS: FilterSectionId[] = ['types', 'links', 'tags']
+/** The graph filter bar's sections. */
+export type FilterSectionId = 'types' | 'links' | 'tags' | 'lens'
+const FILTER_SECTION_IDS: FilterSectionId[] = ['types', 'links', 'tags', 'lens']
+
+// the active lens is per-MACHINE UI state like the help panel and the filter
+// sections: a viewing mode, not project data, and it should still be on when
+// you come back to the window you left it on. ONE key holds ONE id, because at
+// most one lens is ever active — the exclusivity is in the storage shape, not
+// only in the setter.
+const LENS_KEY = 'ozmo.lens'
+/** the fog lens's own key, from before lenses were a group — read once, so a
+ *  window that had the fog lens on comes back with it on */
+const LEGACY_FOG_LENS_KEY = 'ozmo.fogLens'
+const loadLens = (): LensId | null => {
+  try {
+    const raw = localStorage.getItem(LENS_KEY)
+    if (raw === null) return localStorage.getItem(LEGACY_FOG_LENS_KEY) === '1' ? 'fog' : null
+    return LENSES.some((l) => l.id === raw) ? (raw as LensId) : null
+  } catch {
+    return null
+  }
+}
+const saveLens = (id: LensId | null): void => {
+  try {
+    localStorage.setItem(LENS_KEY, id ?? '')
+  } catch { /* storage full/unavailable — the lens just reopens off */ }
+}
 
 // filter-bar section collapse is per-MACHINE (not per project): the bar should
 // look the same wherever you land. One key, the collapsed ids.
@@ -85,7 +113,12 @@ const FILTER_SECTIONS_KEY = 'ozmo.filterSections'
 const loadFilterSections = (): FilterSectionId[] => {
   try {
     const arr = JSON.parse(localStorage.getItem(FILTER_SECTIONS_KEY) ?? '[]')
-    return Array.isArray(arr) ? arr.filter((x): x is FilterSectionId => FILTER_SECTION_IDS.includes(x)) : []
+    if (!Array.isArray(arr)) return []
+    // the fog section became the LENS section when lenses grew into a group —
+    // a window that had it folded keeps it folded
+    return arr
+      .map((x) => (x === 'fog' ? 'lens' : x))
+      .filter((x): x is FilterSectionId => FILTER_SECTION_IDS.includes(x))
   } catch {
     return []
   }
@@ -244,6 +277,25 @@ interface OzmoState {
    *  canvas — per-machine UI state, persisted per project, pruned on refresh */
   collapsedContainerIds: string[]
 
+  // ── fog ────────────────────────────────────────────────────────────────
+  /** the last `fog.get` answer for this project, or null when the endpoint has
+   *  never answered. The canvas NEVER requires this: with no report the lens
+   *  falls back to a local derivation (see lib/fog.ts) and says so. */
+  fog: FogReport | null
+  fogLoading: boolean
+  /** the running main process has no `fog.get` (a build older than the feature).
+   *  Distinct from "the call failed": the panel says so plainly, keeps the lens
+   *  working off the local derivation, and never white-screens. */
+  fogUnavailable: boolean
+  /** THE active lens, or null. At most one, ever: two lenses both claiming
+   *  position or opacity would fight and the picture would mean nothing. Visual
+   *  only — a lens never filters the graph, never touches the simulation and
+   *  never writes anything, exactly like the relationship chips. */
+  lens: LensId | null
+  /** fog classes NOT lifted by the lens (subtractive, like every other chip
+   *  row) — they stay in the receded layer instead of leaving the canvas. */
+  hiddenFogClasses: FogClass[]
+
   boot: () => Promise<void>
   setProject: (id: string) => Promise<void>
   setView: (v: View) => void
@@ -253,6 +305,14 @@ interface OzmoState {
   refreshBacklog: () => Promise<void>
   refreshWarps: () => Promise<void>
   refreshActivity: () => Promise<void>
+  /** re-read the fog report — safe to call when the endpoint is missing */
+  refreshFog: () => Promise<void>
+  /** coalesced re-read, for bursts of node/edge events while the lens is on */
+  refreshFogSoon: () => void
+  /** switch a lens on, replacing whatever was on; null switches lenses off */
+  setLens: (id: LensId | null) => void
+  toggleFogClass: (c: FogClass) => void
+  soloFogClass: (c: FogClass) => void
   /** rescan skills + targets (cross-project) — safe to call when the endpoint is missing */
   refreshSkills: () => Promise<void>
   /** coalesced rescan, for bursts of skill and node events */
@@ -350,6 +410,11 @@ export const useStore = create<OzmoState>((set, get) => ({
   focusModal: null,
   findQuery: null,
   collapsedContainerIds: [],
+  fog: null,
+  fogLoading: false,
+  fogUnavailable: false,
+  lens: loadLens(),
+  hiddenFogClasses: [],
 
   boot: async () => {
     try {
@@ -378,9 +443,13 @@ export const useStore = create<OzmoState>((set, get) => ({
       // tags are project vocabulary — a filter on "canvas" means nothing in the next project
       hiddenTags: [],
       relationshipFilters: { ...ALL_RELS },
-      collapsedContainerIds: loadCollapsed(id)
+      collapsedContainerIds: loadCollapsed(id),
+      // the report is per project; the LENS is a viewing mode and survives the
+      // switch (the local derivation covers the gap until a report lands)
+      fog: null, fogUnavailable: false, hiddenFogClasses: []
     })
     await Promise.all([get().refreshGraph(), get().refreshWarps()])
+    if (get().lens) void get().refreshFog()
   },
 
   setView: (v) => {
@@ -479,6 +548,65 @@ export const useStore = create<OzmoState>((set, get) => ({
       set({ activity: await rpc<ActivityEntry[]>('activity.list', { projectId, limit: 200 }) })
     } catch { /* ignore */ }
   },
+
+  // The fog report is an EXTRA, never a prerequisite. It is fetched when the
+  // lens is switched on and refreshed while it stays on; a main process that
+  // has never heard of `fog.get` answers 404 "unknown method", which is a stale
+  // build rather than a broken page — the flag records that, the panel says it,
+  // and the canvas carries on with the local derivation.
+  refreshFog: async () => {
+    const { projectId, fogLoading } = get()
+    if (!projectId || fogLoading) return
+    set({ fogLoading: true })
+    try {
+      const fog = await rpc<FogReport>('fog.get', { projectId })
+      // a slow answer for the project we just left must not paint this one
+      if (get().projectId !== projectId) {
+        set({ fogLoading: false })
+        return
+      }
+      set({ fog, fogUnavailable: false, fogLoading: false })
+    } catch (e) {
+      const missing = e instanceof RpcError && (e.status === 404 || /unknown method/i.test(e.message))
+      // a real failure keeps whatever report we already had (stale beats blank);
+      // a missing endpoint drops it, because there is nothing to be stale about
+      set({ fogLoading: false, fogUnavailable: missing, fog: missing ? null : get().fog })
+      if (!missing) get().toast(`fog report failed: ${e instanceof Error ? e.message : e}`)
+    }
+  },
+
+  refreshFogSoon: () => {
+    if (fogRefreshTimer) return
+    fogRefreshTimer = setTimeout(() => {
+      fogRefreshTimer = null
+      if (get().lens) void get().refreshFog()
+    }, 200)
+  },
+
+  setLens: (id) =>
+    set(() => {
+      saveLens(id)
+      // the fetch is NOT kicked from here: the canvas asks for the report when
+      // a lens is on (mount, project switch and this switch all land on that
+      // one effect), so switching lenses can never race a second request in.
+      // Both lenses read the fog report — fog paints it, certainty places by it.
+      return { lens: id }
+    }),
+
+  // subtractive, like the type chips: a class you switch off stops being lifted
+  toggleFogClass: (c) =>
+    set((s) => ({
+      hiddenFogClasses: s.hiddenFogClasses.includes(c)
+        ? s.hiddenFogClasses.filter((x) => x !== c)
+        : [...s.hiddenFogClasses, c]
+    })),
+
+  // ctrl-click: lift only this class; ctrl-click again while soloed: all three
+  soloFogClass: (c) =>
+    set((s) => {
+      const isSolo = !s.hiddenFogClasses.includes(c) && FOG_CLASSES.every((k) => k === c || s.hiddenFogClasses.includes(k))
+      return { hiddenFogClasses: isSolo ? [] : FOG_CLASSES.filter((k) => k !== c) }
+    }),
 
   // The skills scan is a disk walk across every declared target, so it is NOT
   // free — it runs when the page is opened, when a skill event says something
@@ -674,6 +802,9 @@ export const useStore = create<OzmoState>((set, get) => ({
       // on top (overlay) so an event mid-debounce can't bounce them back.
       set({ settings: overlaySettings(evt.data as AppSettings) })
       s.refreshGraphSoon()
+      // flag rules decide what counts as resolved, which decides what is still
+      // fog — the local derivation reads them, and the server's does too
+      if (s.lens) s.refreshFogSoon()
       return
     }
     // skill.installed / skill.adopted / skill.target.* — the Agentic page is a
@@ -724,6 +855,10 @@ export const useStore = create<OzmoState>((set, get) => ({
 
     if (/^(node|edge|annotation)\./.test(evt.type)) {
       s.refreshGraphSoon()
+      // fog is a query over nodes AND the blocks edges holding them down, so
+      // both move it. Only while the lens is on — nobody pays for a view they
+      // are not looking at.
+      if (s.lens) s.refreshFogSoon()
       // a skill node's body/frontmatter changing moves its drift from clean to
       // ahead, so the matrix has to hear about node edits too
       if (s.view === 'agentic') s.refreshSkillsSoon()

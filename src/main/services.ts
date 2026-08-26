@@ -363,7 +363,7 @@ export async function deleteProject(p: { id: string }, actor: string): Promise<{
 // ---------------------------------------------------------------------------
 // Graph + flags + progress rollup
 
-interface DecoratedGraph extends GraphPayload {
+export interface DecoratedGraph extends GraphPayload {
   /** ids of nodes matching the Done flag rule — done-ness for progress fallback */
   done: Set<string>
   /** done ∪ pruned — resolution: backlog exclusion and incoming-edge suppression */
@@ -378,8 +378,18 @@ interface DecoratedGraph extends GraphPayload {
   foreignNodes: SpecNode[]
 }
 
-/** Load a project's graph and stamp computed flags + progress on every node. */
-function graphInternal(projectId: string): DecoratedGraph {
+/**
+ * Load a project's graph and stamp computed flags + progress on every node.
+ *
+ * EXPORTED so that other main-process lenses (the fog report) read resolution
+ * from the SAME place the ship gate does. `resolved` here is the single
+ * definition of "settled" — Done ∪ Pruned as `computeFlags` evaluates the
+ * user's own flag rules, which is why `answer` (stamps `answered`, a Done
+ * condition) and `waive` (stamps `pruned`) land in it without anybody
+ * re-implementing them. A second predicate elsewhere is the bug the
+ * services/renderer closure audit already found once — do not write one.
+ */
+export function graphInternal(projectId: string): DecoratedGraph {
   projectRow(projectId)
   const nodeRows = db.all<NodeRow>(
     `SELECT n.*, (SELECT COUNT(*) FROM annotations a WHERE a.parent_id = n.id) AS annotation_count

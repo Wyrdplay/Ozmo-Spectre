@@ -116,6 +116,16 @@ PLACEMENT — file things where they belong (decide by what the thing IS):
                                                       with disable-model-invocation)
   none of the above yet                → idea (seeds convert later — POST /convert)
 
+FOG is deliberately NOT a row in that table. There is no \`fog\` node type and adding one would
+be refused by the axes rule: HEALTH already carries "what is wrong or unknown" and JUDGMENT
+already carries "observations about built reality", so \`fog\` would claim no empty axis — it
+would put a fifth name on things those two axes already hold, and every item would then have to
+be filed twice or filed wrong. Fog is a LENS over the types above: an UNRESOLVED question,
+threat, flaw or bug, or an UNDESIGNATED feedback, IS fog the moment it exists. Nothing to tag,
+nothing to remember, nothing to keep in sync — file the thing precisely by the table and the fog
+report finds it. (The one hand-applied part is the \`fog\` TAG, which marks an item as not yet
+sharply phrasable — see § Fog, and do NOT apply it yourself.)
+
 Conventions (recognized, NEVER enforced — keep the graph honest, not policed):
 - areas are FEW and STABLE: single-digit count, renamed rarely — geography, not folders
 - components are SINGULAR: one node per part that exists once in the architecture
@@ -605,6 +615,15 @@ Impact           GET  /api/nodes/:id/impact          — BLAST RADIUS: what brea
                                                        title-chain \`paths\`, and the containing \`areas\` +
                                                        OPEN \`warps\`. Ask before touching a component: an
                                                        empty payload means the change is contained.
+Fog              GET  /api/projects/:id/fog?bodies=1&area=&limit=
+                 GET  /api/nodes/:id/fog             — WHAT THE SPEC DOES NOT YET ABSORB, in one
+                                                       report: unresolved question|threat|flaw|bug
+                                                       plus undesignated feedback, each classified
+                                                       unknown|undecided|unabsorbed, split into the
+                                                       FRONTIER (takeable now) and BLOCKED. A LENS,
+                                                       not a node type. \`bodies=1\` carries the spec
+                                                       prose inline — one call instead of N+1.
+                                                       Full shapes, the classes and the signals: § Fog.
 
 Document         GET  /api/projects/:id/document      — THE WHOLE GRAPH AS ONE MARKDOWN DOCUMENT.
                  GET  /api/nodes/:id/document           Returns text/markdown by default (so \`curl -o
@@ -896,6 +915,238 @@ Curation is a review too: seed one feedback per record from any node query (all 
 stale questions…), each "discusses" its target; adopt = synthesize/convert; waive = waive the
 feedback AND prune the target with the same rationale (the waive dialog offers this in one
 gesture whenever the feedback discusses a record).
+
+## Fog — what the spec does not yet absorb
+
+Fog is everything the spec has not yet taken in: the open question, the live threat, the unfixed
+flaw, the standing bug, the feedback nobody designated. One call gives you the whole pile,
+classified and ordered, so you can pick up uncertainty deliberately instead of tripping over it
+halfway through a build.
+
+  GET /api/projects/:id/fog?bodies=1&area=<AREA_ID>&limit=<n>
+  GET /api/nodes/:id/fog                   — the same report, scoped to ONE container
+
+A LENS, NOT A TYPE. There is no \`fog\` node type and there is not going to be one — the axes
+rule refuses it (see § The ontology). Fog is computed on read from types that already exist:
+
+  question   unresolved                            threat   unresolved
+  flaw       unresolved                            bug      unresolved
+  feedback   UNDESIGNATED — derives nothing and is not waived
+
+"Unresolved" is exactly the resolved-set the flag rules and the ship gate use: NOT matching the
+Done rule (tags done|fixed|answered|adopted|wontfix, or a done/not_needed warp stage) and NOT
+matching the Pruned rule (tag \`pruned\`, which waive stamps). This is not a coincidence to be
+tidied later — it is the point. Answer a question and it leaves the fog; prune a node and it
+leaves the fog; waive a feedback and it leaves the fog, the same instant each stops holding the
+gate. FOG AND THE SHIP GATE NEVER DISAGREE ABOUT WHAT IS SETTLED. If you find a case where they
+do, that is a bug worth filing, not a nuance to work around.
+
+THE THREE CLASSES (\`fogClass\`) — not severity, three different NEXT MOVES:
+
+  unknown      nobody knows the answer                    → go and find out (research, a spike,
+                                                             a measurement). An agent can do this.
+  undecided    the options are known, nobody has chosen   → a HUMAN decides. Researching harder
+                                                             does not help; this one is not yours.
+  unabsorbed   we know what is wrong, the spec does not   → do the work: edit the spec, fix the
+               say so yet                                    code, designate the observation.
+
+The class is DERIVED from what the item is, so it cannot rot by someone forgetting to tag:
+
+  question                → unknown       the default: an unknown needing an answer
+  question + \`undecided\`  → undecided     the ONE hand-applied input, because it is genuinely
+                                          invisible from the type: "which cache do we use" and
+                                          "how fast is the cache" are both questions, and only
+                                          one of them is answerable by going and looking
+  threat                  → unknown       NOT unabsorbed. A threat is a plan endangered by
+                                          something nobody has PINNED DOWN — go and find out is
+                                          what retires it, exactly the unknown move
+  flaw | bug              → unabsorbed    we already know what is wrong (the spec / the code);
+                                          the work is missing, not the knowledge
+  feedback (undesignated) → unabsorbed    an observation nobody turned into work. DESIGNATED
+                                          feedback — anything with an outgoing \`derives\` — is
+                                          not fog at all: it was absorbed into what it spawned,
+                                          and counting both would double-count one uncertainty
+
+Cross-project REFERENCES are excluded outright: a node you cannot answer, fix or waive here is
+not this project's fog, the same call the backlog already makes.
+
+SHARPNESS (\`hazy\`) IS NOT DERIVED — AND YOU MUST NOT SET IT. \`hazy: true\` means the item
+carries the \`hazy\` tag: the human cannot state it precisely yet. The test is
+
+    "can you state the question precisely NOW — not whether you can answer it now"
+
+Everything in this report is unanswered by construction, so answerability would flag all of it
+and mean nothing. Phrasability is the real line, and it reads differently from inside a problem
+than from outside it, so it is the ONE judgement in this feature an agent must not make on the
+human's behalf. Never PATCH the \`hazy\` tag onto someone's node. What you CAN do — and should —
+is sharpen a hazy item: read its body, propose a precise phrasing as an annotation or via
+POST /api/ui/focus, and let the human drop the tag when it is sharp. \`hazy\` is a to-be-sharpened
+marker, not a severity.
+
+THE FRONTIER is fog that nothing unresolved is blocking — takeable RIGHT NOW. Every item lands
+in exactly one of \`frontier\` or \`blocked\`, so \`counts.frontier + counts.blocked === counts.total\`
+and \`byClass\` sums to \`total\`; if your arithmetic disagrees you are reading a filtered payload
+(\`limit\`/\`area\` cap the LISTS; the counts stay honest about the whole scope). Blocking uses the
+same resolution suppression as the flag rules: a blocker that is done or pruned stops holding its
+target down, and the item returns to the frontier by itself with nobody editing an edge.
+
+  Start here: frontier + fogClass unknown   → the research an agent can just do
+              frontier + fogClass undecided → what to ASK THE HUMAN (batch these; do not guess)
+              frontier + fogClass unabsorbed → spec work waiting to be written
+              blocked                        → read \`blockedBy\` before touching any of it
+
+THE FRONTIER IS SORTED AS A QUEUE — work it down from the top and you are working in a defensible
+order without thinking about it: (1) \`blocks.length\` DESCENDING — leverage, the only measure of
+worth comparable across projects: clearing something that holds four nodes down releases four
+nodes. (2) sharp before hazy — a hazy item STAYS in the frontier (it is genuinely unblocked, and
+its count is the honest measure of how much of the pile is unspeakable) but it does not sit above
+work that can start now. (3) class unabsorbed → unknown → undecided: cheapest-to-clear first, and
+descending by who can clear it — undecided sits last because it is the class an agent cannot move
+at all, which is about YOUR queue, not about its importance. (4) age descending. (5) id, so two
+identical calls diff cleanly. \`blocked\` is a SEPARATE list, never merged — merging would let a
+blocked item outrank a takeable one — sorted by \`blockedBy.length\` ASCENDING first: nearest to
+becoming frontier at the top.
+
+THE SIGNALS (\`signals[]\`) are meta-observations about the SHAPE of the pile, not about any one
+item. Four kinds:
+
+  no-decision-order      \`count\` = how many OPEN QUESTIONS have no question→question \`blocks\`
+                         at either end. Fires only when there are ≥6 open questions in scope —
+                         five or fewer genuinely can all be takeable at once, so below that the
+                         absence of order is a coincidence and above it it is a claim. Read it
+                         carefully; see below.
+  unlocated-fog          \`count\` = items in NO AREA (a warp does not count — geography is what
+                         density is measured against). Every figure in \`areas\` covers only the
+                         located remainder, so it UNDERSTATES the real load until these are
+                         membered into a district. Counted, never hidden (\`counts.unlocated\`).
+  stale-fog              \`count\` = items open longer than 14 DAYS; the detail names the oldest and
+                         its age. Work has been routed AROUND these rather than through them, which
+                         is a different problem from a young open question and wants a different
+                         response: decide whether it still MATTERS before answering it. (Two weeks
+                         was measured, not chosen by taste — it sits just beyond everything
+                         currently in flight in this vault, so healthy churn stays silent.)
+  undesignated-feedback  \`count\` = observations nobody derived work from or waived — the same set
+                         the ship gate's \`undesignated\` offender list holds, seen before the 409.
+
+READ \`no-decision-order\` HONESTLY. It fires when open questions carry no recorded prerequisite
+order between them, and its usual companion is a frontier holding nearly everything. The
+tempting reading is "this work is all parallel". THAT IS ALMOST NEVER TRUE. The real reading is
+"nobody ever recorded prerequisite order between the decisions", and the frontier is therefore
+overstating what is genuinely takeable. Measured on a live project the day this shipped: 43 open
+questions, 19 \`blocks\` relationships starting at a question, and EVERY ONE OF THEM pointing at
+work rather than at another question. That graph correctly says the questions gate the building.
+It says nothing whatsoever about which question gates which — so 43 decisions read as takeable
+when the real number is smaller and ordered.
+
+The fix is a habit, and it is yours as much as the human's: WHEN ONE DECISION GENUINELY GATES
+ANOTHER, RECORD IT.
+
+  curl -s -X POST ${base}/api/projects/PROJ/edges -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"sourceId":"Q_STORAGE_ENGINE","targetId":"Q_INDEX_STRATEGY","type":"blocks"}'
+  # "we cannot choose an index strategy until we have chosen the storage engine"
+
+Do this while the reasoning is in front of you — noticing that Q2 only makes sense after Q1 is
+a discovery, and the graph is where discoveries go. Two cautions: \`blocks\` between questions
+means PREREQUISITE, not "related" (a bare connection says related); and the blocks graph is the
+frontier, so a wrong arrow parks real work. When you are unsure whether one gates the other,
+leave it — an overstated frontier is a smaller lie than a fabricated dependency.
+
+\`bodies=1\` — WHY IT EXISTS. \`fogClass\` tells you what KIND of fog an item is; only the prose
+tells you what it actually ASKS. Without bodies you would read the report and then GET each item
+to find out whether it matters: a district with 30 open questions is 31 calls and 31 round trips.
+With \`bodies=1\` it is ONE call and you can triage the whole district's uncertainty in a single
+pass. Bodies are BIG, so budget: take them when you intend to triage, leave them off when you
+only want counts, and narrow with \`area=\` or \`limit=\` before reaching for the whole project's
+prose. \`body\` is present ONLY when you ask — absent otherwise, not empty-string.
+
+THE PROSE BUDGET IS 256KB PER REPORT (~60k tokens), spent in output order so the frontier's prose
+is the prose that survives a tight budget. NOTHING IS DROPPED SILENTLY: the one item that straddles
+the budget keeps a truncated body with a marker naming the byte counts, and every item past it gets
+a body that SAYS it was omitted and where to fetch it —
+
+  "[…body truncated by the fog endpoint: 4021 of 90311 bytes — GET /api/nodes/nd_x/content for the rest]"
+  "[body omitted — the fog report's 256KB prose budget was exhausted before this item; GET /api/nodes/nd_y/content for it]"
+
+So a \`body\` that starts with "[body omitted" is a POINTER, not the spec. If you see either marker,
+you asked for too much at once: narrow with \`area=\`/\`limit=\` and call again rather than reasoning
+from a half-read district.
+
+\`limit=<n>\` (positive integer; anything else is a 400) trims the \`frontier\` and \`blocked\` ARRAYS
+— each to n, independently. It NEVER touches \`counts\`, which stay true about the whole scope. That
+is the intended way to read a big project: exact numbers, a bounded queue.
+
+RESPONSE — GET /api/projects/:id/fog?bodies=1
+
+  {
+    "projectId": "pr_17fee7cb20",
+    "at": 1787681174524,
+    "counts": {
+      "total": 31,
+      "byClass": { "unknown": 18, "undecided": 6, "unabsorbed": 7 },
+      "byType":  { "question": 24, "threat": 2, "flaw": 1, "bug": 3, "feedback": 1 },
+      "frontier": 27, "blocked": 4,     // TRUE totals — \`limit\` trims the arrays, never these
+      "unlocated": 5,          // in no AREA (a warp does not count)
+      "hazy": 3                // carrying the \`hazy\` tag
+    },
+    "areas": [                 // fog DENSITY per district — size-independent, so districts compare.
+                               // EVERY area in the project, densest first — a district with NO fog
+                               // is information too. \`members\` is the district's whole membership
+                               // (the closure, following nested containers), \`total\` its fog.
+      { "id": "nd_1a2b3c4d5e", "title": "Storage & Sync", "members": 24, "total": 9,
+        "byClass": { "unknown": 6, "undecided": 2, "unabsorbed": 1 }, "density": 0.375 }
+    ],
+    "frontier": [              // takeable now — nothing unresolved holds these down
+      { "id": "nd_9f8e7d6c5b", "type": "question", "title": "Which cache backend?",
+        "fogClass": "undecided", "hazy": false,
+        "areaId": "nd_1a2b3c4d5e", "areaTitle": "Storage & Sync",
+        "warpId": null, "warpTitle": null,
+        "blockedBy": [], "blocks": [ { "id": "nd_44aa55bb66", "title": "Session Tokens", "type": "feature" } ],
+        "tags": ["undecided","storage"], "createdAt": 1786000000000, "age": 1681174524,
+        "body": "## Options\\n\\nRedis, or the embedded store...\\n" }
+    ],
+    "blocked": [               // read blockedBy before touching any of these
+      { "id": "nd_77cc88dd99", "type": "flaw", "title": "Token refresh races",
+        "fogClass": "unabsorbed", "hazy": true,
+        "areaId": null, "areaTitle": null, "warpId": "nd_2233445566", "warpTitle": "Warp 7",
+        "blockedBy": [ { "id": "nd_9f8e7d6c5b", "title": "Which cache backend?", "type": "question" } ],
+        "blocks": [], "tags": ["hazy"], "createdAt": 1786500000000, "age": 1181174524 }
+    ],
+    "signals": [                        // absent entirely when a signal does not fire
+      { "kind": "no-decision-order", "count": 24,
+        "detail": "24 of 24 open questions have no recorded prerequisite order (0 question→question \`blocks\` relationships in scope). Not one question is recorded as needing another answered first, so every one of them reads as takeable — which is almost never true. Draw \`blocks\` between the questions that actually gate each other before treating this frontier as a work queue." },
+      { "kind": "unlocated-fog", "count": 5, "detail": "5 fog items belong to no area. ..." },
+      { "kind": "stale-fog", "count": 2, "detail": "2 items open longer than 14 days (oldest: \\"Which cache backend?\\" nd_9f8e7d6c5b, 47 days). ..." },
+      { "kind": "undesignated-feedback", "count": 1, "detail": "1 feedback item with no designation: ..." }
+    ]
+  }
+
+\`age\` is MILLISECONDS SINCE CREATION, already computed — do not subtract \`createdAt\` from
+\`at\` yourself and do not read it as a timestamp. \`areaId\`/\`warpId\` are null when the item is
+in no such container; both null means it is counted in \`unlocated\`. Every id is a real node id:
+GET /api/nodes/:id works on any of them, and so does /impact if you want the blast radius of the
+thing a question is holding up.
+
+SCOPING — GET /api/nodes/:id/fog is the THIRD DISTRICT LENS, beside /scope (what is here) and
+/impact (what breaks if this changes): what is still UNABSORBED here. \`:id\` must be a CONTAINER,
+an AREA or a WARP — anything else is a 400 that names the type and points you at the container it
+belongs to. Membership follows through NESTED containers, so a warp membering an area contributes
+its fog to that area's report.
+
+  curl -s "${base}/api/nodes/AREA_ID/fog?bodies=1"      # this district's uncertainty, prose included
+  curl -s "${base}/api/nodes/WARP_ID/fog"               # what is unabsorbed inside this increment
+
+\`area=\` on the PROJECT report narrows the same way without changing endpoints, but it takes an
+AREA only — pass a warp id and you get a 400 pointing at /api/nodes/:id/fog, which reaches any
+container. An id the project does not have is a 404. When a report is scoped, \`areas\` lists only
+the districts actually represented instead of every area in the project.
+
+FOG IS REPORTED, NEVER GATED. No fog check exists in the ship gate and none is coming. Every gate
+category is a FACT ABOUT THE GRAPH — you can point at the edge or the tag that decides it. "Is
+this fog?" shades into judgement at the edges, and a 409 on a judgement teaches people to satisfy
+the checker rather than to resolve the fog: don't file the question, tag it resolved early, keep
+the uncertainty out of the graph where the tool cannot see it. That is exactly what this feature
+exists to prevent. So read the fog before you plan, cite it when you argue about readiness, and
+never treat it as permission.
 
 ## Skills — standing instructions, authored here, installed into repos
 
@@ -1194,6 +1445,40 @@ Working a district (assigned to one area/warp/class? load THAT, not the project)
                                                                #    exactly this member set (no bodies)
   # 4. per changed node, precise catch-up: GET /api/nodes/NODE_ID/diff?since=T
   # 5. store the scope's \`now\` as your next \`since\` — the loop never re-reads the district.
+
+Taking on a district's UNCERTAINTY (the fog loop — read § Fog first; do NOT set the \`hazy\` tag):
+
+  # 1. ONE call: what this district has not absorbed, class + location + blocking + PROSE.
+  #    Without bodies=1 this is 1 + N calls; with it you triage 30 questions in one read.
+  curl -s "${base}/api/nodes/AREA_ID/fog?bodies=1&limit=20"
+  # 2. TRIAGE the frontier top-down — it is already sorted by leverage (blocks.length):
+  #      fogClass unabsorbed → do the work: edit the spec, then tag the item done/fixed
+  #      fogClass unknown    → go and find out, then answer it:
+  curl -s -X POST ${base}/api/nodes/Q_ID/answer -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"answer":"Redis. Measured 4ms p99 against the embedded store's 31ms — see the benchmark node."}'
+  #      fogClass undecided  → NOT YOURS. Batch these and put them in front of the human:
+  curl -s -X POST ${base}/api/ui/focus -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"projectId":"PROJ","view":"graph","nodeId":"Q_ID","modal":"answer"}'
+  #      hazy: true          → do not answer and do not untag: propose a SHARPER PHRASING and let
+  #                            the human drop the \`hazy\` tag if they agree it is now sayable:
+  curl -s -X POST ${base}/api/nodes/Q_ID/annotations -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"body":"Trying to sharpen this: is the question \\"which store\\", or \\"what p99 must we hit\\"?"}'
+  # 3. RECORD THE ORDER YOU DISCOVERED. If \`signals\` carries no-decision-order, the frontier is
+  #    overstating what is takeable — and you have just read every body, so you are the one who
+  #    knows which decision gates which. Draw it (prerequisite, NOT "related"):
+  curl -s -X POST ${base}/api/projects/PROJ/edges -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"sourceId":"Q_STORAGE_ENGINE","targetId":"Q_INDEX_STRATEGY","type":"blocks"}'
+  #    → Q_INDEX_STRATEGY leaves the frontier and returns by itself when the storage question is
+  #      answered (\`answered\` is a Done tag, and a resolved blocker stops blocking). Unsure which
+  #      gates which? Leave it: an overstated frontier is a smaller lie than a fabricated dependency.
+  # 4. re-read and check your work — counts are TRUE totals, \`limit\` only trims the arrays:
+  curl -s "${base}/api/nodes/AREA_ID/fog" | python3 -c "
+  import json,sys; r=json.load(sys.stdin); c=r['counts']
+  assert c['frontier']+c['blocked']==c['total']
+  print(c['total'],'fog ·',c['byClass'],'· hazy',c['hazy'],'· unlocated',c['unlocated'])
+  print([s['kind'] for s in r['signals']])"
+  # Ship-readiness question? Read the fog, cite it, and DO NOT treat it as permission: fog is
+  # reported, never gated (§ Fog). The gate is /warps and the review closure, as it always was.
 
 Catching up after time away (T = the \`now\` you stored last session, epoch ms):
 

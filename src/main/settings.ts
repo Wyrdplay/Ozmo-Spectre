@@ -21,7 +21,7 @@ const DEFAULTS = (): AppSettings => ({
 })
 
 /** Rules shipped after the original defaults — appended exactly once per version bump. */
-const FLAGS_VERSION = 5
+const FLAGS_VERSION = 7
 const VERSIONED_FLAGS: {
   version: number
   rules: FlagRule[]
@@ -75,6 +75,31 @@ const VERSIONED_FLAGS: {
         }
       }
     }
+  },
+  {
+    version: 7,
+    rules: [
+      // HAZY — the sharpness axis of the fog lens: an item that is real but
+      // cannot be PHRASED precisely yet. Hand-applied on purpose. "Can you
+      // state the question exactly, not answer it" is a human's judgement, and
+      // deriving it from anything would let it rot into a lie.
+      //
+      // The tag is `hazy`, NOT `fog`: `fog` is a TOPIC label in this vault (the
+      // fog warp and its members carry it because they are about the fog
+      // feature), so a rule conditioned on `fog` would classify "a question
+      // about the fog lens" as unsharpenable. The tag matches the FogItem field
+      // it feeds, which is the spelling that cannot drift.
+      //
+      // BADGE, deliberately, not ring. Rings are the alarm register (Blocked
+      // red, Threatened amber, Reference broken red) and fog is not a defect —
+      // every live spec has some, and a spec with none is usually one nobody is
+      // thinking hard about. A badge dot is visible everywhere nodes render
+      // (canvas rim, list chips) and counts on district hull labels
+      // ("USER WORKFLOWS · 3 hazy") without ever reading as "something is wrong
+      // here". The colour is a low-chroma haze blue for the same reason: it
+      // belongs to the fog ramp, not to the warning ramp.
+      { id: 'hazy', name: 'Hazy', treatment: 'badge', color: '#8ea6c6', conditions: [{ kind: 'tag', tag: 'hazy' }] }
+    ]
   }
 ]
 
