@@ -3,3 +3,20 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Credentials — never tracked. The scanner (npm run scan) is the backstop that
+# catches what slips past this list; this list is what stops them arriving.
+.env
+.env.*
+*credential*.txt
+*credential*.json
+*secret*.txt
+*secrets*.json
+*.pem
+*.pfx
+*.p12
+*.keystore
+id_rsa
+id_ed25519
+.npmrc
+.netrc
