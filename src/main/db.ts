@@ -1,27 +1,37 @@
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import initSqlJs, { type Database } from 'sql.js'
 import { newId } from '@shared/types'
 import * as vault from './vault'
+import { openDriver, resolveDriverName, type DriverName, type SqlDriver } from './driver'
 
-let db: Database
+let driver: SqlDriver
 let dbFile = ''
 let saveTimer: NodeJS.Timeout | null = null
 let dirty = false
 
-export async function openDb(file: string): Promise<void> {
+/**
+ * The schema, the migrations and the persistence policy live here. The SQLite
+ * DRIVER does not — see ./driver.ts. Both drivers run the identical migration
+ * path against the identical schema, which is the point: they must not fork.
+ */
+export async function openDb(file: string, requestedDriver?: DriverName | string): Promise<void> {
   dbFile = file
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const wasmDir = path.dirname(require.resolve('sql.js'))
-  const SQL = await initSqlJs({ locateFile: (f: string) => path.join(wasmDir, f) })
-  db = fs.existsSync(file) ? new SQL.Database(fs.readFileSync(file)) : new SQL.Database()
+  const name = resolveDriverName(requestedDriver)
+  driver = await openDriver(name, file)
   enableForeignKeys() // immediately after construction, before any other statement
   migrate()
   enableForeignKeys() // re-assert after migrations (belt and braces)
+  console.log(`[ozmo] storage driver = ${driver.name}`)
   console.log(`[ozmo] PRAGMA foreign_keys = ${foreignKeysOn() ? 1 : 0} (per-connection; re-asserted after every export — see persistNow)`)
   cleanupOrphans()
   persistNow()
+}
+
+/** Which driver the open database is actually running on. Reported in smoke. */
+export function driverName(): DriverName | 'none' {
+  return driver ? driver.name : 'none'
 }
 
 /**
@@ -30,9 +40,12 @@ export async function openDb(file: string): Promise<void> {
  * sqlite3_open in sql.js's export implementation) — which resets the pragma
  * to OFF. Set it right after construction and RE-ASSERT after every export,
  * or ON DELETE CASCADE stops firing the moment the first debounced save runs.
+ *
+ * The native driver has no such trapdoor, but the re-assertion is harmless
+ * there and this stays one shared code path rather than two.
  */
 function enableForeignKeys(): void {
-  db.run('PRAGMA foreign_keys = ON')
+  driver.exec('PRAGMA foreign_keys = ON')
 }
 
 /** Runtime truth of the per-connection pragma — logged at open, guarded in smoke. */
@@ -54,7 +67,7 @@ const ORPHAN_CLEANUP_KEY = 'orphan_cleanup_v2'
  * counts in the meta table so the sweep never runs again.
  */
 function cleanupOrphans(): void {
-  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+  driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
   if (get('SELECT 1 FROM meta WHERE key = ?', [ORPHAN_CLEANUP_KEY])) return
   // ordered parent→child: deleting orphan nodes makes their tags/annotations/
   // revisions orphans, which the later sweeps then catch in the same pass
@@ -68,18 +81,18 @@ function cleanupOrphans(): void {
     ['node_revisions', 'FROM node_revisions WHERE node_id NOT IN (SELECT id FROM nodes)']
   ]
   const removed: Record<string, number> = {}
-  db.run('PRAGMA foreign_keys = OFF') // no cascades mid-sweep — counts stay exact
-  db.run('BEGIN')
+  driver.exec('PRAGMA foreign_keys = OFF') // no cascades mid-sweep — counts stay exact
+  driver.exec('BEGIN')
   try {
     for (const [table, where] of sweeps) {
       removed[table] = get<{ c: number }>(`SELECT COUNT(*) AS c ${where}`)?.c ?? 0
-      if (removed[table] > 0) db.run(`DELETE ${where}`)
+      if (removed[table] > 0) driver.exec(`DELETE ${where}`)
     }
-    db.run('INSERT INTO meta (key, value) VALUES (?, ?)',
-      [ORPHAN_CLEANUP_KEY, JSON.stringify({ at: Date.now(), removed })] as never[])
-    db.run('COMMIT')
+    driver.run('INSERT INTO meta (key, value) VALUES (?, ?)',
+      [ORPHAN_CLEANUP_KEY, JSON.stringify({ at: Date.now(), removed })])
+    driver.exec('COMMIT')
   } catch (e) {
-    db.run('ROLLBACK')
+    driver.exec('ROLLBACK')
     enableForeignKeys()
     throw e
   }
@@ -92,7 +105,7 @@ function migrate(): void {
   // Detected BEFORE the CREATEs: a missing node_revisions table means this is the
   // migration that introduces revision tracking, so existing nodes get a baseline.
   const hadRevisions = !!get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'node_revisions'")
-  db.run(`
+  driver.exec(`
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
       folder TEXT NOT NULL DEFAULT '',
@@ -168,13 +181,13 @@ function migrate(): void {
   `)
   // Guarded column adds — CREATE TABLE IF NOT EXISTS never touches existing tables.
   const nodeCols = all<{ name: string }>('PRAGMA table_info(nodes)').map((c) => c.name)
-  if (!nodeCols.includes('rank')) db.run('ALTER TABLE nodes ADD COLUMN rank REAL')
+  if (!nodeCols.includes('rank')) driver.exec('ALTER TABLE nodes ADD COLUMN rank REAL')
   if (!nodeCols.includes('stage')) {
-    db.run('ALTER TABLE nodes ADD COLUMN stage TEXT')
+    driver.exec('ALTER TABLE nodes ADD COLUMN stage TEXT')
     if (nodeCols.includes('status')) {
       // one-shot backfill: existing warps derive their stage from the status they had
       // (planning→concept, active→implement, done→done, dropped→not_needed)
-      db.run(`UPDATE nodes SET stage = CASE status
+      driver.exec(`UPDATE nodes SET stage = CASE status
                 WHEN 'planning' THEN 'concept'
                 WHEN 'active'   THEN 'implement'
                 WHEN 'done'     THEN 'done'
@@ -182,7 +195,7 @@ function migrate(): void {
                 ELSE 'concept' END
               WHERE type = 'warp'`)
     } else {
-      db.run("UPDATE nodes SET stage = 'concept' WHERE type = 'warp'")
+      driver.exec("UPDATE nodes SET stage = 'concept' WHERE type = 'warp'")
     }
   }
   // cross-project sharing. `shared` is a FIELD, not a tag: tags are
@@ -192,15 +205,15 @@ function migrate(): void {
   // `references_node_id` marks a node as a REFERENCE to another project's node;
   // it is cleared on severance, when the reference materialises into an ordinary
   // local node carrying the `reference-broken` tag.
-  if (!nodeCols.includes('shared')) db.run('ALTER TABLE nodes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0')
-  if (!nodeCols.includes('references_node_id')) db.run('ALTER TABLE nodes ADD COLUMN references_node_id TEXT')
+  if (!nodeCols.includes('shared')) driver.exec('ALTER TABLE nodes ADD COLUMN shared INTEGER NOT NULL DEFAULT 0')
+  if (!nodeCols.includes('references_node_id')) driver.exec('ALTER TABLE nodes ADD COLUMN references_node_id TEXT')
   // skills. `slug` is the installed identity and must survive a retitle, so like
   // `shared` it is a column rather than anything tag- or title-derived.
-  if (!nodeCols.includes('slug')) db.run('ALTER TABLE nodes ADD COLUMN slug TEXT')
-  if (!nodeCols.includes('description')) db.run('ALTER TABLE nodes ADD COLUMN description TEXT')
-  if (!nodeCols.includes('skill_options')) db.run('ALTER TABLE nodes ADD COLUMN skill_options TEXT')
+  if (!nodeCols.includes('slug')) driver.exec('ALTER TABLE nodes ADD COLUMN slug TEXT')
+  if (!nodeCols.includes('description')) driver.exec('ALTER TABLE nodes ADD COLUMN description TEXT')
+  if (!nodeCols.includes('skill_options')) driver.exec('ALTER TABLE nodes ADD COLUMN skill_options TEXT')
   const activityCols = all<{ name: string }>('PRAGMA table_info(activity)').map((c) => c.name)
-  if (!activityCols.includes('detail')) db.run('ALTER TABLE activity ADD COLUMN detail TEXT')
+  if (!activityCols.includes('detail')) driver.exec('ALTER TABLE activity ADD COLUMN detail TEXT')
   if (!hadRevisions) backfillRevisions()
   if (nodeCols.includes('status')) migrateStatusToTags()
   migrateEdgeConnections()
@@ -224,7 +237,7 @@ const REVIEW_NODES_V2_KEY = 'review_nodes_v2'
  * model pass straight through both (v1 stamps zeros, v2 finds no review nodes).
  */
 function migrateReviewNodesAway(): void {
-  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+  driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
   if (get('SELECT 1 FROM meta WHERE key = ?', [REVIEW_NODES_V2_KEY])) return
   const stats = {
     at: Date.now(), reviewNodesRemoved: 0, membersMerged: 0, membersRepointed: 0,
@@ -233,10 +246,10 @@ function migrateReviewNodesAway(): void {
   interface Row { id: string; project_id: string; title: string; file_path: string }
   const reviewNodes = all<Row>("SELECT id, project_id, title, file_path FROM nodes WHERE type = 'review'")
   const t = Date.now()
-  db.run('BEGIN')
+  driver.exec('BEGIN')
   try {
     stats.discussesRelabelled = get<{ c: number }>("SELECT COUNT(*) AS c FROM edges WHERE label = 'filed against'")?.c ?? 0
-    if (stats.discussesRelabelled) db.run("UPDATE edges SET label = 'discusses' WHERE label = 'filed against'")
+    if (stats.discussesRelabelled) driver.exec("UPDATE edges SET label = 'discusses' WHERE label = 'filed against'")
     for (const rv of reviewNodes) {
       const intent = vault.readBody(rv.file_path).replace(/\s+/g, ' ').trim().slice(0, 200)
       const trigger = get<{ target_id: string }>(
@@ -293,10 +306,10 @@ function migrateReviewNodesAway(): void {
           t, JSON.stringify({ trigger, title: rv.title })])
       stats.reviewNodesRemoved++
     }
-    db.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_V2_KEY, JSON.stringify(stats)] as never[])
-    db.run('COMMIT')
+    driver.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_V2_KEY, JSON.stringify(stats)])
+    driver.exec('COMMIT')
   } catch (e) {
-    db.run('ROLLBACK')
+    driver.exec('ROLLBACK')
     throw e
   }
   if (reviewNodes.length) console.log(`[ozmo] migration: review nodes → stage-is-the-review ${JSON.stringify(stats)}`)
@@ -320,7 +333,7 @@ const REVIEW_NODES_KEY = 'review_nodes_v1'
  * meta; the three tables are DROPPED after an in-transaction recount.
  */
 function migrateReviewsToNodes(): void {
-  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+  driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
   if (get('SELECT 1 FROM meta WHERE key = ?', [REVIEW_NODES_KEY])) return
   const stats = {
     at: Date.now(), reviews: 0, feedback: 0, comments: 0, foldNotes: 0,
@@ -330,7 +343,7 @@ function migrateReviewsToNodes(): void {
   const hasTables = !!get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reviews'")
   if (!hasTables) {
     // fresh database — the tables never existed; stamp and move on
-    db.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_KEY, JSON.stringify(stats)] as never[])
+    driver.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_KEY, JSON.stringify(stats)])
     return
   }
 
@@ -409,7 +422,7 @@ function migrateReviewsToNodes(): void {
     return id
   }
 
-  db.run('BEGIN')
+  driver.exec('BEGIN')
   try {
     const perProjectX = new Map<string, number>()
     for (const rv of reviews) {
@@ -492,13 +505,13 @@ function migrateReviewsToNodes(): void {
         stats.comments !== comments.filter((c) => items.some((i) => i.id === c.item_id)).length) {
       throw new Error(`review-nodes migration verification failed: ${JSON.stringify(stats)}`)
     }
-    db.run('DROP TABLE IF EXISTS review_comments')
-    db.run('DROP TABLE IF EXISTS review_items')
-    db.run('DROP TABLE IF EXISTS reviews')
-    db.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_KEY, JSON.stringify(stats)] as never[])
-    db.run('COMMIT')
+    driver.exec('DROP TABLE IF EXISTS review_comments')
+    driver.exec('DROP TABLE IF EXISTS review_items')
+    driver.exec('DROP TABLE IF EXISTS reviews')
+    driver.run('INSERT INTO meta (key, value) VALUES (?, ?)', [REVIEW_NODES_KEY, JSON.stringify(stats)])
+    driver.exec('COMMIT')
   } catch (e) {
-    db.run('ROLLBACK')
+    driver.exec('ROLLBACK')
     throw e
   }
   console.log(`[ozmo] migration: reviews → review nodes ${JSON.stringify(stats)}`)
@@ -520,7 +533,7 @@ const EDGE_CONNECTIONS_KEY = 'edge_connections_v1'
  * locked in with an expression index.
  */
 function migrateEdgeConnections(): void {
-  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+  driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
   const hasType = all<{ name: string }>('PRAGMA table_info(edges)').map((c) => c.name).includes('type')
   if (!get('SELECT 1 FROM meta WHERE key = ?', [EDGE_CONNECTIONS_KEY])) {
     interface OldEdge { id: string; source_id: string; target_id: string; type?: string; label: string; created_at: number; created_by: string }
@@ -528,7 +541,7 @@ function migrateEdgeConnections(): void {
       at: Date.now(), pairs: 0, rowsBefore: 0, rowsAbsorbed: 0, relationships: 0,
       dupRelationshipsCollapsed: 0, labelsMerged: 0, annotationsReparented: 0
     }
-    db.run('BEGIN')
+    driver.exec('BEGIN')
     try {
       const rows = all<OldEdge>('SELECT * FROM edges ORDER BY created_at ASC, id ASC')
       stats.rowsBefore = rows.length
@@ -573,17 +586,17 @@ function migrateEdgeConnections(): void {
           stats.rowsAbsorbed++
         }
       }
-      db.run('INSERT INTO meta (key, value) VALUES (?, ?)', [EDGE_CONNECTIONS_KEY, JSON.stringify(stats)] as never[])
-      db.run('COMMIT')
+      driver.run('INSERT INTO meta (key, value) VALUES (?, ?)', [EDGE_CONNECTIONS_KEY, JSON.stringify(stats)])
+      driver.exec('COMMIT')
     } catch (e) {
-      db.run('ROLLBACK')
+      driver.exec('ROLLBACK')
       throw e
     }
     console.log(`[ozmo] migration: edges → connections ${JSON.stringify(stats)}`)
   }
   if (hasType) {
     try {
-      db.run('ALTER TABLE edges DROP COLUMN type')
+      driver.exec('ALTER TABLE edges DROP COLUMN type')
       console.log('[ozmo] migration: edges.type column dropped — relationships carry types now')
     } catch (e) {
       console.error('[ozmo] migration: edges.type DROP COLUMN failed — column orphaned (never read or written again)', e)
@@ -591,7 +604,7 @@ function migrateEdgeConnections(): void {
   }
   // pair uniqueness, locked in at the storage layer (2-arg scalar min/max expression
   // index) — created only after the dedup above so it cannot trip on legacy parallels
-  db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_pair ON edges (min(source_id, target_id), max(source_id, target_id))')
+  driver.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_pair ON edges (min(source_id, target_id), max(source_id, target_id))')
 }
 
 /**
@@ -623,7 +636,7 @@ function migrateStatusToTags(): void {
     console.error('status → tags frontmatter rewrite failed', e)
   }
   try {
-    db.run('ALTER TABLE nodes DROP COLUMN status')
+    driver.exec('ALTER TABLE nodes DROP COLUMN status')
     console.log('[ozmo] migration: node status → tags complete; status column dropped')
   } catch (e) {
     legacyStatusColumn = true
@@ -662,39 +675,25 @@ function backfillRevisions(): void {
 }
 
 export function all<T = Record<string, unknown>>(sql: string, params: unknown[] = []): T[] {
-  const stmt = db.prepare(sql)
-  try {
-    stmt.bind(params as never[])
-    const rows: T[] = []
-    while (stmt.step()) rows.push(stmt.getAsObject() as T)
-    return rows
-  } finally {
-    stmt.free()
-  }
+  return driver.all<T>(sql, params)
 }
 
 export function get<T = Record<string, unknown>>(sql: string, params: unknown[] = []): T | undefined {
-  return all<T>(sql, params)[0]
+  return driver.get<T>(sql, params)
 }
 
 export function run(sql: string, params: unknown[] = []): void {
-  const stmt = db.prepare(sql)
-  try {
-    stmt.bind(params as never[])
-    stmt.step()
-  } finally {
-    stmt.free()
-  }
+  driver.run(sql, params)
   scheduleSave()
 }
 
 export function tx(fn: () => void): void {
-  db.run('BEGIN')
+  driver.exec('BEGIN')
   try {
     fn()
-    db.run('COMMIT')
+    driver.exec('COMMIT')
   } catch (e) {
-    db.run('ROLLBACK')
+    driver.exec('ROLLBACK')
     throw e
   }
   scheduleSave()
@@ -709,17 +708,21 @@ function scheduleSave(): void {
   }, 400)
 }
 
+/**
+ * Make everything written so far durable.
+ *
+ * On sql.js this re-serialises the WHOLE file (temp + rename) and re-asserts
+ * foreign_keys, because export() closed and reopened the connection underneath
+ * us — miss that and cascades die from the first debounced save onward, which
+ * is the original orphan-rows bug. Both of those live in the sql.js driver now.
+ *
+ * On the native driver the rows were already durable when the statement
+ * returned; this only checkpoints the WAL back into the main file.
+ */
 export function persistNow(): void {
-  if (!db || !dbFile) return
+  if (!driver || !dbFile) return
   dirty = false
-  const data = Buffer.from(db.export())
-  // export() closed and reopened the underlying connection — the per-connection
-  // foreign_keys pragma just silently reset to OFF. Re-assert or cascades die
-  // after the first debounced save (the original orphan-rows bug).
-  enableForeignKeys()
-  const tmp = dbFile + '.tmp'
-  fs.writeFileSync(tmp, data)
-  fs.renameSync(tmp, dbFile)
+  driver.persist()
 }
 
 export function flushDb(): void {
@@ -728,4 +731,15 @@ export function flushDb(): void {
     saveTimer = null
   }
   if (dirty) persistNow()
+}
+
+/** Final flush + release. The file left behind must open under EITHER driver. */
+export function closeDb(): void {
+  if (!driver) return
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  dirty = false
+  driver.close()
 }

@@ -80,18 +80,23 @@
   padding: 10px 0 4px;
   align-items: center;
 }
+/* collapsed to the rail there is room for the dot and nothing else */
+.sidebar.collapsed .api-copy { align-items: center; gap: 0; }
 .sidebar.collapsed .api-status { justify-content: center; }
 .sidebar.collapsed .api-status span:not(.api-dot),
 .sidebar.collapsed .api-status code { display: none; }
 .sidebar.collapsed .agents-hint { display: none; }
 
-/* ── API status / agents hint — real <button>s now (click to copy), reset back
-   to look exactly like the plain footer rows they replaced; only a focus ring
-   and the transient "copied ✓" flash are new. */
-.api-status,
-.agents-hint {
+/* ── The agent handoff — ONE real <button> wrapping both footer lines, so the
+   whole block is a single copy target. Reset back to look exactly like the
+   plain footer rows it replaced; only a focus ring and the transient
+   "copied ✓" flash are new. */
+.api-copy {
   border: none; background: none; padding: 0; margin: 0; width: 100%;
   font: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: 5px;
 }
-.api-status .copy-flash,
-.agents-hint .copy-flash { color: var(--ok); }
+.api-copy:disabled { cursor: default; }
+.api-copy .copy-flash { color: var(--ok); }
+/* the collapsed rail has no room for "copied ✓", so the dot itself flashes */
+.api-copy.copied .api-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }

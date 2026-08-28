@@ -140,14 +140,27 @@ try {
     throw new Error(`the app took port ${health.port}, not the ${port} it was given — refusing to run against an instance this script does not own`)
   }
 
-  log('running the suite ...')
-  const smoke = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'smoke.mjs')], {
-    cwd: REPO,
-    stdio: 'inherit',
-    env: { ...process.env, OZMO_BASE: base }
-  })
-  code = smoke.status ?? 1
-  log(code === 0 ? 'suite passed' : `suite FAILED (exit ${code})`)
+  // BOTH suites, and the exit code is the worst of them. Running only the
+  // first would let the client surface rot behind a green build, and a suite
+  // that quietly stops running is indistinguishable from a suite that passes.
+  const SUITES = [
+    ['agent API', 'smoke.mjs'],
+    ['thin client', 'smoke-client.mjs']
+  ]
+  const results = []
+  for (const [label, file] of SUITES) {
+    log(`running the ${label} suite ...`)
+    const run = spawnSync(process.execPath, [path.join(REPO, 'scripts', file)], {
+      cwd: REPO,
+      stdio: 'inherit',
+      env: { ...process.env, OZMO_BASE: base }
+    })
+    const status = run.status ?? 1
+    results.push([label, status])
+    log(`${label}: ${status === 0 ? 'passed' : `FAILED (exit ${status})`}`)
+  }
+  code = results.some(([, s]) => s !== 0) ? 1 : 0
+  log(`suites: ${results.map(([l, s]) => `${l}=${s === 0 ? 'pass' : 'FAIL'}`).join('  ')}`)
 } catch (e) {
   console.error(`[ci-smoke] ${e?.message ?? e}`)
   code = 1

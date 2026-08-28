@@ -1,5 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from 'express'
 import cors from 'cors'
+import fs from 'fs'
+import path from 'path'
 import type { Server } from 'http'
 import type { BrowserWindow } from 'electron'
 import { call } from './registry'
@@ -13,6 +15,58 @@ let actualPort = 0
 
 export function getPort(): number {
   return actualPort
+}
+
+/**
+ * THE EVENT RECORDER — one sequence number per event, for everyone.
+ *
+ * The bus (`events.ts`) is fire-and-forget and knows nothing about who is
+ * listening, which is right for it. A network stream needs one thing the bus
+ * cannot give: a shared, stable name for each event, so a client that dropped
+ * can say which one it saw last. That name is assigned exactly once here, and
+ * connections attach to the recorder rather than to the bus.
+ *
+ * The buffer is deliberately small and in memory. It is a reconnect window for
+ * a client whose wifi blinked, not an event log — a client gone longer than
+ * this is told to resync, which is cheap and correct. Presence, when it lands,
+ * must never come through here (it is throttled, lossy and latest-wins; keeping
+ * 500 cursor frames to replay would be exactly backwards).
+ */
+const EVENT_BUFFER = 500
+type EventSink = (seq: number, evt: OzmoEvent) => void
+let eventSeq = 0
+const ring: { seq: number; evt: OzmoEvent }[] = []
+const sinks = new Set<EventSink>()
+let offBus: (() => void) | null = null
+
+function startEventRecorder(): void {
+  if (offBus) return
+  offBus = onEvent((evt: OzmoEvent) => {
+    const seq = ++eventSeq
+    ring.push({ seq, evt })
+    if (ring.length > EVENT_BUFFER) ring.shift()
+    for (const sink of sinks) {
+      try {
+        sink(seq, evt)
+      } catch {
+        // one wedged response must never stop the others being told
+      }
+    }
+  })
+}
+
+/**
+ * Everything after `since`, and whether anything before that was already gone.
+ * `lost` is the honest answer to "can you fill my gap?" — the client acts on it
+ * by refetching, instead of believing a partial replay was the whole story.
+ */
+function replayEventsSince(since: number): { lost: boolean; events: { seq: number; evt: OzmoEvent }[] } {
+  // A client ahead of us (the server restarted and the sequence went back to 0)
+  // is as lost as one that fell behind, and for the same reason: the ids it
+  // holds name events that are not the events we would replay.
+  if (since > eventSeq) return { lost: true, events: [] }
+  const oldestKept = ring.length > 0 ? ring[0].seq : eventSeq + 1
+  return { lost: since + 1 < oldestKept, events: ring.filter((e) => e.seq > since) }
 }
 
 const actorOf = (req: Request): string => {
@@ -39,6 +93,7 @@ const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d{1,5})
 
 export async function startServer(preferredPort: number, getWindow: () => BrowserWindow | null, version: string): Promise<number> {
   const app = express()
+  startEventRecorder()
 
   /**
    * CORS: no Origin header (curl, agents, the Electron renderer) plus explicit
@@ -77,6 +132,54 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
     res.json({ ok: true, app: 'ozmo-spectre', version, port: actualPort, at: Date.now() })
   })
 
+  // The registry has always had app.info; only IPC could reach it, so store.boot()
+  // — which asks for it first — could never run against anything but Electron.
+  // A network client cannot start without this route.
+  app.get('/api/info', h('app.info', () => ({})))
+
+  /**
+   * THE THIRD ADAPTER.
+   *
+   * `ipcMain.handle('rpc', ...)` (`src/main/ipc.ts:11`) is nine lines: take a
+   * method name and a payload, call the registry, and return an envelope that
+   * carries `ApiError.data` alongside the status. This is the same nine lines
+   * over HTTP, and it exists for the same reason — a CLIENT does not want
+   * sixty-seven bespoke routes, it wants the one core the registry already is.
+   *
+   * The resource routes below are NOT replaced by this and must not be. They
+   * are the agent-facing surface: discoverable in `/llms.txt`, curl-shaped,
+   * REST-shaped. An agent reads a guide and writes `POST /api/nodes/:id/waive`.
+   * A client that has already been written against `rpc()` reads nothing and
+   * wants the dispatcher. Two audiences, two ergonomics, one registry — which
+   * is the parity pillar working rather than being asserted.
+   *
+   * The envelope is IPC's, deliberately, down to the nesting: REST's error
+   * handler MERGES `ApiError.data` into the error body, IPC nests it under
+   * `error.data`, and the renderer's `RpcError` reads the nested shape. A
+   * client swapping transports must not have to swap error parsing too.
+   */
+  app.post('/api/rpc', async (req: Request, res: Response) => {
+    const method = typeof req.body?.method === 'string' ? req.body.method : ''
+    try {
+      const data = await Promise.resolve(call(method, req.body?.payload ?? {}, { actor: actorOf(req) }))
+      res.json({ ok: true, data })
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 500
+      if (status >= 500) console.error(`API error (rpc ${method}):`, e)
+      // 200 with ok:false would be the easy shape and the wrong one: a status
+      // code is how a proxy, a log and a browser devtools panel all learn that
+      // this failed. The envelope carries it as well, for the client.
+      res.status(status).json({
+        ok: false,
+        error: {
+          message: e instanceof Error ? e.message : String(e),
+          status,
+          data: e instanceof ApiError ? e.data : undefined
+        }
+      })
+    }
+  })
+
   app.get(['/llms.txt', '/api/llms.txt'], (_req, res) => {
     res.type('text/plain').send(llmsTxt(base()))
   })
@@ -93,24 +196,75 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   })
 
   // --- events (SSE) ---
+  /**
+   * Over IPC a dropped stream is not a thing that happens: the process either
+   * has the window or it does not. Over wifi it is ordinary, and a client that
+   * reconnects into a silent stream has a board that is quietly wrong — the
+   * worst failure this app can have, because nothing on screen says so.
+   *
+   * So every event gets a sequence number, the last `EVENT_BUFFER` of them are
+   * kept, and a reconnect carrying `Last-Event-ID` either gets the gap replayed
+   * or is TOLD IT CANNOT BE. `resync` is not an error; it is the stream saying
+   * "refetch the graph, I cannot fill this in", which is a thing the client can
+   * act on. Silence is not.
+   */
   app.get('/api/events', (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
+      // proxies that buffer turn an event stream into a batch delivery
+      'X-Accel-Buffering': 'no',
       // the origin guard above has already vetted this (or there is none at all)
       'Access-Control-Allow-Origin': req.header('origin') ?? '*'
     })
-    res.write(`: connected\n\n`)
     const projectFilter = typeof req.query.projectId === 'string' ? req.query.projectId : null
-    const off = onEvent((evt: OzmoEvent) => {
-      if (projectFilter && evt.projectId && evt.projectId !== projectFilter) return
-      res.write(`data: ${JSON.stringify(evt)}\n\n`)
-    })
+    const matches = (evt: OzmoEvent): boolean => !projectFilter || !evt.projectId || evt.projectId === projectFilter
+    /**
+     * `data:` FIRST, `id:` after — and that order is load-bearing.
+     *
+     * SSE dispatches a frame on the blank line and does not care which field
+     * came first, so both orders are correct by the spec and identical to
+     * EventSource. They are not identical to the consumers this API actually
+     * has: `/llms.txt` has been telling agents to read `/api/events` for as
+     * long as it has existed, and the obvious ten-line reader for that splits
+     * on a blank line and checks the frame starts with `data: `. Putting the id
+     * in front silently breaks every one of those, with no error anywhere — the
+     * stream connects, the frames arrive, and nothing is ever parsed.
+     *
+     * Our own smoke test was written exactly that way and caught this, which is
+     * the argument for the ordering rather than against the reader.
+     */
+    const send = (seq: number, evt: OzmoEvent): void => {
+      res.write(`data: ${JSON.stringify(evt)}\nid: ${seq}\n\n`)
+    }
+
+    // EventSource resends the id it last saw automatically; the query parameter
+    // is for clients that do their own reconnect (and for testing with curl).
+    const askedRaw = req.header('last-event-id') ?? (typeof req.query.lastEventId === 'string' ? req.query.lastEventId : '')
+    const asked = Number.parseInt(askedRaw, 10)
+    if (Number.isFinite(asked) && asked > 0) {
+      const gap = replayEventsSince(asked)
+      if (gap.lost) {
+        // named event, not a data frame: a client that does not know about
+        // resync ignores it, rather than trying to parse it as a mutation
+        res.write(`event: resync\ndata: ${JSON.stringify({ reason: 'buffer', since: asked, head: eventSeq })}\n\n`)
+      }
+      for (const { seq, evt } of gap.events) if (matches(evt)) send(seq, evt)
+    }
+    res.write(`: connected at ${eventSeq}\n\n`)
+
+    // Subscribing to the recorder, NOT to the bus: the sequence number must be
+    // one number per event, not one per listener, or two clients would disagree
+    // about what "event 41" is and a replay would hand back the wrong history.
+    const sink: EventSink = (seq, evt) => {
+      if (matches(evt)) send(seq, evt)
+    }
+    sinks.add(sink)
     const heartbeat = setInterval(() => res.write(': ping\n\n'), 25000)
     req.on('close', () => {
       clearInterval(heartbeat)
-      off()
+      sinks.delete(sink)
     })
   })
 
@@ -364,6 +518,40 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   app.get('/api/search', h('search.run', (r) => ({ projectId: r.query.projectId as string, q: r.query.q as string })))
   app.post('/api/ui/focus', h('ui.focus', (r) => r.body))
 
+  /**
+   * THE CLIENT, SERVED BY THE CORE, at `/app`.
+   *
+   * `npm run dev:web` is a vite server on another port pointed here with
+   * `?api=`, which is right for developing the client and wrong as the thing
+   * anyone uses: it means the client is only reachable from a machine with the
+   * repo checked out and two processes running. Served from here it is a URL —
+   * the core hands out the bundle and then answers it, same origin, no `?api=`,
+   * no CORS, nothing to configure.
+   *
+   * Mounted only when a build exists. An unbuilt tree says so with the command
+   * that fixes it, because a 404 here reads as "this feature is missing"
+   * rather than "you have not built it yet".
+   */
+  const webDir = path.join(__dirname, '..', 'web')
+  if (fs.existsSync(path.join(webDir, 'index.web.html'))) {
+    // `redirect: false` — otherwise a GET of bare `/app` is answered with a
+    // 301 to `/app/` instead of the page, which every client follows and no
+    // client needed to.
+    app.use('/app', express.static(webDir, { index: false, redirect: false }))
+    // The client is a single page; every path under /app is its entry. `sendFile`
+    // rather than a redirect so a deep link keeps its URL.
+    app.get(/^\/app(\/.*)?$/, (_req, res) => {
+      res.sendFile(path.join(webDir, 'index.web.html'))
+    })
+  } else {
+    app.get(/^\/app(\/.*)?$/, (_req, res) => {
+      res
+        .status(503)
+        .type('text/plain')
+        .send('The browser client is not built in this tree.\n\n  npm run build:web\n\nThen reload this page. (Developing it? npm run dev:web — vite on 5174.)\n')
+    })
+  }
+
   app.get('/api/debug/screenshot', async (_req, res) => {
     const win = getWindow()
     if (!win) {
@@ -412,4 +600,7 @@ function listen(app: express.Express, preferred: number): Promise<number> {
 export function stopServer(): void {
   server?.close()
   server = null
+  offBus?.()
+  offBus = null
+  sinks.clear()
 }

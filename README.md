@@ -5,19 +5,75 @@
 A desktop canvas for shaping software **with AI agents**. Specs live as markdown in your Obsidian
 vault; the graph of ideas → pillars/principles → features → warps → bugs/questions lives in SQLite;
 and everything a human can do in the UI, an agent can do over a local REST API — attributed, live,
-and on the same board. See [DESIGN.md](DESIGN.md) for the full design.
+and on the same board. See [DESIGN.md](DESIGN.md) for the full design — which is not written by
+hand: it is the board itself, exported by `npm run gen:design`.
 
 ## Run
 
 ```bash
 npm install
-npm run dev        # dev (add: npx electron-vite dev -w to hot-restart main)
-npm run build      # production bundles into out/
-npm run smoke      # end-to-end API test (needs the app running)
+npm run dev          # desktop app (electron-vite, watching)
+npm run build        # production bundles into out/ — main, preload, renderer AND the web client
+npm run smoke        # end-to-end agent API test (needs the app running)
+npm run smoke:client # thin-client surface: /api/rpc, event resume, the served bundle
+npm run gen:design   # regenerate DESIGN.md from the board (needs the app running)
 ```
 
 First launch creates the vault at `Documents/OzmoSpecVault` (change in Settings), seeds a small
 self-describing starter project, and starts the agent API on **http://127.0.0.1:4820**.
+
+## Two clients, one core
+
+Every capability lives in one method registry (`src/main/registry.ts`). Three adapters sit on it:
+Electron IPC, the REST resource routes agents read about in `/llms.txt`, and `POST /api/rpc` — the
+dispatcher a client wants. That is what makes a second front end a *client* rather than a fork.
+
+**The desktop app** is the core: it owns the database, the vault and the API, and its renderer
+talks over IPC.
+
+**The browser client** is the same renderer, built for the web, talking to a running Spectre over
+HTTP. The core serves it:
+
+```
+http://127.0.0.1:4820/app          # after npm run build (or npm run build:web)
+```
+
+To develop it against a desktop Spectre:
+
+```bash
+npm run dev:web                    # vite on 5174
+# → http://localhost:5174/app/?api=http://127.0.0.1:4820   (remembered after the first visit)
+```
+
+What the browser client does *not* have is deliberate and named: the folder pickers, reveal-in-
+folder, Open in Obsidian, relaunch, and the vault/port settings all address the machine the core
+runs on. They are **absent, not broken** — every one is a flag on the host seam
+(`src/renderer/src/host.ts`), and a component asks before drawing the affordance. A view that
+reaches past that seam is the thing that would quietly turn one codebase into two.
+
+Both clients are live on the same events. Over the network that stream carries a sequence id, so a
+client whose link drops reconnects with `Last-Event-ID` and either gets the gap replayed or is told
+to resync — never silently handed a stale board.
+
+## Storage
+
+SQLite, one file, in `.ozmo/` inside the vault. Two drivers run the same schema behind one seam
+(`src/main/driver.ts`):
+
+```bash
+npm run dev                        # sql.js (wasm) — the default
+OZMO_DB_DRIVER=native npm run dev  # better-sqlite3 — real pages, WAL
+
+npm run db:backup                  # verified snapshot + manifest
+npm run db:restore                 # PROVE the snapshot restores (scratch dir by default)
+npm run db:parity                  # both drivers through the real db.ts, diffed
+npm run db:bench                   # what the difference costs
+```
+
+`sql.js` re-serialises the whole database on every write, which is a fair trade for one local
+process and the wrong shape for a served board: on the live 12.9MB board a node create costs 136ms
+against 1.3ms native. The native driver is opt-in until it has run against a real board long enough
+to trust, and both drivers read and write the same file — which is what keeps a cutover reversible.
 
 ## Point an agent at it
 
@@ -53,9 +109,15 @@ authoring — the same skill copied into a dozen repos drifts, and nothing else 
 
 ```
 src/shared    domain model + type metadata (single source of truth)
-src/main      electron main: sqlite (sql.js), vault fs + watcher, services,
-              method registry, REST API + SSE, IPC
+src/main      electron main: sqlite behind a driver seam, vault fs + watcher,
+              services, method registry, REST API + SSE + /api/rpc, IPC
 src/renderer  react ui: force-graph canvas, lists, warp boards, review rooms,
               activity feed, inspector with markdown editor
-scripts       smoke.mjs — full API exercise
+              host.ts + host-electron.ts + host-web.ts — the transport and
+              capability seam; the ONLY thing the two clients differ by
+scripts       smoke.mjs — full agent API exercise
+              smoke-client.mjs — the thin-client surface
+              ci-smoke.mjs — both suites against a throwaway instance
+              db-*.mjs — backup, restore, driver parity, benchmark
+              gen-design.mjs — DESIGN.md, exported and curated from the board
 ```

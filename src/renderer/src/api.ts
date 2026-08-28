@@ -1,11 +1,4 @@
-import type { OzmoEvent } from '@shared/types'
-
-interface RpcResult {
-  ok: boolean
-  data?: unknown
-  /** `data` carries ApiError.data — the gate's offender lists, a 409's connection */
-  error?: { message: string; status: number; data?: unknown }
-}
+import { host } from './host'
 
 /** A failed rpc, carrying the status and the structured payload the service
  *  attached (REST callers read the same thing out of the error body). */
@@ -20,27 +13,21 @@ export class RpcError extends Error {
   }
 }
 
-interface OzmoBridge {
-  call: (method: string, payload?: unknown) => Promise<RpcResult>
-  onEvent: (cb: (evt: OzmoEvent) => void) => () => void
-  pickFolder: () => Promise<string | null>
-  saveDocument: (arg: { markdown: string; filename: string; toVault?: boolean }) => Promise<{ ok: boolean; path?: string; canceled?: boolean }>
-  revealFile: (p: string) => Promise<void>
-  openInObsidian: (nodeId: string) => Promise<void>
-  openExternal: (url: string) => Promise<void>
-  relaunch: () => Promise<void>
-}
-
-declare global {
-  interface Window {
-    ozmo: OzmoBridge
-  }
-}
-
+/**
+ * The one call every view makes. It goes to the installed host — Electron IPC
+ * on the desktop, `POST /api/rpc` in a browser — and both ends of that choice
+ * return the same envelope, so nothing above this line knows which it is on.
+ *
+ * `bridge()` used to live here and handed components the raw Electron object.
+ * It is gone deliberately: it was the hole in the seam, and every caller now
+ * asks `host()` for a capability instead of assuming one.
+ */
 export async function rpc<T>(method: string, payload?: unknown): Promise<T> {
-  const res = await window.ozmo.call(method, payload)
+  const res = await host().call(method, payload)
   if (!res.ok) throw new RpcError(res.error?.message ?? 'unknown error', res.error?.status ?? 500, res.error?.data)
   return res.data as T
 }
 
-export const bridge = (): OzmoBridge => window.ozmo
+export { host } from './host'
+export type { Host, HostCapabilities, LinkStatus } from './host'
+export { HostUnavailable } from './host'

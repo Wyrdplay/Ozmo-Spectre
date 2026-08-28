@@ -8,6 +8,7 @@ import {
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
 import { RpcError, rpc } from './api'
+import type { LinkStatus } from './host'
 
 export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'agentic' | 'activity' | 'settings'
 
@@ -212,6 +213,8 @@ export const mutateSettings = (patch: SettingsMutation, opts?: { flush?: boolean
 
 interface OzmoState {
   booted: boolean
+  /** health of the link to the core — always connected under IPC, a real signal over a network */
+  link: LinkStatus
   info: AppInfo | null
   settings: AppSettings | null
   projects: Project[]
@@ -353,6 +356,12 @@ interface OzmoState {
   /** expand several containers at once (find cycling into hidden matches) */
   expandContainers: (ids: string[]) => void
   handleEvent: (evt: OzmoEvent) => void
+  /**
+   * The link changed state. `resync` is the one with teeth: the stream came
+   * back but could not fill the gap, so the board on screen is not known to be
+   * current and the only honest response is to refetch it.
+   */
+  setLink: (s: LinkStatus) => void
 }
 
 /**
@@ -377,6 +386,7 @@ const ALL_RELS: Record<EdgeType, boolean> = {
 
 export const useStore = create<OzmoState>((set, get) => ({
   booted: false,
+  link: { state: 'connected' },
   info: null,
   settings: null,
   projects: [],
@@ -793,6 +803,26 @@ export const useStore = create<OzmoState>((set, get) => ({
       saveCollapsed(s.projectId, collapsedContainerIds)
       return { collapsedContainerIds }
     }),
+
+  setLink: (link) => {
+    const was = get().link
+    set({ link })
+    if (link.state === was.state && link.state !== 'resync') return
+    if (link.state === 'resync') {
+      // Not an error and not silent: the gap is unrecoverable, so the board is
+      // refetched and the viewer is told it happened. A client that skipped
+      // this would look connected and be wrong, which is the worst of both.
+      get().toast('reconnected — refetching the board', 'info')
+      void get().refreshGraph()
+      void get().refreshWarps()
+      return
+    }
+    if (link.state === 'offline') get().toast(link.reason, 'error')
+    if (link.state === 'connected' && was.state === 'offline') {
+      get().toast('reconnected', 'info')
+      void get().refreshGraph()
+    }
+  },
 
   handleEvent: (evt) => {
     const s = get()

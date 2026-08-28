@@ -4,7 +4,7 @@ import {
   type InstalledSkill, type NodeDetail, type SkillDriftState, type SkillRow, type SkillTarget
 } from '@shared/types'
 import { useStore } from '@/store'
-import { rpc } from '@/api'
+import { host, rpc } from '@/api'
 import { Confirm, IdAndUrl, Modal, TagsEditor, useCopyFlash } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
 import '../agentic.css'
@@ -520,8 +520,8 @@ function SkillDetail({ row, targets, installed, initialTab, onChanged }: {
                       {state === 'unmanaged' && (
                         <button className="btn sm" disabled={busy === `import:${t.id}`} onClick={() => void importFrom(t)}>Import</button>
                       )}
-                      {inst && (
-                        <button className="btn sm ghost" title={inst.absPath} onClick={() => void window.ozmo.revealFile(inst.absPath)}>Reveal</button>
+                      {inst && host().can.revealFile && (
+                        <button className="btn sm ghost" title={inst.absPath} onClick={() => void host().revealFile(inst.absPath)}>Reveal</button>
                       )}
                       {inst && node && (
                         <button className="btn sm ghost" title={`delete ${inst.absPath}`} onClick={() => setRemoving(t)}>Remove</button>

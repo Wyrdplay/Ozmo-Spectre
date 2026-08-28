@@ -307,7 +307,17 @@ between neighbours. Pull from the top of the backlog into a warp when planning.
 
 Discovery        GET  /api
 Health           GET  /api/health
-Events (SSE)     GET  /api/events?projectId=<id>     — live stream of every mutation
+Events (SSE)     GET  /api/events?projectId=<id>     — live stream of every mutation.
+                                                     Each frame is \`data: {json}\` FIRST, then
+                                                     \`id: <n>\` — a monotonic sequence. If your
+                                                     stream drops, reconnect with the header
+                                                     \`Last-Event-ID: <n>\` (or ?lastEventId=<n>)
+                                                     and the gap is replayed. If it CANNOT be —
+                                                     you were away longer than the buffer — you
+                                                     get \`event: resync\` instead, which means
+                                                     refetch the graph rather than assume you are
+                                                     current. Browsers' EventSource does all of
+                                                     this for you.
 Point at the UI  POST /api/ui/focus                  {"view":"graph|lists|backlog|warps|reviews|activity|settings","projectId":..,"nodeId":..,"edgeId":..,"warpId":..,"reviewId":..,"tab":"spec|notes|links","modal":"answer|graduate|convert"}
                                                      edgeId selects that connection — its relationship editor opens;
                                                      warpId opens the Warps stage board with that warp selected in the inspector;

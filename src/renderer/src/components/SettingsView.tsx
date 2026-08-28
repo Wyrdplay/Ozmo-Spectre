@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { mutateSettings, overlaySettings, useStore } from '@/store'
-import { RpcError, rpc } from '@/api'
+import { RpcError, host, rpc } from '@/api'
 import { Confirm, moveByIndex } from './widgets'
 import {
   EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
@@ -88,37 +88,44 @@ export function SettingsView(): React.JSX.Element {
               review process, curl recipes. They should send <code>X-Actor: their-name</code> so their work is
               attributed. Live event stream at <code>/api/events</code>. Bound to localhost only.
             </div>
-            <div className="field">
-              <label>API port (relaunch to apply)</label>
-              <input
-                className="input"
-                style={{ maxWidth: 140 }}
-                type="number"
-                value={form.apiPort}
-                onChange={(e) => setForm({ ...form, apiPort: Number(e.target.value) })}
-              />
-            </div>
+            {host().can.configureHost && (
+              <div className="field">
+                <label>API port (relaunch to apply)</label>
+                <input
+                  className="input"
+                  style={{ maxWidth: 140 }}
+                  type="number"
+                  value={form.apiPort}
+                  onChange={(e) => setForm({ ...form, apiPort: Number(e.target.value) })}
+                />
+              </div>
+            )}
           </div>
 
-          <div className="settings-card">
-            <h2>Vault</h2>
-            <div className="hint">
-              Spec markdown lives here — point Obsidian at it. The database sits in <code>.ozmo/</code> inside.
-              Changing the vault re-homes the app on relaunch (existing files are not moved).
+          {/* The vault is a path on the CORE's machine. A remote viewer editing
+              it is not a smaller version of this gesture — it is re-homing
+              somebody else's app — so the card is absent, not disabled. */}
+          {host().can.configureHost && (
+            <div className="settings-card">
+              <h2>Vault</h2>
+              <div className="hint">
+                Spec markdown lives here — point Obsidian at it. The database sits in <code>.ozmo/</code> inside.
+                Changing the vault re-homes the app on relaunch (existing files are not moved).
+              </div>
+              <div className="api-url-row">
+                <input className="input" value={form.vaultPath} onChange={(e) => setForm({ ...form, vaultPath: e.target.value })} />
+                <button
+                  className="btn sm"
+                  onClick={async () => {
+                    const p = await host().pickFolder()
+                    if (p) setForm({ ...form, vaultPath: p })
+                  }}
+                >
+                  browse…
+                </button>
+              </div>
             </div>
-            <div className="api-url-row">
-              <input className="input" value={form.vaultPath} onChange={(e) => setForm({ ...form, vaultPath: e.target.value })} />
-              <button
-                className="btn sm"
-                onClick={async () => {
-                  const p = await window.ozmo.pickFolder()
-                  if (p) setForm({ ...form, vaultPath: p })
-                }}
-              >
-                browse…
-              </button>
-            </div>
-          </div>
+          )}
 
           <div className="settings-card">
             <h2>You</h2>
@@ -137,10 +144,15 @@ export function SettingsView(): React.JSX.Element {
               colours and flags below save themselves the moment they change */}
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" onClick={save}>Save</button>
-            {needsRelaunch && (
-              <button className="btn" style={{ color: 'var(--warn)' }} onClick={() => window.ozmo.relaunch()}>
+            {needsRelaunch && host().can.relaunch && (
+              <button className="btn" style={{ color: 'var(--warn)' }} onClick={() => void host().relaunch()}>
                 ↻ Relaunch to apply
               </button>
+            )}
+            {needsRelaunch && !host().can.relaunch && (
+              <span className="hint" style={{ alignSelf: 'center' }}>
+                takes effect when whoever is at {host().coreLabel} restarts Spectre
+              </span>
             )}
           </div>
 
@@ -842,7 +854,7 @@ function SkillTargetsCard({ settings, projects }: { settings: AppSettings; proje
   const verbMissing = (e: unknown): boolean => e instanceof RpcError && e.status === 404
 
   const addTarget = async (): Promise<void> => {
-    const root = await window.ozmo.pickFolder()
+    const root = await host().pickFolder()
     if (!root) return
     setBusy(true)
     try {
@@ -918,7 +930,13 @@ function SkillTargetsCard({ settings, projects }: { settings: AppSettings; proje
         )
       })}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <button className="btn sm" disabled={busy} onClick={() => void addTarget()}>+ add target…</button>
+        {/* Adding a target means browsing the CORE's filesystem for a repo
+            root that SKILL.md will be written into. There is no remote form of
+            that gesture yet, so the button is absent rather than broken —
+            existing targets still list, enable and install from here. */}
+        {host().can.pickFolder && (
+          <button className="btn sm" disabled={busy} onClick={() => void addTarget()}>+ add target…</button>
+        )}
         <button className="btn sm ghost" disabled={probing} onClick={() => setNonce((n) => n + 1)}>recheck</button>
         {!probing && live === null && (
           <span style={{ color: 'var(--text-faint)', fontSize: 11 }}>live status unavailable in this build</span>

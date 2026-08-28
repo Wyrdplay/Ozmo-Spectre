@@ -8,6 +8,7 @@ import { syntaxHighlighting, HighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { renderMarkdown, hydrateMarkdown, toggleTask } from '@/lib/markdown'
 import { useStore } from '@/store'
+import { host } from '@/api'
 
 const theme = EditorView.theme(
   {
@@ -226,7 +227,7 @@ export function MarkdownEditor({ nodeId, value, onSave }: {
         useStore.getState().setFocusNode(match.id)
       }
     } else if (a.href && /^https?:/.test(a.href)) {
-      window.ozmo.openExternal(a.href)
+      void host().openExternal(a.href)
     }
   }
 

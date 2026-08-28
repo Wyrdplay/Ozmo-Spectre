@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/store'
-import { rpc, bridge } from '@/api'
+import { rpc, host } from '@/api'
 import { Modal } from './widgets'
 
 /**
@@ -80,11 +80,21 @@ export function ExportDialog({ initialScope, onClose }: {
 
   const save = async (toVault: boolean): Promise<void> => {
     if (!doc) return
-    const res = await bridge().saveDocument({ markdown: doc.markdown, filename: doc.suggestedFilename, toVault })
+    let res: { ok: boolean; path?: string; canceled?: boolean }
+    try {
+      res = await host().saveDocument({ markdown: doc.markdown, filename: doc.suggestedFilename, toVault })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error')
+      return
+    }
     if (res.canceled) return
-    if (!res.ok || !res.path) { toast('could not write the document'); return }
+    if (!res.ok) { toast('could not write the document'); return }
     onClose()
-    toast(`saved ${res.path}`, 'info', { label: 'show', run: () => void bridge().revealFile(res.path!) })
+    // A browser download reports no path — the browser chose where it went and
+    // does not say. Saying "saved" without a location beats naming a path that
+    // is the server's, and there is nothing to reveal.
+    if (!res.path) { toast(`downloaded ${doc.suggestedFilename}`, 'info'); return }
+    toast(`saved ${res.path}`, 'info', host().can.revealFile ? { label: 'show', run: () => void host().revealFile(res.path!) } : undefined)
   }
 
   const copy = (): void => {
@@ -182,11 +192,15 @@ export function ExportDialog({ initialScope, onClose }: {
       <div className="actions">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn ghost" onClick={copy} disabled={!doc}>⧉ Copy</button>
-        <button className="btn ghost" onClick={() => void save(true)} disabled={!doc}
-          title="Write it into the vault under Documents/ — outside the type folders, so it is never read back as a node">
-          ⌂ To vault
+        {host().can.saveToVault && (
+          <button className="btn ghost" onClick={() => void save(true)} disabled={!doc}
+            title="Write it into the vault under Documents/ — outside the type folders, so it is never read back as a node">
+            ⌂ To vault
+          </button>
+        )}
+        <button className="btn primary" onClick={() => void save(false)} disabled={!doc}>
+          {host().can.saveToVault ? '⤓ Save as…' : '⤓ Download'}
         </button>
-        <button className="btn primary" onClick={() => void save(false)} disabled={!doc}>⤓ Save as…</button>
       </div>
     </Modal>
   )

@@ -39,6 +39,13 @@ console.log(`smoke → ${BASE}`)
 {
   const { status, json } = await req('GET', '/api/health')
   ok('health', status === 200 && json.ok === true)
+  // app.info sat in the registry with no REST route for months: only IPC could
+  // reach it, and store.boot() asks for it FIRST — so a network client could
+  // never start. Parity is the pillar; an unrouted method is how it rots.
+  const info = await req('GET', '/api/info')
+  ok('app.info is reachable over REST, not only IPC',
+    info.status === 200 && typeof info.json?.apiBase === 'string' &&
+    typeof info.json?.version === 'string', JSON.stringify(info.json))
   const llms = await req('GET', '/llms.txt')
   ok('llms.txt served', llms.status === 200 && String(llms.json).includes('Agent Guide'))
   ok('llms.txt teaches tags + flags', String(llms.json).includes('State is TAGS') && String(llms.json).includes('FLAGS'))
@@ -69,9 +76,15 @@ fetch(`${BASE}/api/events`, { signal: ac.signal }).then(async (res) => {
     const { done, value } = await reader.read()
     if (done) break
     buf += dec.decode(value, { stream: true })
-    for (const line of buf.split('\n\n')) {
-      if (line.startsWith('data: ')) {
-        try { events.push(JSON.parse(line.slice(6)).type) } catch { /* partial */ }
+    // Parse frames FIELD BY FIELD rather than assuming `data:` is the first
+    // line. Both orders are legal SSE, and the stream now carries `id:` for
+    // reconnect resume — a reader that only recognises one ordering goes silent
+    // on a legal change instead of failing, which is how this went unnoticed
+    // for exactly one run.
+    for (const frame of buf.split('\n\n')) {
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        try { events.push(JSON.parse(line.slice(5).trim()).type) } catch { /* partial */ }
       }
     }
     buf = buf.slice(buf.lastIndexOf('\n\n') + 2)

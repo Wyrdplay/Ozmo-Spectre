@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ozmo Spectre</title>
+    <!--
+      Same policy as the desktop shell with one deliberate widening: connect-src
+      must reach the CORE, which for this client is another origin.
+
+      LOOPBACK ONLY, and that is not a placeholder. The API binds 127.0.0.1 and
+      rejects a non-loopback Origin before routing, precisely because it is
+      unauthenticated and can write files through the skills allowlist. A client
+      permitted to reach further than the server permits itself to be reached
+      would be a policy that lies about what it protects. This widens when
+      people are authenticated, in the same change, or not at all.
+
+      (CSP host wildcards only stand in for a SUBDOMAIN — `http://192.168.*:*`
+      is not a policy, it is a parse error that Chrome discards with a console
+      warning, which is a worse outcome than not writing it.)
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.web.tsx"></script>
+  </body>
+</html>

@@ -4,7 +4,7 @@ import {
   type NodeDetail, type EdgeWithTitles, type Annotation, type EdgeType, type NodeType, type RelationshipType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
-import { rpc } from '@/api'
+import { host, rpc } from '@/api'
 import {
   ActorBadge, Confirm, FlagChips, IdChip, Modal, NodePicker, TagsEditor, TypeChip, TypeDot,
   useCopyFlash, useOrderedTypes, useRelStyles, useTypeStyles
@@ -732,9 +732,11 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
               </span>
             </div>
           )}
-          <button className="btn sm ghost" title="Open in Obsidian" onClick={() => window.ozmo.openInObsidian(id)}>
-            ◈ obsidian
-          </button>
+          {host().can.openInObsidian && (
+            <button className="btn sm ghost" title="Open in Obsidian" onClick={() => void host().openInObsidian(id)}>
+              ◈ obsidian
+            </button>
+          )}
         </div>
         <TagsEditor tags={detail.tags} onChange={(tags) => patch({ tags })} />
       </div>

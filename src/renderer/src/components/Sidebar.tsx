@@ -126,11 +126,17 @@ export function Sidebar(): React.JSX.Element {
   }
 
   // null until the main process reports in. Copying "http://127.0.0.1:—" is
-  // worse than not copying, so the buttons stay inert until there is an address.
+  // worse than not copying, so the button stays inert until there is an address.
   const apiBase = info?.apiBase ?? (info?.port ? `http://127.0.0.1:${info.port}` : null)
+  // ONE click, ONE payload: the handoff you paste into an agent's prompt. Line 1
+  // is the address for an agent that fetches rather than shells out; line 2 runs
+  // verbatim, and /llms.txt teaches it the rest of the system by itself. A bare
+  // host:port is not that — the base URL 404s and says nothing about the API.
+  const agentHandoff = apiBase
+    ? `Ozmo Spectre API: ${apiBase}\nAgent guide (read this first): curl ${apiBase}/llms.txt`
+    : null
   const setExportScope = useStore((s) => s.setExportScope)
-  const { copied: apiCopied, copy: copyApi } = useCopyFlash()
-  const { copied: agentsCopied, copy: copyAgents } = useCopyFlash()
+  const { copied, copy } = useCopyFlash()
 
   const NAV: { key: View; label: string; badge?: number }[] = [
     { key: 'graph', label: 'Graph' },
@@ -199,36 +205,27 @@ export function Sidebar(): React.JSX.Element {
       <div className="sidebar-footer">
         <button
           type="button"
-          className="api-status"
+          className={`api-copy ${copied ? 'copied' : ''}`}
           disabled={!apiBase}
-          title={apiBase
-            ? (collapsed ? `API ${apiBase} — click to copy` : `click to copy — ${apiBase}`)
+          title={agentHandoff
+            ? `click to copy the agent handoff —\n\n${agentHandoff}`
             : 'waiting for the API to report its address'}
-          onClick={() => apiBase && copyApi(apiBase)}
+          onClick={() => agentHandoff && copy(agentHandoff)}
         >
-          <span className="api-dot" />
-          {apiCopied ? (
-            <span className="copy-flash">copied ✓</span>
-          ) : (
-            <>
-              <span>API</span>
-              <code>127.0.0.1:{info?.port ?? '—'}</code>
-            </>
-          )}
-        </button>
-        <button
-          type="button"
-          className="agents-hint"
-          style={{ paddingLeft: 13 }}
-          disabled={!apiBase}
-          title={apiBase ? `click to copy — ${apiBase}/llms.txt` : 'waiting for the API to report its address'}
-          onClick={() => apiBase && copyAgents(`${apiBase}/llms.txt`)}
-        >
-          {agentsCopied ? (
-            <span className="copy-flash">copied ✓</span>
-          ) : (
-            <>agents: <code>GET /llms.txt</code></>
-          )}
+          <span className="api-status">
+            <span className="api-dot" />
+            {copied ? (
+              <span className="copy-flash">copied ✓</span>
+            ) : (
+              <>
+                <span>API</span>
+                <code>127.0.0.1:{info?.port ?? '—'}</code>
+              </>
+            )}
+          </span>
+          <span className="agents-hint" style={{ paddingLeft: 13 }}>
+            {copied ? 'address + agent guide' : <>agents: <code>GET /llms.txt</code></>}
+          </span>
         </button>
       </div>
 
