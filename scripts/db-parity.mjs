@@ -158,6 +158,66 @@ for (const driver of ['sqljs', 'native']) {
   results[driver] = r
 }
 
+// ---------------------------------------------------------------------------
+// THE UNCLEAN EXIT
+//
+// The native driver's close folds the WAL back and clears the flag. A KILLED
+// process never gets there, and what it leaves is a stale main file beside a
+// sidecar holding the difference. sql.js reads a flat byte array and cannot see
+// the sidecar — so left to itself it would open the stale bytes, look fine, and
+// then write them back over the newer data on the first save.
+//
+// This simulates exactly that: write through native, abandon the file WITHOUT
+// closing, and check that the other driver refuses instead of quietly lying.
+{
+  const dirty = path.join(SCRATCH, 'unclean.db')
+  fs.copyFileSync(SRC, dirty)
+
+  // Write in WAL and walk away — no checkpoint, no journal_mode reset.
+  const raw = new Better(dirty)
+  raw.pragma('journal_mode = wal')
+  raw.exec("CREATE TABLE IF NOT EXISTS wal_probe (k TEXT PRIMARY KEY, v TEXT)")
+  raw.exec("INSERT OR REPLACE INTO wal_probe VALUES ('written','through the wal')")
+  // deliberately NOT: wal_checkpoint(TRUNCATE), journal_mode = delete, close()
+
+  const sidecar = `${dirty}-wal`
+  const size = fs.existsSync(sidecar) ? fs.statSync(sidecar).size : 0
+  add('unclean exit leaves a non-empty -wal sidecar', size > 0, `${size} bytes`)
+
+  let refused = null
+  try {
+    await db.openDb(dirty)
+    await db.closeDb?.()
+  } catch (e) {
+    refused = String(e?.message ?? e)
+  }
+  add('sql.js REFUSES a file with un-folded WAL data rather than opening it stale',
+    refused !== null, refused === null ? 'it OPENED — this is the silent-data-loss path' : '')
+  add('and the refusal names the command that fixes it',
+    refused !== null && /db:checkpoint/.test(refused),
+    refused === null ? 'nothing was thrown' : refused.slice(0, 90))
+
+  // The data really was only in the sidecar — which is what made the refusal
+  // necessary rather than merely cautious.
+  raw.pragma('wal_checkpoint(TRUNCATE)')
+  raw.pragma('journal_mode = delete')
+  raw.close()
+  const recovered = new Better(dirty, { readonly: true })
+  const row = recovered.prepare("SELECT v FROM wal_probe WHERE k = 'written'").get()
+  recovered.close()
+  add('and once folded, the write is there and the other driver may proceed',
+    row?.v === 'through the wal', JSON.stringify(row))
+
+  let reopened = null
+  try {
+    await db.openDb(dirty)
+    await db.closeDb?.()
+  } catch (e) {
+    reopened = String(e?.message ?? e)
+  }
+  add('sql.js opens the same file once the sidecar is folded', reopened === null, reopened ?? '')
+}
+
 // ------------------------------------------------------------------ the diff
 console.log('')
 printChecks(checks)
@@ -183,6 +243,7 @@ if (results.sqljs && results.native) {
   if (diffs.length) checks.push({ name: 'drivers agree on every observable', pass: false, detail: `${diffs.length} differences` })
   else checks.push({ name: 'drivers agree on every observable', pass: true, detail: '' })
 }
+
 
 const ok = checks.every((c) => c.pass)
 console.log(`\n[parity] ${checks.filter((c) => c.pass).length}/${checks.length} checks passed`)

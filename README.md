@@ -91,6 +91,7 @@ SQLite, one file, in `.ozmo/` inside the vault. Two drivers run the same schema 
 npm run dev                        # sql.js (wasm) — the default
 OZMO_DB_DRIVER=native npm run dev  # better-sqlite3 — real pages, WAL
 
+npm run db:checkpoint              # fold a WAL sidecar left by an unclean exit
 npm run db:backup                  # verified snapshot + manifest
 npm run db:restore                 # PROVE the snapshot restores (scratch dir by default)
 npm run db:parity                  # both drivers through the real db.ts, diffed
@@ -101,6 +102,11 @@ npm run db:bench                   # what the difference costs
 process and the wrong shape for a served board: on the live 12.9MB board a node create costs 136ms
 against 1.3ms native. The native driver is opt-in until it has run against a real board long enough
 to trust, and both drivers read and write the same file — which is what keeps a cutover reversible.
+
+The native driver runs in WAL and folds the sidecar back on close. A KILLED process never gets
+there, and `sql.js` cannot see a sidecar — so it **refuses** to open a file with un-folded WAL data
+rather than showing a board missing its newest work and then overwriting it. `npm run db:checkpoint`
+is the fix it names.
 
 ## Point an agent at it
 
