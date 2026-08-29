@@ -6,7 +6,7 @@ import {
   EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
   defaultFlags, isTextGlyph, newId,
   orderedNodeTypes, relStyle, typeStyle,
-  type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
+  type Account, type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
   type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type Project,
   type SkillTarget, type SkillTargetConfig, type StyleOverrides,
   type WarpStage
@@ -156,6 +156,8 @@ export function SettingsView(): React.JSX.Element {
             )}
           </div>
 
+          <PeopleCard />
+
           <AppearanceCard settings={settings} />
 
           <ConnectionColoursCard settings={settings} />
@@ -281,6 +283,88 @@ function normalizeOverrides(o: StyleOverrides): StyleOverrides | undefined {
   const relationships = o.relationships && Object.keys(o.relationships).length ? o.relationships : undefined
   if (!nodes && !relationships) return undefined
   return { ...(nodes ? { nodes } : {}), ...(relationships ? { relationships } : {}) }
+}
+
+/**
+ * WHO IS ON THIS BOARD.
+ *
+ * Owner-only, and absent rather than disabled for everyone else — the verbs
+ * behind it are refused server-side, so a card that rendered for a non-owner
+ * would be a list of buttons that all fail.
+ *
+ * Pending requests sit at the top because they are the only rows that are
+ * asking something of the reader. Rejected rows STAY: a decision that left no
+ * trace is a name that gets asked for again next week with nobody the wiser.
+ */
+function PeopleCard(): React.JSX.Element | null {
+  const session = useStore((s) => s.session)
+  const toast = useStore((s) => s.toast)
+  const [rows, setRows] = useState<Account[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [nonce, setNonce] = useState(0)
+
+  const isOwner = !!session?.account?.isOwner
+
+  useEffect(() => {
+    if (!isOwner) return
+    let live = true
+    rpc<Account[]>('accounts.list')
+      .then((r) => { if (live) setRows(r) })
+      .catch(() => { if (live) setRows([]) })
+    return () => { live = false }
+  }, [isOwner, nonce])
+
+  if (!isOwner) return null
+
+  const decide = async (id: string, verb: 'approve' | 'reject'): Promise<void> => {
+    setBusy(id)
+    try {
+      await rpc(verb === 'approve' ? 'accounts.approve' : 'accounts.reject', { id })
+      setNonce((n) => n + 1)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const order = { pending: 0, approved: 1, rejected: 2 } as const
+  const sorted = [...(rows ?? [])].sort((a, b) => order[a.state] - order[b.state] || b.createdAt - a.createdAt)
+  const pending = sorted.filter((r) => r.state === 'pending').length
+
+  return (
+    <div className="settings-card">
+      <h2>People {pending > 0 ? `· ${pending} waiting` : ''}</h2>
+      <div className="hint">
+        Only approved display names reach this board. A name you reject keeps its row, so the same
+        request cannot come back unnoticed. Accounts are managed by {session?.providerLabel}.
+      </div>
+      {rows === null && <div className="hint">reading…</div>}
+      {rows !== null && sorted.length === 0 && <div className="hint">nobody has asked to join yet.</div>}
+      {sorted.map((a) => (
+        <div key={a.id} className="api-url-row" style={{ alignItems: 'center', gap: 10 }}>
+          {/* the name column FLEXES and the rest is fixed, so a long name pushes
+              nothing out of line — a decision row whose buttons move as the list
+              changes is a decision row you misclick */}
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                         fontWeight: a.state === 'pending' ? 700 : 500 }}>
+            {a.displayName}{a.isOwner ? ' · owner' : ''}
+          </span>
+          <span className="hint" style={{ width: 74, flex: 'none' }}>{a.state}</span>
+          <span style={{ width: 78, flex: 'none' }}>
+            {a.state !== 'approved' && (
+              <button className="btn sm" data-approve={a.id} disabled={busy === a.id} onClick={() => void decide(a.id, 'approve')}>approve</button>
+            )}
+          </span>
+          <span style={{ width: 62, flex: 'none' }}>
+            {a.state !== 'rejected' && !a.isOwner && (
+              <button className="btn sm ghost" data-reject={a.id} disabled={busy === a.id} onClick={() => void decide(a.id, 'reject')}>reject</button>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function AppearanceCard({ settings }: { settings: AppSettings }): React.JSX.Element {

@@ -178,6 +178,48 @@ function migrate(): void {
       PRIMARY KEY (node_id, target_id)
     );
     CREATE INDEX IF NOT EXISTS idx_skill_installs_target ON skill_installs(target_id);
+
+    -- WHO IS ALLOWED ON THIS BOARD.
+    --
+    -- A person onboards by claiming a display name; the name is PENDING until
+    -- the owner decides on it, and a pending person sees nothing of the board.
+    -- The row survives rejection deliberately: "nothing is ever hard-deleted"
+    -- applies here too, and a rejected name that left no trace is a name that
+    -- can be requested again tomorrow with nobody the wiser.
+    --
+    -- display_name_key is the lowercased name and carries the UNIQUE. Two
+    -- people called "Sam" and "sam" are one collision waiting to happen in the
+    -- activity feed, where attribution is the entire point.
+    --
+    -- This table is the LOCAL account provider's store. When accounts move to
+    -- Atlas it becomes the fallback rather than the source (see account.ts).
+    CREATE TABLE IF NOT EXISTS accounts (
+      id               TEXT PRIMARY KEY,
+      display_name     TEXT NOT NULL,
+      display_name_key TEXT NOT NULL UNIQUE,
+      state            TEXT NOT NULL,
+      is_owner         INTEGER NOT NULL DEFAULT 0,
+      created_at       INTEGER NOT NULL,
+      decided_at       INTEGER,
+      decided_by       TEXT,
+      note             TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_accounts_state ON accounts(state);
+
+    -- A session is a bearer token, and it is issued at REQUEST time rather than
+    -- at approval: a person who has asked needs something to hold while they
+    -- wait, or they cannot be told they were approved without typing their name
+    -- again. Holding a token proves nothing on its own — the account's state is
+    -- read fresh on every call, so approving and revoking both take effect on
+    -- the next request rather than the next login.
+    CREATE TABLE IF NOT EXISTS sessions (
+      token        TEXT PRIMARY KEY,
+      account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at   INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      client       TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
   `)
   // Guarded column adds — CREATE TABLE IF NOT EXISTS never touches existing tables.
   const nodeCols = all<{ name: string }>('PRAGMA table_info(nodes)').map((c) => c.name)

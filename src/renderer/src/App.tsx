@@ -14,10 +14,12 @@ import { QuickAdd } from './components/QuickAdd'
 import { Palette } from './components/Palette'
 import { ExportDialog } from './components/ExportDialog'
 import { Toasts } from './components/widgets'
+import { Onboarding } from './components/Onboarding'
 import { inTextField, matches } from './lib/shortcuts'
 
 export default function App(): React.JSX.Element {
   const booted = useStore((s) => s.booted)
+  const session = useStore((s) => s.session)
   const view = useStore((s) => s.view)
   const selection = useStore((s) => s.selection)
   const quickAdd = useStore((s) => s.quickAdd)
@@ -48,6 +50,18 @@ export default function App(): React.JSX.Element {
       <div className="boot">
         <span className="pulse">◈</span> waking the spec engine…
       </div>
+    )
+  }
+
+  // THE DOOR COMES BEFORE THE APP. Not a redirect and not an overlay: an
+  // unapproved viewer has no board to render behind this, because the server
+  // never sent one.
+  if (!session || session.state !== 'approved') {
+    return (
+      <>
+        <Onboarding />
+        <Toasts />
+      </>
     )
   }
 

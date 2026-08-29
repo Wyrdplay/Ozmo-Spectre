@@ -15,7 +15,8 @@ npm install
 npm run dev          # desktop app (electron-vite, watching)
 npm run build        # production bundles into out/ — main, preload, renderer AND the web client
 npm run smoke        # end-to-end agent API test (needs the app running)
-npm run smoke:client # thin-client surface: /api/rpc, event resume, the served bundle
+npm run smoke:client # thin-client surface: /api/rpc, event resume, the served bundle, the gate
+npm run smoke:accounts # onboarding decisions, against the shipped provider (own scratch db)
 npm run gen:design   # regenerate DESIGN.md from the board (needs the app running)
 ```
 
@@ -54,6 +55,32 @@ reaches past that seam is the thing that would quietly turn one codebase into tw
 Both clients are live on the same events. Over the network that stream carries a sequence id, so a
 client whose link drops reconnects with `Last-Event-ID` and either gets the gap replayed or is told
 to resync — never silently handed a stale board.
+
+## Who is on the board
+
+The board is by invitation. A person onboards by claiming a **display name** — the name their
+work is attributed to — and it is PENDING until the owner decides. A pending viewer sees a waiting
+screen and nothing else: the gate refuses every read at the server, so no project name, no count
+and no event crosses the wire.
+
+- The **first** name on a fresh board claims it and becomes the owner.
+- **Approving and rejecting happen in the desktop app**, at the machine holding the board — never
+  over the network, and the owner's own name cannot be claimed remotely. Without that, anyone who
+  knew the owner's name could approve themselves and every other refusal would be decoration.
+- A rejected row is KEPT. A rejection that leaves no trace is a name asked for again unnoticed.
+- Accounts live behind a provider seam (`src/main/account.ts`). The local provider stores them in
+  the board's own database; **Atlas services on this machine** become a second provider, and the
+  seam is what makes that a swap rather than a rewrite.
+
+**Agents are unaffected.** A caller with no session token is served exactly as before, on loopback
+— every agent in the fleet is one of those. The carve-out is named rather than implied
+(`agentsUnauthenticated`, default on, refused through the settings API), and while it is on:
+
+> **the gate is a workflow gate, not a security boundary.** The boundary is the loopback bind.
+
+Nor is an approved display name authentication — it is an allowlist. It stops the unknown and the
+accidental; it does not stop someone who knows an approved name from typing it. Closing that is
+`A person is authenticated, not asserted`, and it is not closed yet.
 
 ## Storage
 

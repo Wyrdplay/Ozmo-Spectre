@@ -4,7 +4,8 @@ import fs from 'fs'
 import path from 'path'
 import type { Server } from 'http'
 import type { BrowserWindow } from 'electron'
-import { call } from './registry'
+import { authorised, call, type Ctx } from './registry'
+import { accounts } from './account'
 import { ApiError } from './services'
 import { onEvent } from './events'
 import { llmsTxt } from './llms'
@@ -74,11 +75,34 @@ const actorOf = (req: Request): string => {
   return a && a.length <= 80 ? a : 'agent'
 }
 
+/**
+ * The caller, as far as this process can tell.
+ *
+ * A session token makes them a PERSON — and `hasSession` stays true even when
+ * the token does not resolve, because "you are holding something stale" and
+ * "you are an agent" want opposite answers and telling them apart is the whole
+ * difference between a client that shows a sign-in screen and one that loops.
+ *
+ * When a session resolves, attribution comes from the ACCOUNT and not from
+ * `X-Actor`. A person who has been approved under a name does not get to file
+ * work under someone else's by editing a header.
+ */
+const ctxOf = (req: Request): Ctx => {
+  const token = (req.header('x-ozmo-session') ?? '').trim()
+  if (!token) return { actor: actorOf(req) }
+  const account = accounts().resolve(token)
+  return {
+    actor: account ? account.displayName : actorOf(req),
+    account,
+    hasSession: true
+  }
+}
+
 /** Wrap a registry call as an express handler (handlers may be sync or async). */
 const h = (method: string, payload: (req: Request) => unknown) =>
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      res.json(await Promise.resolve(call(method, payload(req), { actor: actorOf(req) })))
+      res.json(await Promise.resolve(call(method, payload(req), ctxOf(req))))
     } catch (e) {
       next(e)
     }
@@ -161,7 +185,7 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   app.post('/api/rpc', async (req: Request, res: Response) => {
     const method = typeof req.body?.method === 'string' ? req.body.method : ''
     try {
-      const data = await Promise.resolve(call(method, req.body?.payload ?? {}, { actor: actorOf(req) }))
+      const data = await Promise.resolve(call(method, req.body?.payload ?? {}, ctxOf(req)))
       res.json({ ok: true, data })
     } catch (e) {
       const status = e instanceof ApiError ? e.status : 500
@@ -209,6 +233,32 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
    * act on. Silence is not.
    */
   app.get('/api/events', (req, res) => {
+    /**
+     * The stream is board data — every mutation, with titles in it. Gating the
+     * reads and leaving this open would hand an unapproved viewer the board one
+     * event at a time, which is the leak that is easiest to forget and hardest
+     * to notice.
+     *
+     * Refused BEFORE the SSE headers go out, so it is an ordinary 403 the
+     * client can read rather than a stream that opens and says nothing.
+     * `EventSource` cannot set headers, so a browser client passes its token as
+     * a query parameter here — it is a loopback URL to a server that does not
+     * log query strings, and the alternative is no gate on the stream at all.
+     */
+    try {
+      const token = typeof req.query.session === 'string' ? req.query.session : (req.header('x-ozmo-session') ?? '')
+      const ctx: Ctx = token.trim()
+        ? { actor: actorOf(req), account: accounts().resolve(token.trim()), hasSession: true }
+        : { actor: actorOf(req) }
+      // graph.get stands in for "may read the board at all" — one predicate, so
+      // the stream and the reads can never disagree about who is allowed.
+      authorised('graph.get', ctx)
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 403
+      res.status(status).json({ error: { message: e instanceof Error ? e.message : String(e) } })
+      return
+    }
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -341,7 +391,7 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   })
   const sendDoc = async (req: Request, res: Response, next: NextFunction, payload: unknown): Promise<void> => {
     try {
-      const doc = (await Promise.resolve(call('document.build', payload, { actor: actorOf(req) }))) as {
+      const doc = (await Promise.resolve(call('document.build', payload, ctxOf(req)))) as {
         markdown: string; suggestedFilename: string
       }
       if (req.query.format === 'json') { res.json(doc); return }
@@ -471,7 +521,7 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   // pure preview — writes nothing. ?format=md sends the SKILL.md text itself
   app.get('/api/skills/:nodeId/render', async (req, res, next) => {
     try {
-      const doc = (await Promise.resolve(call('skills.render', { nodeId: req.params.nodeId }, { actor: actorOf(req) }))) as {
+      const doc = (await Promise.resolve(call('skills.render', { nodeId: req.params.nodeId }, ctxOf(req)))) as {
         filename: string; markdown: string; sha: string
       }
       if (req.query.format === 'md') {

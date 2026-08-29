@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "smoke": "node scripts/smoke.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
+    "smoke:accounts": "node scripts/smoke-accounts.mjs",
     "gen:design": "node scripts/gen-design.mjs",
     "scan": "node scripts/scan-secrets.mjs",
     "rebuild:native": "node scripts/rebuild-native.mjs",

@@ -38,6 +38,10 @@ export function electronHost(): Host {
       configureHost: true
     },
     call: (method, payload) => b().call(method, payload),
+    // Nothing to hold. The desktop renderer is inside the core's own process
+    // and is served as whoever is at the machine.
+    sessionToken: () => null,
+    setSessionToken: () => undefined,
     subscribe: (cb, onStatus) => {
       // IPC has no link to lose: the renderer either has its main process or it
       // is not running. Reporting connected once keeps the store's handling

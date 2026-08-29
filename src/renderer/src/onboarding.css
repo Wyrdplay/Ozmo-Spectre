@@ -1,0 +1,82 @@
+/* The door. Deliberately not the app chrome: nothing here should suggest a
+   board is loading behind it, because there is not one. */
+
+.onboard {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg, #0b0e14);
+  padding: 24px;
+}
+
+.onboard-card {
+  width: min(440px, 100%);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.onboard-mark {
+  font-size: 34px;
+  color: var(--accent, #4aa8ff);
+  opacity: 0.9;
+}
+
+.onboard-card h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+
+.onboard-state {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text, #dfe6f2);
+}
+
+.onboard-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-dim, #8b96ab);
+}
+
+.onboard-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.onboard-form .input {
+  flex: 1;
+  text-align: center;
+}
+
+.onboard-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.onboard-err {
+  font-size: 12.5px;
+  color: var(--danger, #ff6b6b);
+}
+
+.onboard-foot,
+.onboard-core {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-dim, #8b96ab);
+  opacity: 0.75;
+}
+
+.onboard-core {
+  margin-top: 10px;
+  font-family: var(--mono, ui-monospace, monospace);
+  opacity: 0.5;
+}

@@ -18,6 +18,31 @@ import { HostUnavailable, type Host, type LinkStatus, type RpcResult } from './h
  * ordinary case while this client is being built.
  */
 const API_KEY = 'ozmo.apiBase'
+const SESSION_KEY = 'ozmo.session'
+
+/**
+ * The session token lives per BROWSER, which is what makes it per person: two
+ * people on one board are two browsers, and each holds its own. It is a bearer
+ * token in localStorage, not a cookie, deliberately — the client is served from
+ * one origin and talks to another during development, and a token it passes
+ * explicitly cannot be sent by a page that merely knows the URL.
+ */
+function readToken(): string | null {
+  try {
+    return localStorage.getItem(SESSION_KEY)
+  } catch {
+    return null
+  }
+}
+
+function writeToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(SESSION_KEY, token)
+    else localStorage.removeItem(SESSION_KEY)
+  } catch {
+    /* a viewer with storage disabled gets this session and no more */
+  }
+}
 
 function resolveApiBase(): string {
   const fromQuery = new URLSearchParams(window.location.search).get('api')
@@ -42,6 +67,7 @@ function resolveApiBase(): string {
 
 export function webHost(actor = 'web'): Host {
   const base = resolveApiBase()
+  let token = readToken()
 
   return {
     kind: 'web',
@@ -56,6 +82,12 @@ export function webHost(actor = 'web'): Host {
       configureHost: false
     },
 
+    sessionToken: () => token,
+    setSessionToken(next: string | null) {
+      token = next
+      writeToken(next)
+    },
+
     /**
      * The envelope is IPC's, so this returns it untouched — including on a 4xx,
      * where the body IS the envelope. Only a transport failure has to be
@@ -65,10 +97,14 @@ export function webHost(actor = 'web'): Host {
      */
     async call(method: string, payload?: unknown): Promise<RpcResult> {
       let res: Response
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Actor': actor }
+      // Attribution comes from the ACCOUNT once a session resolves; X-Actor
+      // stays only so a tokenless client still names itself in the feed.
+      if (token) headers['X-Ozmo-Session'] = token
       try {
         res = await fetch(`${base}/api/rpc`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Actor': actor },
+          headers,
           body: JSON.stringify({ method, payload: payload ?? {} })
         })
       } catch (e) {
@@ -92,7 +128,11 @@ export function webHost(actor = 'web'): Host {
         // the whole reason the server stamps ids. We only take over when it
         // gives up entirely (readyState CLOSED), so the built-in backoff does
         // the ordinary case and this handles the outage.
-        es = new EventSource(`${base}/api/events`)
+        // EventSource cannot set headers, so the token goes in the query. It is
+        // a loopback URL to a server that does not log query strings; the
+        // alternative is an ungated stream, which is worse.
+        const q = token ? `?session=${encodeURIComponent(token)}` : ''
+        es = new EventSource(`${base}/api/events${q}`)
 
         es.onopen = () => {
           attempt = 0

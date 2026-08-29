@@ -64,6 +64,17 @@ export interface Host {
   readonly can: HostCapabilities
 
   call(method: string, payload?: unknown): Promise<RpcResult>
+
+  /**
+   * The session token this client holds, if any, and how it changes.
+   *
+   * On the desktop this is always null: that client is inside the process that
+   * owns the database and is served as the machine's owner, so there is nothing
+   * to hold. Over the network it is the bearer token from `session.request`,
+   * kept per browser.
+   */
+  sessionToken(): string | null
+  setSessionToken(token: string | null): void
   /**
    * Every mutation, live. The callback fires for events from any project — the
    * store filters, exactly as it does under IPC.

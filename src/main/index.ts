@@ -8,6 +8,8 @@ import { registerWatcherHandlers } from './services'
 import { seedIfEmpty } from './seed'
 import { startServer, stopServer, getPort } from './server'
 import { registerIpc } from './ipc'
+import { setAccountProvider } from './account'
+import { localAccounts } from './account-local'
 import { setAppInfoProvider } from './registry'
 import { onEvent } from './events'
 
@@ -80,6 +82,9 @@ app.whenReady().then(async () => {
   vault.initVault(settings.vaultPath)
   await openDb(path.join(settings.vaultPath, '.ozmo', 'spec.db'))
   registerWatcherHandlers()
+  // Accounts before the server: the first request can arrive the instant it
+  // listens, and a gate that is not installed yet is a gate that is open.
+  setAccountProvider(localAccounts())
   seedIfEmpty()
   vault.startWatcher()
 

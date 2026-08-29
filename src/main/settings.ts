@@ -13,6 +13,7 @@ import { ApiError } from './services'
 const DEFAULTS = (): AppSettings => ({
   vaultPath: path.join(app.getPath('documents'), 'OzmoSpecVault'),
   apiPort: 4820,
+  agentsUnauthenticated: true,
   humanName: os.userInfo().username || 'human',
   flags: defaultFlags(),
   // fresh installs run the same append-once migration as upgrades (→ Debt, Pruned)
@@ -513,6 +514,18 @@ export function updateSettings(patch: Partial<AppSettings>): { settings: AppSett
   // skills.addTarget / skills.removeTarget, which validate the root, write an
   // activity row and emit an event, so the write surface only ever changes in
   // a way that shows up in the feed. Those verbs persist via setSkillTargets().
+  // Same class of hazard, same answer. A caller who is not authenticated
+  // switching off the requirement to authenticate is a bypass wearing a
+  // setting's clothes. It lives in settings.json, edited by whoever is at the
+  // machine, and takes effect on relaunch.
+  if ('agentsUnauthenticated' in patch) {
+    throw new ApiError(
+      'agentsUnauthenticated is not editable through settings — this API is reachable without a session, ' +
+        'so a caller could use it to switch off the check that would have stopped them. ' +
+        'Edit settings.json at the machine running the core and relaunch.',
+      400
+    )
+  }
   if ('skillTargets' in patch) {
     throw new ApiError(
       'skillTargets is not editable through settings — the settings API is unauthenticated on loopback, ' +

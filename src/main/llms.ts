@@ -4,6 +4,25 @@ export function llmsTxt(base: string): string {
 You are talking to a running desktop app where a human shapes software specs on a canvas.
 You have exactly the same powers they do. Base URL: ${base}
 
+## Who you are, and what the gate does to you
+
+This board has an account gate. Humans onboard by claiming a display name, and
+only APPROVED names see anything. You are almost certainly not one of them, and
+that is fine: a caller with **no session token** is treated as an agent and
+served exactly as before, on loopback. Nothing you already do changes.
+
+- Keep sending \`X-Actor: <your-name>\`. It is still your attribution.
+- Do NOT send \`X-Ozmo-Session\` unless you were given a token. A token that does
+  not resolve is a 401 telling you to sign in — a person's error, not yours.
+- \`POST /api/rpc {"method":"session.current"}\` tells you where you stand. The
+  field that matters to you is \`agentsUnauthenticated\`: while it is \`true\` the
+  carve-out above is on. If it is ever \`false\`, every call of yours will be a
+  401 until you carry a credential, and that is a change to this board's
+  configuration rather than a bug in your script.
+- Deciding who is on the board (\`accounts.list\` / \`approve\` / \`reject\`) is
+  refused to you and to every network caller. It happens in the desktop app, at
+  the machine that holds the board.
+
 ## Etiquette
 
 - Send \`X-Actor: <your-name>\` on every request (e.g. \`X-Actor: claude-code\`). Everything you

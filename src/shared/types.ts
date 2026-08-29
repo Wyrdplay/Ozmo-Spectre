@@ -230,10 +230,59 @@ export interface AppInfo {
   platform: string
 }
 
+/**
+ * `pending` — asked, not yet decided. Sees the waiting screen and no board.
+ * `approved` — on the board.
+ * `rejected` — decided against. The row is KEPT: a rejection that left no trace
+ *              is a name that can be asked for again tomorrow unnoticed.
+ */
+export type AccountState = 'pending' | 'approved' | 'rejected'
+
+export interface Account {
+  id: string
+  displayName: string
+  state: AccountState
+  /** Whoever is at the machine running the core. Exactly one, claimed on first run. */
+  isOwner: boolean
+  createdAt: number
+  decidedAt?: number
+  decidedBy?: string
+  note?: string
+}
+
+/**
+ * What a client knows about itself before it knows anything about the board.
+ *
+ * `state: 'none'` is the onboarding screen. Everything else describes an
+ * account that exists, and only `approved` is ever accompanied by board data.
+ */
+export interface SessionInfo {
+  state: AccountState | 'none'
+  account?: Account
+  /** Where accounts are managed, for the screen to name. */
+  provider: string
+  providerLabel: string
+  /** True when this client is the one sitting at the machine running the core. */
+  atTheMachine: boolean
+  /** True when unauthenticated agents on loopback are still served. */
+  agentsUnauthenticated: boolean
+}
+
 export interface AppSettings {
   vaultPath: string
   apiPort: number
   humanName: string
+  /**
+   * Serve agents that present no session, on loopback, as they always have been.
+   *
+   * Default TRUE, and turning it off breaks every agent in the fleet until each
+   * one carries a credential — which is the `A person is authenticated, not
+   * asserted` work, not this. REFUSED through the settings API for the same
+   * reason skillTargets is: an unauthenticated PATCH that switches off the
+   * requirement to authenticate is not a setting, it is a bypass. Edit
+   * settings.json at the machine and relaunch.
+   */
+  agentsUnauthenticated?: boolean
   /** composable highlight rules — evaluated in order, applied everywhere nodes render */
   flags: FlagRule[]
   /**

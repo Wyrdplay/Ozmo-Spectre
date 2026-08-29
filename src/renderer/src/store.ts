@@ -3,12 +3,12 @@ import {
   edgeRelationships,
   type AppInfo, type AppSettings, type Project, type GraphPayload, type SpecNode, type WarpSummary,
   type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule, type FogClass,
-  type FogReport, type SkillsPayload
+  type FogReport, type SkillsPayload, type SessionInfo, type Account
 } from '@shared/types'
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
 import { RpcError, rpc } from './api'
-import type { LinkStatus } from './host'
+import { host, type LinkStatus } from './host'
 
 export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'agentic' | 'activity' | 'settings'
 
@@ -213,6 +213,8 @@ export const mutateSettings = (patch: SettingsMutation, opts?: { flush?: boolean
 
 interface OzmoState {
   booted: boolean
+  /** who this client is, and whether it may see the board at all */
+  session: SessionInfo | null
   /** health of the link to the core — always connected under IPC, a real signal over a network */
   link: LinkStatus
   info: AppInfo | null
@@ -304,6 +306,12 @@ interface OzmoState {
   setView: (v: View) => void
   refreshProjects: () => Promise<void>
   refreshGraph: () => Promise<void>
+  /** everything boot() does once the session is approved */
+  loadBoard: () => Promise<void>
+  /** claim a display name; returns once the request has been filed */
+  onboard: (displayName: string) => Promise<void>
+  refreshSession: () => Promise<void>
+  signOut: () => Promise<void>
   refreshGraphSoon: () => void
   refreshBacklog: () => Promise<void>
   refreshWarps: () => Promise<void>
@@ -386,6 +394,7 @@ const ALL_RELS: Record<EdgeType, boolean> = {
 
 export const useStore = create<OzmoState>((set, get) => ({
   booted: false,
+  session: null,
   link: { state: 'connected' },
   info: null,
   settings: null,
@@ -427,6 +436,30 @@ export const useStore = create<OzmoState>((set, get) => ({
   hiddenFogClasses: [],
 
   boot: async () => {
+    // WHO AM I, BEFORE WHAT IS ON THE BOARD. Asking for projects first would
+    // mean the first thing an unapproved viewer sees is a refusal, and the
+    // client would have to reverse-engineer the onboarding screen out of an
+    // error. One call answers it directly.
+    let session: SessionInfo
+    try {
+      session = await rpc<SessionInfo>('session.current')
+    } catch (e) {
+      set({ booted: true })
+      get().toast(`cannot reach Spectre: ${e instanceof Error ? e.message : e}`, 'error')
+      return
+    }
+    set({ session })
+    if (session.state !== 'approved') {
+      // Nothing else is asked for. Not settings, not the project list — the
+      // gate would refuse them, and asking anyway is how a client ends up
+      // showing an error page instead of a door.
+      set({ booted: true })
+      return
+    }
+    await get().loadBoard()
+  },
+
+  loadBoard: async () => {
     try {
       const [info, settings, projects] = await Promise.all([
         rpc<AppInfo>('app.info'),
@@ -442,6 +475,32 @@ export const useStore = create<OzmoState>((set, get) => ({
     } catch (e) {
       set({ booted: true })
       get().toast(`boot failed: ${e instanceof Error ? e.message : e}`, 'error')
+    }
+  },
+
+  onboard: async (displayName) => {
+    const res = await rpc<{ token: string; session: SessionInfo }>('session.request', { displayName })
+    host().setSessionToken(res.token)
+    set({ session: res.session })
+    if (res.session.state === 'approved') await get().loadBoard()
+  },
+
+  refreshSession: async () => {
+    const session = await rpc<SessionInfo>('session.current')
+    const was = get().session?.state
+    set({ session })
+    // Approved while they were watching the waiting screen. Load the board
+    // rather than making them reload the page to discover it.
+    if (session.state === 'approved' && was !== 'approved') await get().loadBoard()
+  },
+
+  signOut: async () => {
+    const token = host().sessionToken()
+    try {
+      await rpc('session.signOut', { token })
+    } finally {
+      host().setSessionToken(null)
+      set({ session: { state: 'none', provider: '', providerLabel: '', atTheMachine: false, agentsUnauthenticated: false } })
     }
   },
 

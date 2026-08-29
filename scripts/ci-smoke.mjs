@@ -145,7 +145,8 @@ try {
   // that quietly stops running is indistinguishable from a suite that passes.
   const SUITES = [
     ['agent API', 'smoke.mjs'],
-    ['thin client', 'smoke-client.mjs']
+    ['thin client', 'smoke-client.mjs'],
+    ['accounts', 'smoke-accounts.mjs']
   ]
   const results = []
   for (const [label, file] of SUITES) {

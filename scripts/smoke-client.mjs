@@ -8,6 +8,10 @@
      1. POST /api/rpc  — the dispatcher, with IPC's envelope down to the nesting
      2. GET /api/events — event ids, Last-Event-ID replay, and an honest resync
      3. GET /app       — the bundle the core serves, with reachable assets
+     4. the account gate — onboarding, refusal, and what leaks past it
+
+   It leaves ONE artefact on the board under test: a pending account named
+   "Smoke Probe". That is deliberate and bounded — see the gate section.
 
    Kept separate from smoke.mjs deliberately: that file is the agent surface and
    is already 1600 lines. This one answers "can a browser be a first-class
@@ -25,8 +29,9 @@ const ok = (name, cond, extra = '') => {
   }
 }
 
-const rpc = async (method, payload) => {
-  const res = await fetch(`${BASE}/api/rpc`, { method: 'POST', headers: H, body: JSON.stringify({ method, payload }) })
+const rpc = async (method, payload, token) => {
+  const headers = token ? { ...H, 'X-Ozmo-Session': token } : H
+  const res = await fetch(`${BASE}/api/rpc`, { method: 'POST', headers, body: JSON.stringify({ method, payload }) })
   let json
   try {
     json = JSON.parse(await res.text())
@@ -173,6 +178,71 @@ const dataOf = (frame) => {
     ok('served client: every referenced asset is reachable from the core',
       statuses.every((s) => s === 200), JSON.stringify(assets.map((u, i) => `${u} → ${statuses[i]}`)))
   }
+}
+
+
+// ------------------------------------------------------------------ the gate
+/* Onboarding over the wire. The owner's verbs are NOT here on purpose — they
+   are at-the-machine only, and smoke-accounts.mjs drives them directly. */
+{
+  const anon = await rpc('session.current')
+  ok('gate: session.current answers without a session at all',
+    anon.json?.ok === true && anon.json.data?.state === 'none', JSON.stringify(anon.json))
+
+  // Every agent in the fleet is a caller with no session. If this is off, the
+  // rest of this section is testing a different configuration and should say so.
+  const carveOut = anon.json?.data?.agentsUnauthenticated === true
+  const board = await rpc('projects.list')
+  ok(carveOut
+      ? 'gate: an agent with no session still reads the board (the carve-out is on)'
+      : 'gate: with the carve-out off, an agent with no session is refused',
+    carveOut ? board.json?.ok === true : board.json?.ok === false, JSON.stringify(board.json).slice(0, 160))
+
+  // ONE fixed name, not a fresh one per run. Requesting a display name creates
+  // an account on the board under test, and there is no delete verb — by
+  // design, because a rejection that leaves no trace is a name that gets asked
+  // for again unnoticed. A timestamped probe would therefore add a pending row
+  // to the owner's People card every single run. A fixed one RESUMES the same
+  // row, so this suite costs the board exactly one account, ever, which the
+  // owner can reject once and be done with.
+  const name = 'Smoke Probe'
+  const asked = await rpc('session.request', { displayName: name })
+  ok('gate: a newcomer is filed as pending and handed a token',
+    asked.json?.data?.session?.state === 'pending' && typeof asked.json?.data?.token === 'string',
+    JSON.stringify(asked.json).slice(0, 200))
+  const token = asked.json?.data?.token
+
+  const refused = await rpc('projects.list', undefined, token)
+  ok('gate: a pending viewer gets NO board', refused.json?.ok === false && refused.status === 403, JSON.stringify(refused.json))
+  ok('gate: and is told which state they are in, so the client can show a door not an error',
+    refused.json?.error?.data?.accountState === 'pending', JSON.stringify(refused.json?.error))
+
+  // app.info is open because a client cannot boot without it. That makes it the
+  // one place board data could leak past the gate by accident.
+  const info = await rpc('app.info', undefined, token)
+  ok('gate: app.info is reachable while pending', info.json?.ok === true)
+  ok('gate: but TRIMMED — no vault path, no owner name',
+    info.json?.data?.vaultPath === '' && info.json?.data?.humanName === '', JSON.stringify(info.json?.data))
+
+  // The stream is board data too, and it is the leak that is easiest to forget.
+  const stream = await fetch(`${BASE}/api/events?session=${encodeURIComponent(token)}`)
+  ok('gate: a pending viewer is refused the event stream', stream.status === 403, `status ${stream.status}`)
+  try { await stream.body?.cancel() } catch { /* nothing to close */ }
+
+  const owner = await rpc('accounts.list', undefined, token)
+  ok('gate: deciding who is on the board is refused over the network', owner.json?.ok === false && owner.status === 403,
+    JSON.stringify(owner.json))
+
+  // A token that no longer resolves must be told apart from having no token at
+  // all: one shows a sign-in screen, the other is an agent going about its day.
+  const stale = await rpc('projects.list', undefined, 'not-a-real-token-at-all')
+  ok('gate: a stale token is 401 and says to sign in again, rather than being read as an agent',
+    stale.status === 401 && /sign in again/i.test(stale.json?.error?.message ?? ''), JSON.stringify(stale.json))
+
+  const out = await rpc('session.signOut', { token }, token)
+  ok('gate: sign out succeeds', out.json?.ok === true, JSON.stringify(out.json))
+  const after = await rpc('projects.list', undefined, token)
+  ok('gate: and the token is dead immediately', after.json?.ok === false, JSON.stringify(after.json).slice(0, 120))
 }
 
 console.log(failures === 0 ? '\nall client smoke checks passed ✓' : `\n${failures} FAILURES`)

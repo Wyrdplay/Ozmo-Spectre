@@ -20,7 +20,7 @@ says what it did to each one:
 - **In full** — pillar, principle, area, component. The commitments, the geography and the architecture:
   standing prose describing what the system *is*.
 - **Lead section only** — feature, instance. Each spec opens with its summary; the
-  acceptance criteria and build notes below it stay on the board. 63 specs are cut here,
+  acceptance criteria and build notes below it stay on the board. 64 specs are cut here,
   and each one says how much it left behind.
 - **Listed, not reproduced** — skill. 3 of them: a skill body is an
   instruction manual for an agent, not a description of this app.
@@ -281,7 +281,7 @@ Born from faykarta's build note: statuses should be tags - filtering, querying a
 
 # Agent & Human Interfaces
 
-`area` · `nd_eaf600d6c2` · 37 members · 48%
+`area` · `nd_eaf600d6c2` · 37 members · 49%
 
 ## Charter
 
@@ -479,7 +479,7 @@ answers, in JSON. If a human can see what is dormant, an agent can ask.
 
 ## A person is authenticated, not asserted
 
-`feature` · `nd_16cc4672da` · tags: server · 0%
+`feature` · `nd_16cc4672da` · tags: building, server · 45%
 
 > - depends on → Storage that survives concurrent writers
 > - required by → Presence is drawn, never stored
@@ -504,6 +504,8 @@ because attribution that anyone can forge is decoration.
 Note the collision with the recently-shipped skills targets: an allowlist of filesystem roots is
 already reachable through an unauthenticated API, which is survivable only because that API is
 loopback-only. A served Spectre makes that a genuine privilege question.
+
+*Lead section only — 1 further section in the full spec, fetched by the id above.*
 
 
 ## A prompt is a skill only the human invokes

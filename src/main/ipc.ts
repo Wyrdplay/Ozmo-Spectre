@@ -10,8 +10,13 @@ import * as vault from './vault'
 export function registerIpc(): void {
   ipcMain.handle('rpc', async (_e, method: string, payload: unknown) => {
     try {
+      // AT THE MACHINE. This renderer lives inside the process that owns the
+      // database and the vault; both are on this person's own disk. A login
+      // screen between them and their own files would be theatre, and the
+      // standing requirement is that an existing single-user board keeps
+      // working without anyone logging in.
       const actor = getSettings().humanName || 'human'
-      return { ok: true, data: await Promise.resolve(call(method, payload, { actor })) }
+      return { ok: true, data: await Promise.resolve(call(method, payload, { actor, atTheMachine: true })) }
     } catch (e) {
       return {
         ok: false,
