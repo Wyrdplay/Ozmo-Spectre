@@ -207,27 +207,46 @@ const dataOf = (frame) => {
   // owner can reject once and be done with.
   const name = 'Smoke Probe'
   const asked = await rpc('session.request', { displayName: name })
-  ok('gate: a newcomer is filed as pending and handed a token',
-    asked.json?.data?.session?.state === 'pending' && typeof asked.json?.data?.token === 'string',
-    JSON.stringify(asked.json).slice(0, 200))
   const token = asked.json?.data?.token
+  const probeState = asked.json?.data?.session?.state
+  ok('gate: onboarding hands back a session token', typeof token === 'string' && token.length > 20,
+    JSON.stringify(asked.json).slice(0, 200))
 
-  const refused = await rpc('projects.list', undefined, token)
-  ok('gate: a pending viewer gets NO board', refused.json?.ok === false && refused.status === 403, JSON.stringify(refused.json))
-  ok('gate: and is told which state they are in, so the client can show a door not an error',
-    refused.json?.error?.data?.accountState === 'pending', JSON.stringify(refused.json?.error))
+  /* THE PROBE'S STATE IS NOT OURS TO ASSUME.
+     "Smoke Probe" is one fixed account on whatever board this runs against, and
+     the owner may well have approved it — mine did. Asserting `pending` made
+     five checks fail for a reason that was nothing to do with the code.
+     So: branch on what it actually is, run the checks that apply, and SAY which
+     path ran. ci-smoke.mjs starts a throwaway board every time, so the pending
+     path below is exercised on every CI run regardless of what a dev board
+     looks like. */
+  if (probeState === 'pending') {
+    const refused = await rpc('projects.list', undefined, token)
+    ok('gate: a pending viewer gets NO board', refused.json?.ok === false && refused.status === 403, JSON.stringify(refused.json))
+    ok('gate: and is told which state they are in, so the client can show a door not an error',
+      refused.json?.error?.data?.accountState === 'pending', JSON.stringify(refused.json?.error))
 
-  // app.info is open because a client cannot boot without it. That makes it the
-  // one place board data could leak past the gate by accident.
-  const info = await rpc('app.info', undefined, token)
-  ok('gate: app.info is reachable while pending', info.json?.ok === true)
-  ok('gate: but TRIMMED — no vault path, no owner name',
-    info.json?.data?.vaultPath === '' && info.json?.data?.humanName === '', JSON.stringify(info.json?.data))
+    // app.info is open because a client cannot boot without it. That makes it
+    // the one place board data could leak past the gate by accident.
+    const info = await rpc('app.info', undefined, token)
+    ok('gate: app.info is reachable while pending', info.json?.ok === true)
+    ok('gate: but TRIMMED — no vault path, no owner name',
+      info.json?.data?.vaultPath === '' && info.json?.data?.humanName === '', JSON.stringify(info.json?.data))
 
-  // The stream is board data too, and it is the leak that is easiest to forget.
-  const stream = await fetch(`${BASE}/api/events?session=${encodeURIComponent(token)}`)
-  ok('gate: a pending viewer is refused the event stream', stream.status === 403, `status ${stream.status}`)
-  try { await stream.body?.cancel() } catch { /* nothing to close */ }
+    // The stream is board data too, and the leak easiest to forget.
+    const stream = await fetch(`${BASE}/api/events?session=${encodeURIComponent(token)}`)
+    ok('gate: a pending viewer is refused the event stream', stream.status === 403, `status ${stream.status}`)
+    try { await stream.body?.cancel() } catch { /* nothing to close */ }
+  } else {
+    console.log(`  – gate: "${name}" is ${probeState} on this board, so the pending-refusal checks are not run here.`)
+    console.log('    (they run on every ci-smoke, which starts a fresh board — reject it to exercise them locally)')
+    // One thing must hold whatever the state: an APPROVED account still gets a
+    // trimmed app.info only if unapproved, so check the opposite direction.
+    const info = await rpc('app.info', undefined, token)
+    ok('gate: an approved account gets the FULL app.info',
+      info.json?.ok === true && typeof info.json?.data?.vaultPath === 'string' && info.json.data.vaultPath.length > 0,
+      JSON.stringify(info.json?.data))
+  }
 
   const owner = await rpc('accounts.list', undefined, token)
   ok('gate: deciding who is on the board is refused over the network', owner.json?.ok === false && owner.status === 403,
@@ -243,6 +262,82 @@ const dataOf = (frame) => {
   ok('gate: sign out succeeds', out.json?.ok === true, JSON.stringify(out.json))
   const after = await rpc('projects.list', undefined, token)
   ok('gate: and the token is dead immediately', after.json?.ok === false, JSON.stringify(after.json).slice(0, 120))
+}
+
+
+// ------------------------------------------------------------------- roles
+/* What a role means over the wire. The provider suite proves the decisions;
+   this proves the GATE honours them on a live server, which is where a
+   classification mistake would actually bite. */
+{
+  const anon = await rpc('session.current')
+  const carveOut = anon.json?.data?.agentsUnauthenticated === true
+
+  const asked = await rpc('session.request', { displayName: 'Smoke Probe' })
+  const token = asked.json?.data?.token
+  const state = asked.json?.data?.session?.state
+
+  if (state !== 'approved') {
+    console.log(`  – roles: "Smoke Probe" is ${state}; approve it in the desktop app to exercise the viewer path`)
+    // Still worth checking the one thing that holds regardless of state.
+    const owner = await rpc('accounts.setRole', { id: 'whatever', role: 'editor' }, token)
+    ok('roles: changing a role is refused over the network whatever your state',
+      owner.json?.ok === false && owner.status === 403, JSON.stringify(owner.json))
+  } else {
+    const role = asked.json?.data?.session?.role
+    ok('roles: the session says which role it holds', role === 'viewer' || role === 'editor', String(role))
+
+    const read = await rpc('graph.get', { projectId: (await rpc('projects.list', undefined, token)).json.data[0].id }, token)
+    ok('roles: an approved account may read the board', read.json?.ok === true, JSON.stringify(read.json).slice(0, 140))
+
+    if (role === 'viewer') {
+      const write = await rpc('nodes.create',
+        { projectId: (await rpc('projects.list', undefined, token)).json.data[0].id, type: 'idea', title: 'smoke probe should not exist' },
+        token)
+      ok('roles: a viewer may NOT create a node', write.json?.ok === false && write.status === 403, JSON.stringify(write.json))
+      ok('roles: and the refusal names the role and what to ask for',
+        /viewer access/.test(write.json?.error?.message ?? '') && /editor/.test(write.json?.error?.message ?? ''),
+        write.json?.error?.message ?? '')
+      ok('roles: the refusal carries the role as data, not just prose',
+        write.json?.error?.data?.role === 'viewer' && write.json?.error?.data?.needed === 'write',
+        JSON.stringify(write.json?.error?.data))
+    } else {
+      console.log('  – roles: "Smoke Probe" is an editor; demote it to viewer to exercise the read-only path')
+    }
+  }
+
+  // True for every network caller, agent or person, whatever their role.
+  // A signed-in PERSON may not re-home the vault or move the port, whatever
+  // their role. Read the current value and send it back unchanged, so a bug in
+  // the refusal cannot alter the board it is being tested against.
+  const current = (await rpc('settings.get', undefined, token)).json?.data
+  const hostSetting = await rpc('settings.update', { vaultPath: current?.vaultPath }, token)
+  ok('roles: re-homing the machine is refused to a signed-in person over the network',
+    hostSetting.json?.ok === false && hostSetting.status === 403, JSON.stringify(hostSetting.json).slice(0, 200))
+  ok('roles: and the refusal names the field rather than being generic',
+    hostSetting.json?.error?.data?.hostFields?.includes('vaultPath'), JSON.stringify(hostSetting.json?.error?.data))
+
+  const membership = await rpc('accounts.list', undefined, token)
+  ok('roles: membership is refused to a signed-in person over the network',
+    membership.json?.ok === false && membership.status === 403, JSON.stringify(membership.json))
+
+  if (carveOut) {
+    // The carve-out preserves what an agent ALWAYS had, which includes declaring
+    // where skills install. Tightening that silently would have broken the fleet.
+    const agentTargets = await rpc('skills.targets')
+    ok('roles: an agent keeps the machine-facing verbs it has always used', agentTargets.json?.ok === true,
+      JSON.stringify(agentTargets.json).slice(0, 120))
+    const agentSetting = await rpc('settings.update', { vaultPath: current?.vaultPath ?? undefined })
+    ok('roles: including host settings — the carve-out is the status quo, not a new grant',
+      agentSetting.json?.ok === true, JSON.stringify(agentSetting.json).slice(0, 160))
+    // ...but NOT membership. Those verbs are new, so there is no status quo to
+    // preserve, and an agent that could approve accounts could let anyone in.
+    const agentMembership = await rpc('accounts.approve', { id: 'whatever' })
+    ok('roles: but NEVER membership — an agent that could approve accounts could let anyone in',
+      agentMembership.json?.ok === false && agentMembership.status === 403, JSON.stringify(agentMembership.json))
+  }
+
+  if (token) await rpc('session.signOut', { token }, token)
 }
 
 console.log(failures === 0 ? '\nall client smoke checks passed ✓' : `\n${failures} FAILURES`)

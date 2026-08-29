@@ -162,6 +162,83 @@ let riley
     JSON.stringify(acc.list().filter((x) => x.isOwner)))
 }
 
+
+// --- roles ------------------------------------------------------------------
+{
+  const acc2 = mod.localAccounts()
+  const riley = acc2.list().find((a) => a.displayName === 'riley vance')
+
+  ok('approval makes a VIEWER, not an editor — promoting is a second decision',
+    riley?.role === 'viewer', JSON.stringify({ role: riley?.role }))
+  ok('the owner holds the owner role', acc2.list().find((a) => a.isOwner)?.role === 'owner')
+
+  const promoted = acc2.setRole(riley.id, 'editor', 'Faykarta')
+  ok('setRole promotes to editor', promoted.role === 'editor', JSON.stringify(promoted))
+  // The role must be read FRESH on every call, not baked into the token when it
+  // was issued — otherwise a promotion or a demotion only lands when the person
+  // next signs in, which is not a decision taking effect.
+  const held = acc2.request('Held Token Person', 'test')
+  acc2.approve(held.account.id, 'Faykarta')
+  ok('a held token sees viewer immediately after approval', acc2.resolve(held.token)?.role === 'viewer')
+  acc2.setRole(held.account.id, 'editor', 'Faykarta')
+  ok('and sees editor the moment the role changes, with no new sign-in',
+    acc2.resolve(held.token)?.role === 'editor', JSON.stringify(acc2.resolve(held.token)))
+  acc2.setRole(held.account.id, 'viewer', 'Faykarta')
+  ok('and sees a DEMOTION just as immediately — the dangerous direction',
+    acc2.resolve(held.token)?.role === 'viewer', JSON.stringify(acc2.resolve(held.token)))
+  ok('setRole demotes back to viewer', acc2.setRole(riley.id, 'viewer', 'Faykarta').role === 'viewer')
+
+  // The whole reason owner is a role and not a grant.
+  ok('owner cannot be GRANTED — it is claimed at the machine',
+    refuses(() => acc2.setRole(riley.id, 'owner', 'Faykarta'), /claimed at the machine, never granted/i))
+  const owner = acc2.list().find((a) => a.isOwner)
+  ok('and the owner row cannot be re-roled out of its own board',
+    refuses(() => acc2.setRole(owner.id, 'viewer', 'Faykarta'), /cannot be changed/i))
+}
+
+// --- the capability table ----------------------------------------------------
+/* The gate is only as good as this table. Two properties matter:
+   every method is classified (or editors silently lose verbs), and the roles
+   grant what they claim (or the labels lie). */
+{
+  const reg = Object.keys(mod.registry)
+  const classified = Object.keys(mod.capabilityTable)
+  const missing = reg.filter((m) => !classified.includes(m))
+  const stale = classified.filter((m) => !reg.includes(m))
+
+  ok('every registry method is classified — an unclassified verb is owner-only at runtime, which locks out editors',
+    missing.length === 0, missing.join(', '))
+  ok('the table names no method that no longer exists', stale.length === 0, stale.join(', '))
+
+  // Default deny, checked rather than assumed.
+  ok('an unknown method is refused to an editor — default deny', mod.roleAllows('editor', 'not.a.real.method') === false)
+  ok('...and to a viewer', mod.roleAllows('viewer', 'not.a.real.method') === false)
+
+  ok('a viewer may read the board', mod.roleAllows('viewer', 'graph.get') && mod.roleAllows('viewer', 'nodes.get'))
+  ok('a viewer may comment', mod.roleAllows('viewer', 'nodes.annotate') && mod.roleAllows('viewer', 'edges.annotate'))
+  ok('a viewer may NOT change what the board says',
+    !mod.roleAllows('viewer', 'nodes.update') && !mod.roleAllows('viewer', 'nodes.setContent') &&
+    !mod.roleAllows('viewer', 'edges.create') && !mod.roleAllows('viewer', 'nodes.create'))
+  ok('an editor may write but may NOT decide who is on the board',
+    mod.roleAllows('editor', 'nodes.update') && !mod.roleAllows('editor', 'accounts.approve') &&
+    !mod.roleAllows('editor', 'accounts.setRole'))
+  // settings.update is a WRITE (it carries the board's flag rules and styling);
+  // the machine-facing FIELDS inside it are refused in the handler. Target
+  // management is machine-facing outright.
+  ok('an editor may edit board settings', mod.roleAllows('editor', 'settings.update'))
+  ok('an editor may NOT change the filesystem roots the installer writes into',
+    !mod.roleAllows('editor', 'skills.addTarget') && !mod.roleAllows('editor', 'skills.removeTarget'))
+  ok('the owner may do everything the registry offers',
+    reg.every((m) => mod.roleAllows('owner', m)), reg.filter((m) => !mod.roleAllows('owner', m)).join(', '))
+
+  // Nothing that writes the filesystem outside the vault may be a viewer's.
+  const privileged = ['skills.addTarget', 'skills.removeTarget', 'skills.setTargetEnabled',
+    'accounts.approve', 'accounts.reject', 'accounts.setRole', 'accounts.list']
+  ok('every privileged verb is owner-only',
+    privileged.every((m) => !mod.roleAllows('editor', m) && !mod.roleAllows('viewer', m)),
+    privileged.filter((m) => mod.roleAllows('editor', m)).join(', '))
+}
+
 mod.closeDb?.()
 try {
   fs.rmSync(scratch, { recursive: true, force: true })

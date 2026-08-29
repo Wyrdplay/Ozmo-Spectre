@@ -2,7 +2,7 @@ import crypto from 'crypto'
 import * as db from './db'
 import { emitEvent } from './events'
 import { nameKey, normaliseDisplayName, type Account, type AccountProvider, type IssuedSession } from './account'
-import { newId, type AccountState } from '@shared/types'
+import { newId, type AccountRole, type AccountState } from '@shared/types'
 
 /**
  * Accounts in the board's own database.
@@ -17,6 +17,7 @@ interface Row {
   display_name: string
   display_name_key: string
   state: string
+  role: string
   is_owner: number
   created_at: number
   decided_at: number | null
@@ -28,6 +29,7 @@ const map = (r: Row): Account => ({
   id: r.id,
   displayName: r.display_name,
   state: r.state as AccountState,
+  role: (r.role as AccountRole) ?? 'viewer',
   isOwner: r.is_owner === 1,
   createdAt: r.created_at,
   decidedAt: r.decided_at ?? undefined,
@@ -93,9 +95,13 @@ export function localAccounts(): AccountProvider {
         const id = newId('ac')
         const state: AccountState = ownerExists ? 'pending' : 'approved'
         db.run(
-          `INSERT INTO accounts (id, display_name, display_name_key, state, is_owner, created_at, decided_at, decided_by)
-           VALUES (?,?,?,?,?,?,?,?)`,
-          [id, name, key, state, ownerExists ? 0 : 1, Date.now(), ownerExists ? null : Date.now(), ownerExists ? null : 'first run']
+          `INSERT INTO accounts (id, display_name, display_name_key, state, role, is_owner, created_at, decided_at, decided_by)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+          // The first name claims the board and is the owner. Everyone after is
+          // a VIEWER the moment they are approved — promoting is a separate,
+          // deliberate act, so the careless path is the safe one.
+          [id, name, key, state, ownerExists ? 'viewer' : 'owner', ownerExists ? 0 : 1,
+           Date.now(), ownerExists ? null : Date.now(), ownerExists ? null : 'first run']
         )
         row = rowById(id)!
         emitEvent(state === 'pending' ? 'account.requested' : 'account.claimed', undefined, map(row), name)
@@ -136,6 +142,19 @@ export function localAccounts(): AccountProvider {
       return after
     },
 
+    setRole(id: string, role: AccountRole, by: string): Account {
+      const row = rowById(id)
+      if (!row) throw new Error(`no account ${id}`)
+      if (row.is_owner === 1) throw new Error('the board owner has every capability by definition; their role cannot be changed')
+      if (role === 'owner') {
+        throw new Error('owner is claimed at the machine, never granted — approving is the privilege that lets someone let themselves in, and a display name is asserted rather than proved')
+      }
+      db.run('UPDATE accounts SET role = ? WHERE id = ?', [role, id])
+      const after = map(rowById(id)!)
+      emitEvent('account.role', undefined, after, by)
+      return after
+    },
+
     resolve(token: string): Account | undefined {
       if (!token) return undefined
       const s = db.get<{ account_id: string }>('SELECT account_id FROM sessions WHERE token = ?', [token])
@@ -162,15 +181,15 @@ export function localAccounts(): AccountProvider {
       const key = nameKey(name)
       const taken = rowByKey(key)
       if (taken) {
-        db.run('UPDATE accounts SET is_owner = 1, state = ?, decided_at = ?, decided_by = ? WHERE id = ?',
-          ['approved', Date.now(), 'first run', taken.id])
+        db.run('UPDATE accounts SET is_owner = 1, role = ?, state = ?, decided_at = ?, decided_by = ? WHERE id = ?',
+          ['owner', 'approved', Date.now(), 'first run', taken.id])
         return map(rowById(taken.id)!)
       }
       const id = newId('ac')
       db.run(
-        `INSERT INTO accounts (id, display_name, display_name_key, state, is_owner, created_at, decided_at, decided_by)
-         VALUES (?,?,?,?,?,?,?,?)`,
-        [id, name, key, 'approved', 1, Date.now(), Date.now(), 'first run']
+        `INSERT INTO accounts (id, display_name, display_name_key, state, role, is_owner, created_at, decided_at, decided_by)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+        [id, name, key, 'approved', 'owner', 1, Date.now(), Date.now(), 'first run']
       )
       const acct = map(rowById(id)!)
       emitEvent('account.claimed', undefined, acct, name)

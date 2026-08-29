@@ -5,7 +5,7 @@ import * as skills from './skills'
 import { buildDocument } from './document'
 import { getSettings, updateSettings } from './settings'
 import { emitEvent } from './events'
-import type { AppInfo, SessionInfo } from '@shared/types'
+import type { AccountRole, AppInfo, SessionInfo } from '@shared/types'
 
 export interface Ctx {
   actor: string
@@ -33,8 +33,179 @@ export interface Ctx {
  */
 const OPEN_METHODS = new Set(['session.current', 'session.request', 'session.signOut', 'app.info'])
 
-/** Owner-only. Deciding who is on the board is not a thing being on the board grants. */
-const OWNER_METHODS = new Set(['accounts.list', 'accounts.approve', 'accounts.reject'])
+/**
+ * WHAT A METHOD COSTS.
+ *
+ *   read        look at the board
+ *   annotate    join the conversation on it — comments, review feedback
+ *   write       change what the board SAYS: specs, tags, links, stages, positions
+ *   host        act on the MACHINE the board runs on: its vault path, its port,
+ *               the filesystem roots the skill installer may write into
+ *   membership  decide who is on the board
+ *
+ * `host` and `membership` are separate because their answers differ for the one
+ * caller that is neither a person nor absent: a tokenless agent on loopback.
+ * It has always had `host` — `skills.addTarget` is how agents declare the repos
+ * they install into, and taking that away is a tightening nobody asked for.
+ * It has never had `membership`, because those verbs did not exist until now,
+ * so there is no status quo to preserve and an agent that could approve
+ * accounts would be an agent that could let anyone in.
+ *
+ * A ROLE IS A SET OF THESE, not a rank with special cases (see ALLOWED).
+ *
+ * ## Default deny, and a test that stops it being silent
+ *
+ * A method with no entry here requires `owner` — `capabilityOf` says so. That
+ * is the safe direction: a new verb that nobody classified must not be readable
+ * by everyone, it must be unreachable by almost everyone. But an unclassified
+ * verb is still a BUG, because it locks out editors who should have it, so
+ * `smoke-accounts.mjs` asserts every registry key appears here. Runtime is safe;
+ * the test is what stops the safety being load-bearing.
+ */
+type Capability = 'read' | 'annotate' | 'write' | 'host' | 'membership'
+
+const CAPABILITY: Record<string, Capability> = {
+  // ---- read: looking at the board -----------------------------------------
+  'projects.list': 'read',
+  'projects.get': 'read',
+  'graph.get': 'read',
+  'nodes.list': 'read',
+  'nodes.get': 'read',
+  'nodes.getContent': 'read',
+  'nodes.diff': 'read',
+  'edges.get': 'read',
+  'warps.list': 'read',
+  'backlog.list': 'read',
+  'scope.get': 'read',
+  'impact.get': 'read',
+  'fog.get': 'read',
+  'fog.node': 'read',
+  'commons.list': 'read',
+  'activity.list': 'read',
+  'search.run': 'read',
+  'document.build': 'read',
+  'settings.get': 'read',
+  // Reading skills is reading the board — a skill IS a node. Rendering and
+  // diffing only compute; they touch no disk.
+  'skills.list': 'read',
+  'skills.render': 'read',
+  'skills.read': 'read',
+  'skills.diff': 'read',
+  'skills.targets': 'read',
+  // Pointing at something is how a person says "look at this" to the room. It
+  // moves a view and changes nothing.
+  'ui.focus': 'read',
+
+  // ---- annotate: joining the conversation ---------------------------------
+  // Comments and review observations are a RESPONSE to the board, not authorship
+  // of it. A board you cannot answer back to is a document, not a canvas.
+  'nodes.annotate': 'annotate',
+  'edges.annotate': 'annotate',
+  // Deleting an annotation is left at `write` deliberately: this layer cannot
+  // see whose comment it is, and "a viewer may delete comments" is a worse
+  // default than "a viewer may not". Revisit when authorship is checked.
+
+  // ---- write: changing what the board says --------------------------------
+  'projects.create': 'write',
+  'projects.update': 'write',
+  'projects.delete': 'write',
+  'nodes.create': 'write',
+  'nodes.update': 'write',
+  'nodes.delete': 'write',
+  'nodes.setContent': 'write',
+  'nodes.complete': 'write',
+  'nodes.prune': 'write',
+  'nodes.refer': 'write',
+  'nodes.share': 'write',
+  'nodes.unshare': 'write',
+  'nodes.reference': 'write',
+  'nodes.fork': 'write',
+  'nodes.waive': 'write',
+  'nodes.unwaive': 'write',
+  'nodes.fold': 'write',
+  'nodes.unfold': 'write',
+  'nodes.pass': 'write',
+  'nodes.answer': 'write',
+  'nodes.convert': 'write',
+  'nodes.requestSweep': 'write',
+  'annotations.delete': 'write',
+  'edges.create': 'write',
+  'edges.update': 'write',
+  'edges.delete': 'write',
+  'edges.addRelationship': 'write',
+  'edges.updateRelationship': 'write',
+  'edges.removeRelationship': 'write',
+  'warps.addMember': 'write',
+  'warps.removeMember': 'write',
+  /**
+   * `settings.update` is WRITE, not owner — and the split is by FIELD rather
+   * than by verb, because one call carries two different kinds of thing.
+   *
+   * Most of it is the board: the highlight rules every node renders through,
+   * node colours and shapes, type order. Editors and agents change those as
+   * ordinary work, and classifying the verb as owner-only broke 74 checks in
+   * the agent suite the moment it landed — which is the suite doing its job.
+   *
+   * The HOST-MACHINE fields inside it — the vault path and the API port —
+   * are refused to anyone but the owner, in the handler below, where the
+   * payload can actually be looked at. That is the same shape `skillTargets`
+   * already had: the verb is reachable, the dangerous field is not.
+   */
+  'settings.update': 'write',
+  'skills.install': 'write',
+  'skills.uninstall': 'write',
+  'skills.import': 'write',
+  'skills.adopt': 'write',
+
+  // ---- membership: who is on the board ------------------------------------
+  'accounts.list': 'membership',
+  'accounts.approve': 'membership',
+  'accounts.reject': 'membership',
+  'accounts.setRole': 'membership',
+  // Skill TARGETS are an allowlist of filesystem roots the installer writes
+  // into: the nearest thing this app has to a privileged operation.
+  'skills.addTarget': 'host',
+  'skills.removeTarget': 'host',
+  'skills.setTargetEnabled': 'host',
+
+  // OPEN_METHODS are listed so the completeness test can see them, and are
+  // never consulted — authorise() returns before capability is asked for.
+  'session.current': 'read',
+  'session.request': 'read',
+  'session.signOut': 'read',
+  'app.info': 'read'
+}
+
+/** Unclassified means membership — the most restricted. See the note above. */
+const capabilityOf = (method: string): Capability => CAPABILITY[method] ?? 'membership'
+
+/**
+ * What each role may do. A SET, not a rank: reading the table answers "may a
+ * viewer do this" without tracing an ordering, and a future role that is not a
+ * superset of an earlier one does not break the model.
+ *
+ * `owner` is not in any grantable role. Deciding who is on the board is the
+ * privilege that lets someone let themselves in, and while a display name is
+ * asserted rather than proved, granting it remotely would make every other
+ * refusal here decoration. It stays with the account at the machine until a
+ * person is authenticated.
+ */
+const ALLOWED: Record<AccountRole, Set<Capability>> = {
+  viewer: new Set<Capability>(['read', 'annotate']),
+  editor: new Set<Capability>(['read', 'annotate', 'write']),
+  owner: new Set<Capability>(['read', 'annotate', 'write', 'host', 'membership'])
+}
+
+/**
+ * What a tokenless caller on loopback gets while the carve-out is on: what it
+ * always had, minus membership. Not a role — an agent has no account, so it
+ * gets a capability set rather than a label.
+ */
+const AGENT_CAPABILITIES = new Set<Capability>(['read', 'annotate', 'write', 'host'])
+
+/** Exported so the completeness test can hold the registry against it. */
+export const capabilityTable = CAPABILITY
+export const roleAllows = (role: AccountRole, method: string): boolean => ALLOWED[role].has(capabilityOf(method))
 
 /** What a client knows about itself. The only honest answer to "who am I". */
 function sessionInfo(ctx: Ctx): SessionInfo {
@@ -42,6 +213,7 @@ function sessionInfo(ctx: Ctx): SessionInfo {
   const account = ctx.atTheMachine ? provider.ownerAtTheMachine(getSettings().humanName) : ctx.account
   return {
     state: account?.state ?? 'none',
+    role: account?.role,
     account,
     provider: provider.name,
     providerLabel: provider.label,
@@ -209,9 +381,28 @@ export const registry: Record<string, Handler> = {
   'accounts.list': () => accounts().list(),
   'accounts.approve': (p, c) => accounts().approve((p as { id: string }).id, c.actor),
   'accounts.reject': (p, c) => accounts().reject((p as { id: string }).id, c.actor, (p as { note?: string })?.note),
+  'accounts.setRole': (p, c) => accounts().setRole((p as { id: string }).id, (p as { role: AccountRole }).role, c.actor),
 
   'settings.get': () => getSettings(),
   'settings.update': (p, c) => {
+    // The vault path and the API port configure the MACHINE, not the board: one
+    // re-homes the app on relaunch, the other moves the port every agent is
+    // pointed at. A remote caller changing either is not a smaller version of
+    // editing a highlight rule.
+    const HOST_FIELDS = ['vaultPath', 'apiPort', 'humanName']
+    const touched = HOST_FIELDS.filter((f) => p && typeof p === 'object' && f in (p as object))
+    // A tokenless agent keeps this, as above. A signed-in person over the
+    // network does not, whatever their role: re-homing the vault or moving the
+    // port is not a smaller version of editing a highlight rule.
+    const trustedWithTheMachine = c.atTheMachine || c.account?.isOwner || (!c.account && !c.hasSession)
+    if (touched.length > 0 && !trustedWithTheMachine) {
+      throw new svc.ApiError(
+        `${touched.join(' and ')} configure the machine this board runs on, not the board. ` +
+          'They are changed in the desktop app, at that machine.',
+        403,
+        { hostFields: touched }
+      )
+    }
     const res = updateSettings(p)
     // flag rules live in settings and shape every graph payload — tell the
     // renderer (and SSE listeners) so open views recompute without a relaunch
@@ -261,15 +452,28 @@ function authorise(method: string, ctx: Ctx): void {
         { accountState: ctx.account.state, displayName: ctx.account.displayName }
       )
     }
+    const need = capabilityOf(method)
+
     // Belt and braces with account-local's refusal to issue an owner session
     // over the wire: deciding who is on the board happens at the machine that
     // holds it. Two checks because they fail differently — that one stops the
     // owner's name being CLAIMED, this one stops an owner session being USED
     // from somewhere else if a future provider ever issues one.
-    if (OWNER_METHODS.has(method)) {
+    if (need === 'membership' || need === 'host') {
       throw new svc.ApiError(
-        'who is on this board is decided at the machine it runs on, in the desktop app — not over the network',
+        need === 'membership'
+          ? 'who is on this board is decided at the machine it runs on, in the desktop app — not over the network'
+          : 'how the machine running this board is configured is decided at that machine, in the desktop app',
         403
+      )
+    }
+
+    if (!roleAllows(ctx.account.role, method)) {
+      throw new svc.ApiError(
+        `"${ctx.account.displayName}" has ${ctx.account.role} access to this board, which does not include ` +
+          `${need === 'write' ? 'changing what it says' : 'this'}. Ask the owner for editor access.`,
+        403,
+        { role: ctx.account.role, needed: need }
       )
     }
     return
@@ -283,8 +487,12 @@ function authorise(method: string, ctx: Ctx): void {
   }
 
   if (getSettings().agentsUnauthenticated !== false) {
-    if (OWNER_METHODS.has(method)) {
-      throw new svc.ApiError('only the board owner decides who is on the board', 403)
+    // An agent keeps exactly what it had: the board AND the machine-facing
+    // verbs it has always used to declare where skills install. What it never
+    // had, and does not get, is membership — an agent that could approve
+    // accounts is an agent that could let anyone in.
+    if (!AGENT_CAPABILITIES.has(capabilityOf(method))) {
+      throw new svc.ApiError('only the board owner decides who is on the board, at the machine it runs on', 403)
     }
     return
   }

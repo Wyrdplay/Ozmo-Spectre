@@ -6,7 +6,8 @@ import {
   EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
   defaultFlags, isTextGlyph, newId,
   orderedNodeTypes, relStyle, typeStyle,
-  type Account, type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
+  GRANTABLE_ROLES,
+  type Account, type AccountRole, type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
   type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type Project,
   type SkillTarget, type SkillTargetConfig, type StyleOverrides,
   type WarpStage
@@ -328,6 +329,18 @@ function PeopleCard(): React.JSX.Element | null {
     }
   }
 
+  const changeRole = async (id: string, role: AccountRole): Promise<void> => {
+    setBusy(id)
+    try {
+      await rpc('accounts.setRole', { id, role })
+      setNonce((n) => n + 1)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const order = { pending: 0, approved: 1, rejected: 2 } as const
   const sorted = [...(rows ?? [])].sort((a, b) => order[a.state] - order[b.state] || b.createdAt - a.createdAt)
   const pending = sorted.filter((r) => r.state === 'pending').length
@@ -336,8 +349,14 @@ function PeopleCard(): React.JSX.Element | null {
     <div className="settings-card">
       <h2>People {pending > 0 ? `· ${pending} waiting` : ''}</h2>
       <div className="hint">
-        Only approved display names reach this board. A name you reject keeps its row, so the same
-        request cannot come back unnoticed. Accounts are managed by {session?.providerLabel}.
+        Only approved display names reach this board, and approving makes someone a <strong>viewer</strong> —
+        they can read it and comment on it, but not change what it says. Promoting to <strong>editor</strong> is
+        a separate decision. A name you reject keeps its row, so the same request cannot come back
+        unnoticed. Accounts are managed by {session?.providerLabel}.
+      </div>
+      <div className="hint" style={{ marginTop: -4 }}>
+        Owner is not grantable: approving is the privilege that lets someone let themselves in, and a
+        display name is asserted rather than proved. It becomes grantable when a name can be proved.
       </div>
       {rows === null && <div className="hint">reading…</div>}
       {rows !== null && sorted.length === 0 && <div className="hint">nobody has asked to join yet.</div>}
@@ -351,6 +370,20 @@ function PeopleCard(): React.JSX.Element | null {
             {a.displayName}{a.isOwner ? ' · owner' : ''}
           </span>
           <span className="hint" style={{ width: 74, flex: 'none' }}>{a.state}</span>
+          <span style={{ width: 96, flex: 'none' }}>
+            {a.isOwner && <span className="hint">owner</span>}
+            {!a.isOwner && a.state === 'approved' && (
+              <select
+                className="input"
+                style={{ width: '100%', padding: '2px 4px', fontSize: 12 }}
+                value={a.role}
+                disabled={busy === a.id}
+                onChange={(e) => void changeRole(a.id, e.target.value as AccountRole)}
+              >
+                {GRANTABLE_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            )}
+          </span>
           <span style={{ width: 78, flex: 'none' }}>
             {a.state !== 'approved' && (
               <button className="btn sm" data-approve={a.id} disabled={busy === a.id} onClick={() => void decide(a.id, 'approve')}>approve</button>

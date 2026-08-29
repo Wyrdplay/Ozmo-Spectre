@@ -2458,7 +2458,9 @@ export function GraphView(): React.JSX.Element {
           re-layout
         </button>
         <div className="divider" />
-        <button className="btn sm primary" onClick={() => showQuickAdd()}>+ node</button>
+        {useStore.getState().canWrite() && (
+          <button className="btn sm primary" onClick={() => showQuickAdd()}>+ node</button>
+        )}
       </div>
 
       {findQuery !== null && (

@@ -198,6 +198,7 @@ function migrate(): void {
       display_name     TEXT NOT NULL,
       display_name_key TEXT NOT NULL UNIQUE,
       state            TEXT NOT NULL,
+      role             TEXT NOT NULL DEFAULT 'viewer',
       is_owner         INTEGER NOT NULL DEFAULT 0,
       created_at       INTEGER NOT NULL,
       decided_at       INTEGER,
@@ -221,6 +222,27 @@ function migrate(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
   `)
+  // ROLE, added after accounts shipped without one. Guarded, and BACKFILLED by
+  // what each row could already do: an approved non-owner had full write, so
+  // they become `editor`. Defaulting them to `viewer` would silently take away
+  // access people already had, which is a migration that looks like a bug to
+  // everyone it happens to. New approvals get `viewer` — that is a decision
+  // about the future, not a licence to rewrite the past.
+  const accountCols = all<{ name: string }>('PRAGMA table_info(accounts)').map((c) => c.name)
+  if (accountCols.length > 0 && !accountCols.includes('role')) {
+    driver.exec("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'")
+    driver.exec("UPDATE accounts SET role = 'owner' WHERE is_owner = 1")
+    driver.exec("UPDATE accounts SET role = 'editor' WHERE is_owner = 0 AND state = 'approved'")
+    const counts = all<{ role: string; n: number }>('SELECT role, COUNT(*) AS n FROM accounts GROUP BY role')
+    // migrate() does not create `meta` itself — the other migration functions
+    // each ensure it before writing. Same pattern here, so this does not depend
+    // on the order they happen to run in.
+    driver.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    driver.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+      ['migration.account_roles', JSON.stringify({ at: Date.now(), counts })])
+    console.log('[ozmo] migration: account roles', JSON.stringify(counts))
+  }
+
   // Guarded column adds — CREATE TABLE IF NOT EXISTS never touches existing tables.
   const nodeCols = all<{ name: string }>('PRAGMA table_info(nodes)').map((c) => c.name)
   if (!nodeCols.includes('rank')) driver.exec('ALTER TABLE nodes ADD COLUMN rank REAL')

@@ -238,10 +238,36 @@ export interface AppInfo {
  */
 export type AccountState = 'pending' | 'approved' | 'rejected'
 
+/**
+ * What an approved person may do.
+ *
+ * `viewer` — read the board and join the conversation on it: comments and
+ *            review feedback. Cannot change what the board SAYS.
+ * `editor` — everything a viewer can, plus authorship: specs, tags, links,
+ *            warp stages, positions.
+ * `owner`  — plus deciding who is on the board, and the host machine's
+ *            settings. NOT GRANTABLE: exactly one account holds it, claimed at
+ *            the machine on first run. Approving is the privilege that lets
+ *            someone let themselves in, and while a display name is asserted
+ *            rather than proved, handing it out remotely would make every other
+ *            refusal decoration. It becomes grantable in the same change that
+ *            makes a name proved.
+ *
+ * Approving someone makes them a VIEWER. Promoting is a second, deliberate
+ * decision, so the careless path is the safe one.
+ */
+export type AccountRole = 'viewer' | 'editor' | 'owner'
+
+export const ACCOUNT_ROLES: AccountRole[] = ['viewer', 'editor', 'owner']
+
+/** The roles a person can be given. `owner` is claimed, never granted. */
+export const GRANTABLE_ROLES: AccountRole[] = ['viewer', 'editor']
+
 export interface Account {
   id: string
   displayName: string
   state: AccountState
+  role: AccountRole
   /** Whoever is at the machine running the core. Exactly one, claimed on first run. */
   isOwner: boolean
   createdAt: number
@@ -258,6 +284,8 @@ export interface Account {
  */
 export interface SessionInfo {
   state: AccountState | 'none'
+  /** What this client may do. Absent until there is an approved account. */
+  role?: AccountRole
   account?: Account
   /** Where accounts are managed, for the screen to name. */
   provider: string

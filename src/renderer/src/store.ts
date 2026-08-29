@@ -370,6 +370,20 @@ interface OzmoState {
    * current and the only honest response is to refetch it.
    */
   setLink: (s: LinkStatus) => void
+  /**
+   * May this client change what the board SAYS?
+   *
+   * The server is the authority — every write is checked there against the same
+   * capability table. This exists so the UI does not offer gestures that will be
+   * refused: a button that explains why it did nothing is worse than a button
+   * that was never drawn.
+   *
+   * Not exhaustive yet. The highest-traffic affordances ask it; the rest still
+   * fail with the server's own message, which names the role and what to ask
+   * for. A viewer who finds one of those has found a gap in this, not a bug in
+   * the gate.
+   */
+  canWrite: () => boolean
 }
 
 /**
@@ -862,6 +876,16 @@ export const useStore = create<OzmoState>((set, get) => ({
       saveCollapsed(s.projectId, collapsedContainerIds)
       return { collapsedContainerIds }
     }),
+
+  canWrite: () => {
+    const s = get().session
+    if (!s) return false
+    // At the machine is the owner, and an agent-shaped client (no session) is
+    // served as an editor — both may write. Only a signed-in viewer may not.
+    if (s.atTheMachine) return true
+    if (s.state !== 'approved') return false
+    return s.role !== 'viewer'
+  },
 
   setLink: (link) => {
     const was = get().link

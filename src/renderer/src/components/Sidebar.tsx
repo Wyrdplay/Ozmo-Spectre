@@ -62,6 +62,8 @@ const ICONS: Record<View, React.JSX.Element> = {
 
 export function Sidebar(): React.JSX.Element {
   const projects = useStore((s) => s.projects)
+  const session = useStore((s) => s.session)
+  const canWrite = useStore((s) => s.canWrite())
   const projectId = useStore((s) => s.projectId)
   const setProject = useStore((s) => s.setProject)
   const view = useStore((s) => s.view)
@@ -176,7 +178,7 @@ export function Sidebar(): React.JSX.Element {
           {projects.map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
-          <option value="__new__">＋ New project…</option>
+          {canWrite && <option value="__new__">＋ New project…</option>}
         </select>
       </div>
 
@@ -227,6 +229,22 @@ export function Sidebar(): React.JSX.Element {
             {copied ? 'address + agent guide' : <>agents: <code>GET /llms.txt</code></>}
           </span>
         </button>
+        {/* Say what you are, and only when it LIMITS you. An editor being told
+            they are an editor is noise; a viewer discovering it by having an
+            edit refused is the failure this line prevents. */}
+        {session?.role === 'viewer' && !session.atTheMachine && (
+          // whiteSpace: normal — `agents-hint` is a single-line class, and this
+          // line is longer than the sidebar; without it the sentence is cut off
+          // mid-word, which is worse than not saying it at all
+          <div
+            className="agents-hint"
+            style={{ paddingLeft: 13, paddingTop: 4, whiteSpace: 'normal', lineHeight: 1.4 }}
+            title={`${session.account?.displayName} has viewing access: read and comment, but not change what the board says`}
+          >
+            {session.account?.displayName} · <strong>viewing</strong>
+            <br />read and comment only
+          </div>
+        )}
       </div>
 
       <button

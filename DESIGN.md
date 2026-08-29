@@ -505,7 +505,7 @@ Note the collision with the recently-shipped skills targets: an allowlist of fil
 already reachable through an unauthenticated API, which is survivable only because that API is
 loopback-only. A served Spectre makes that a genuine privilege question.
 
-*Lead section only — 1 further section in the full spec, fetched by the id above.*
+*Lead section only — 2 further sections in the full spec, fetched by the id above.*
 
 
 ## A prompt is a skill only the human invokes

@@ -19,9 +19,14 @@ served exactly as before, on loopback. Nothing you already do changes.
   carve-out above is on. If it is ever \`false\`, every call of yours will be a
   401 until you carry a credential, and that is a change to this board's
   configuration rather than a bug in your script.
-- Deciding who is on the board (\`accounts.list\` / \`approve\` / \`reject\`) is
-  refused to you and to every network caller. It happens in the desktop app, at
-  the machine that holds the board.
+- Deciding who is on the board (\`accounts.list\` / \`approve\` / \`reject\` /
+  \`setRole\`) is refused to you and to every network caller. It happens in the
+  desktop app, at the machine that holds the board.
+- People have ROLES: \`viewer\` reads and comments, \`editor\` also changes the
+  board, \`owner\` also decides membership and host settings. You are none of
+  these — you have no account — and you keep what you always had: the board and
+  the machine-facing verbs (\`skills.addTarget\` among them). If a human tells
+  you an edit was refused, check whether they are a viewer before assuming a bug.
 
 ## Etiquette
 

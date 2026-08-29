@@ -1,4 +1,4 @@
-import type { Account, AccountState } from '@shared/types'
+import type { Account, AccountRole, AccountState } from '@shared/types'
 
 /**
  * THE ACCOUNT SEAM.
@@ -29,7 +29,7 @@ import type { Account, AccountState } from '@shared/types'
  * this gap, and it is not closed by this file.
  */
 
-export type { Account, AccountState }
+export type { Account, AccountRole, AccountState }
 
 export interface IssuedSession {
   account: Account
@@ -59,6 +59,12 @@ export interface AccountProvider {
 
   approve(id: string, by: string): Account
   reject(id: string, by: string, note?: string): Account
+
+  /**
+   * Change what someone may do. Refuses `owner` and refuses to touch the owner
+   * row: owner is claimed at the machine, never granted.
+   */
+  setRole(id: string, role: AccountRole, by: string): Account
 
   /** The account a bearer token names, or undefined. Reads state FRESH. */
   resolve(token: string): Account | undefined

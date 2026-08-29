@@ -72,6 +72,29 @@ and no event crosses the wire.
   the board's own database; **Atlas services on this machine** become a second provider, and the
   seam is what makes that a swap rather than a rewrite.
 
+### Roles
+
+| | read | comment | change the board | the machine | who's on the board |
+|---|:--:|:--:|:--:|:--:|:--:|
+| **viewer** (what approving grants) | ✓ | ✓ | | | |
+| **editor** (promoted deliberately) | ✓ | ✓ | ✓ | | |
+| **owner** (claimed, never granted) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| *an agent, no session, on loopback* | ✓ | ✓ | ✓ | ✓ | |
+
+Enforced in one place — `call()` in the registry — against a table that classifies every one of
+the 73 methods. A method nobody classified requires the most restricted capability, and
+`smoke:accounts` asserts the table covers the registry, so an unclassified verb is loud rather
+than silently either open or broken.
+
+**Owner is not grantable**, and that is not a stub. Approving is the privilege that lets someone
+let themselves in; while a display name is asserted rather than proved, handing it out remotely
+would make every other refusal decoration. It becomes grantable in the same change that makes a
+name provable.
+
+**An agent keeps what it always had.** The carve-out is the status quo, not a new grant — including
+`skills.addTarget`, which is how agents declare the repos they install into. What it never had, and
+does not get, is membership.
+
 **Agents are unaffected.** A caller with no session token is served exactly as before, on loopback
 — every agent in the fleet is one of those. The carve-out is named rather than implied
 (`agentsUnauthenticated`, default on, refused through the settings API), and while it is on:
