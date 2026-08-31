@@ -127,6 +127,7 @@ const CAPABILITY: Record<string, Capability> = {
   'nodes.pass': 'write',
   'nodes.answer': 'write',
   'nodes.convert': 'write',
+  'nodes.designate': 'write',
   'nodes.requestSweep': 'write',
   'annotations.delete': 'write',
   'edges.create': 'write',
@@ -287,6 +288,8 @@ export const registry: Record<string, Handler> = {
   'nodes.pass': (p, c) => svc.passNode(p, c.actor),
   'nodes.answer': (p, c) => svc.answerQuestion(p, c.actor),
   'nodes.convert': (p, c) => svc.convertNode(p, c.actor),
+  // The review room's one gesture: what a note IS, and when it gets done.
+  'nodes.designate': (p, c) => svc.designateNode(p, c.actor),
   'nodes.requestSweep': (p, c) => svc.requestSweep(p, c.actor),
   'nodes.getContent': (p) => svc.getContent(p),
   'nodes.setContent': (p, c) => svc.setContent(p, c.actor),

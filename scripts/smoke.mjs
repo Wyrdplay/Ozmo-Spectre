@@ -1656,12 +1656,20 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
     const pillar = (await req('POST', `/api/projects/${pid}/nodes`,
       { type: 'pillar', title: 'RF Standing Pillar', linkTo: [{ nodeId: pW.id, type: 'member', outgoing: true }] })).json
     const pGate = await req('PATCH', `/api/nodes/${pW.id}`, { stage: 'ship' })
+    // A warp whose only member is a pillar now has NOTHING holding it: standing
+    // types are exempt from completion, and coverage stopped being a gate
+    // condition. It ships, and that is the intended shape — an unnoted member is
+    // worth knowing about, not worth refusing over.
     ok('a pillar member never appears in incomplete (standing types never "done")',
-      pGate.status === 409 && !pGate.json.error?.offenders?.incomplete?.some((o) => o.id === pillar.id),
+      !(pGate.json.error?.offenders?.incomplete ?? []).some((o) => o.id === pillar.id),
       JSON.stringify(pGate.json.error?.offenders?.incomplete))
-    ok('...the pillar still owes COVERAGE — completion exemption is not a coverage bypass',
-      pGate.json.error?.offenders?.uncovered?.some((o) => o.id === pillar.id),
-      JSON.stringify(pGate.json.error?.offenders?.uncovered))
+    ok('coverage no longer refuses: an unnoted member does not hold the gate',
+      pGate.status === 200, `${pGate.status} ${JSON.stringify(pGate.json.error?.offenders ?? pGate.json.stage)}`)
+
+    // ...but it is still REPORTED, because the room shows what carries no note.
+    const pClosure = await req('GET', `/api/projects/${pid}/graph`)
+    ok('coverage is still computed and available to the room',
+      pClosure.status === 200, String(pClosure.status))
   }
 
   // fully actioned → the gate opens; shipping IS the close
@@ -3443,6 +3451,67 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   } catch (e) {
     ok('fog: the block ran to completion without throwing', false, String(e))
   } finally {
+
+    // ---------------------------------------------------------------- designate
+    /* The review room's one gesture: what a note IS, and when it gets done.
+       It replaced four calls in three places, so it has to do all four. */
+    {
+      const dw = await req('POST', `/api/projects/${pid}/nodes`, { type: 'warp', title: 'Designation fixture' })
+      const note = await req('POST', `/api/projects/${pid}/nodes`, {
+        type: 'feedback', title: 'The outliner does not follow a rename',
+        linkTo: [{ nodeId: dw.json.id, type: 'member' }]
+      })
+
+      const bad = await req('POST', `/api/nodes/${note.json.id}/designate`, { type: 'bug', warpId: dw.json.id })
+      ok('designate: refuses without a disposition — "what" without "when" is half a decision',
+        bad.status === 400 && /disposition/.test(bad.json.error?.message ?? ''), JSON.stringify(bad.json))
+
+      const now = await req('POST', `/api/nodes/${note.json.id}/designate`,
+        { type: 'bug', disposition: 'now', warpId: dw.json.id })
+      ok('designate: creates the work as the chosen type', now.status === 200 && now.json.type === 'bug',
+        JSON.stringify(now.json).slice(0, 160))
+      const workId = now.json.id
+      ok('designate: the work is DERIVED from the note, which stays a note',
+        workId !== note.json.id, `${workId} vs ${note.json.id}`)
+      const noteAfter = await req('GET', `/api/nodes/${note.json.id}`)
+      ok('designate: ...so the observation is still in the review room',
+        noteAfter.json.type === 'feedback', noteAfter.json.type)
+      ok('designate: and the provenance is a derives edge from note to work',
+        (noteAfter.json.edges ?? []).some((e) => rels(e).some((r) =>
+          r.type === 'derives' && r.sourceId === note.json.id && r.targetId === workId)),
+        JSON.stringify(noteAfter.json.edges?.map((e) => e.label)))
+
+      // "now" means it holds this warp shut. That is the whole point of the word.
+      const gateNow = await req('PATCH', `/api/nodes/${dw.json.id}`, { stage: 'ship' })
+      ok('designate: fix-now BLOCKS the warp', gateNow.status === 409 &&
+        (gateNow.json.error?.offenders?.blockers ?? []).concat(gateNow.json.error?.offenders?.pendingActions ?? [])
+          .some((o) => o.id === workId),
+        JSON.stringify(gateNow.json.error?.offenders))
+
+      // ...and "later" means it does not, without any second gesture.
+      const later = await req('POST', `/api/nodes/${note.json.id}/designate`,
+        { type: 'bug', disposition: 'later', warpId: dw.json.id })
+      ok('designate: re-designating is not an error — a reviewer changes their mind', later.status === 200)
+      ok('designate: fix-later REUSES the work rather than minting a second', later.json.id === workId,
+        `${later.json.id} vs ${workId}`)
+      ok('designate: fix-later ranks it, so it lands in the backlog rather than rotting',
+        typeof later.json.rank === 'number', JSON.stringify(later.json.rank))
+
+      const gateLater = await req('PATCH', `/api/nodes/${dw.json.id}`, { stage: 'ship' })
+      const off = gateLater.json.error?.offenders ?? {}
+      const stillNamed = [...(off.blockers ?? []), ...(off.pendingActions ?? [])].some((o) => o.id === workId)
+      ok('designate: fix-later stops holding the door', !stillNamed, JSON.stringify(off))
+
+      // COVERAGE INFORMS, IT NO LONGER REFUSES. The warp has an unnoted member;
+      // the payload still says so and the refusal no longer cites it.
+      ok('designate: coverage is reported but is not a refusal reason',
+        !/no feedback yet/.test(gateLater.json.error?.message ?? ''), gateLater.json.error?.message ?? '')
+
+      await req('DELETE', `/api/nodes/${workId}`)
+      await req('DELETE', `/api/nodes/${note.json.id}`)
+      await req('DELETE', `/api/nodes/${dw.json.id}`)
+    }
+
     const rm = await req('DELETE', `/api/projects/${fpid}`)
     ok('fog: the fixture project is deleted', rm.status === 200)
     ok('fog: and it is gone', (await req('GET', `/api/projects/${fpid}`)).status === 404)

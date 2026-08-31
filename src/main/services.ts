@@ -1323,6 +1323,117 @@ const isWaiveLabel = (s: string): boolean => s === WAIVE_LABEL || s === LEGACY_W
  * node appends the new note (idempotent-friendly). Reversible: remove the tag.
  * `fold` is the verb's former name and stays an accepted alias everywhere.
  */
+/**
+ * DESIGNATE A NOTE, IN ONE GESTURE.
+ *
+ * A review is a run of observations. Turning one into work used to be four
+ * decisions in three places — convert it, decide whether it joins the warp,
+ * decide whether it blocks, then remember to rank it — and the room made you
+ * hunt for each. They are not four decisions. They are two: WHAT is it, and
+ * WHEN does it get done.
+ *
+ *   type        action | bug | flaw | threat | question  — what the finding IS
+ *   disposition now                                      — it holds this warp
+ *               later                                    — it is backlog work
+ *
+ * `now` members the warp and `blocks` it, so it holds the gate and reads 0% in
+ * the roll-up: an increment with an outstanding fix is not finished.
+ * `later` does the opposite deliberately and completely — it LEAVES the warp
+ * and stops blocking, so it stops holding the door, and it is ranked so it
+ * lands in the backlog rather than rotting as a transient nobody scheduled.
+ *
+ * Idempotent on both axes: designating the same way twice is not an error, and
+ * re-designating from now to later (or back) is the ordinary way a reviewer
+ * changes their mind mid-pass.
+ */
+export async function designateNode(
+  p: { id: string; type?: string; disposition?: string; warpId?: string },
+  actor: string
+): Promise<NodeDetail> {
+  const r = nodeRow(p.id)
+  const disposition = p.disposition
+  need(disposition === 'now' || disposition === 'later',
+    'disposition must be "now" (holds this warp) or "later" (backlog work)', 400)
+
+  // The warp this note is being reviewed under. Given explicitly by the room;
+  // otherwise the one warp it members, if that is unambiguous.
+  let warpId = p.warpId
+  if (!warpId) {
+    const owning = db.all<{ target_id: string; type: string }>(
+      `SELECT r.target_id, n.type FROM edge_relationships r JOIN nodes n ON n.id = r.target_id
+       WHERE r.source_id = ? AND r.type = 'member' AND n.type = 'warp'`, [p.id])
+    need(owning.length <= 1, 'this note members more than one warp — say which with warpId', 400)
+    warpId = owning[0]?.target_id
+  }
+  need(warpId, 'no warp to designate against — pass warpId', 400)
+  const warp = nodeRow(warpId!)
+  need(warp.type === 'warp', `"${warp.title}" is not a warp`, 400)
+
+  /**
+   * 1. WHAT it is — as a node DERIVED from the note, not the note rebadged.
+   *
+   * Converting was the first shape of this, and looking at the room built on it
+   * showed why it is wrong: a converted note stops being feedback, so it drops
+   * out of the review the instant you designate it. The reviewer's row vanishes
+   * under their cursor, and there is no longer anywhere to change their mind.
+   *
+   * Deriving keeps the observation where it was written and hangs the work off
+   * it. It is also what the gate has always counted — `undesignated` is
+   * "feedback with nothing derived from it and not waived" — and what makes
+   * "why does this work exist" a graph walk rather than a memory.
+   */
+  const existing = db.get<NodeRow>(
+    `SELECT n.* FROM nodes n JOIN edge_relationships r ON r.target_id = n.id
+     WHERE r.source_id = ? AND r.type = 'derives' AND n.type != 'feedback' LIMIT 1`, [p.id])
+
+  let workId: string
+  if (existing) {
+    workId = existing.id
+    if (typeof p.type === 'string' && p.type !== existing.type) {
+      await convertNode({ id: workId, type: p.type }, actor)
+    }
+  } else {
+    need(typeof p.type === 'string' && p.type, 'type is required the first time a note is designated', 400)
+    const made = createNode({
+      projectId: r.project_id,
+      type: p.type as NodeType,
+      title: r.title,
+      linkTo: [{ nodeId: p.id, type: 'derives', outgoing: false }]
+    }, actor)
+    workId = made.id
+  }
+
+  const pair = connectionForPair(workId, warpId!)
+  const hasRel = (type: string): boolean =>
+    !!pair && !!db.get('SELECT 1 FROM edge_relationships WHERE edge_id = ? AND type = ?', [pair.id, type])
+
+  // 2. WHEN it gets done.
+  if (disposition === 'now') {
+    if (!hasRel('member')) createEdge({ sourceId: workId, targetId: warpId!, type: 'member' }, actor)
+    if (!hasRel('blocks')) createEdge({ sourceId: workId, targetId: warpId!, type: 'blocks' }, actor)
+    // It is this warp's problem now, so it does not also sit in the backlog
+    // competing with work nobody has committed to.
+    db.run('UPDATE nodes SET rank = NULL WHERE id = ?', [workId])
+  } else {
+    if (hasRel('blocks')) removeEdgeRelationship({ id: pair!.id, type: 'blocks' }, actor)
+    // Leaving the warp is what stops it holding the door. The bare connection
+    // survives, so the trail back to the review that raised it is intact.
+    if (hasRel('member')) removeEdgeRelationship({ id: pair!.id, type: 'member' }, actor)
+    const row = db.get<{ next: number | null }>(
+      'SELECT MIN(rank) AS next FROM nodes WHERE project_id = ? AND rank IS NOT NULL', [r.project_id])
+    // Top of the backlog: it was raised in a review of shipped work, which is
+    // newer information than anything already ranked.
+    db.run('UPDATE nodes SET rank = ? WHERE id = ?', [(row?.next ?? 1) - 1, workId])
+  }
+
+  const after = loadNode(workId)
+  logActivity(r.project_id, actor, 'node.designated', 'node', p.id,
+    `designated "${r.title}" as ${after.type}, ${disposition === 'now' ? 'to fix now' : 'for later'}`,
+    { workId, type: after.type, disposition, warpId })
+  emitEvent('node.designated', r.project_id, { id: p.id, workId, type: after.type, disposition, warpId }, actor)
+  return getNode({ id: workId })
+}
+
 export function waiveNode(p: { id: string; note?: string; into?: string | null }, actor: string): SpecNode {
   const r = nodeRow(p.id)
   need(WAIVABLE.has(r.type as NodeType),
@@ -2454,7 +2565,21 @@ export function warpClosure(warpId: string, projectId: string): {
   }
 
   return {
-    fullyActioned: offenders.uncovered.length === 0 && offenders.undesignated.length === 0 &&
+    /**
+     * COVERAGE IS REPORTED, NOT REQUIRED.
+     *
+     * `uncovered` used to hold the gate: every member needed at least one note
+     * before the warp could close. The intent was that nothing goes unlooked-at.
+     * The effect, measured on this board, was 21 open reviews sitting at 0/N —
+     * because it made "I have nothing to say about this one" a thing you had to
+     * type, N times, before you could finish anything. A door that expensive is
+     * a door nobody opens, and an unopened review reviews nothing at all.
+     *
+     * So the increment panel still shows what carries no note, and the count is
+     * still returned. It informs; it no longer refuses.
+     * (faykarta, 2026-08-31: "review what deserves review".)
+     */
+    fullyActioned: offenders.undesignated.length === 0 &&
       offenders.pendingActions.length === 0 && offenders.blockers.length === 0 &&
       offenders.incomplete.length === 0,
     feedbackCount: feedback.length,
@@ -2469,9 +2594,10 @@ export function warpClosure(warpId: string, projectId: string): {
 function offenderSummary(o: ClosureOffenders): string {
   const names = (xs: { id: string; title: string }[]): string => xs.map((x) => `"${x.title}" (${x.id})`).join('; ')
   const parts: string[] = []
-  if (o.uncovered.length) {
-    parts.push(`${o.uncovered.length} increment member(s) with no feedback yet (review them — confirmation counts): ` + names(o.uncovered))
-  }
+  // `uncovered` is DELIBERATELY absent. It is still computed and still returned
+  // in the payload, because the room shows what carries no note — but it no
+  // longer refuses, and a refusal that lists a reason it did not refuse for is
+  // a refusal nobody can act on. Name only what is actually holding the door.
   if (o.undesignated.length) {
     parts.push(`${o.undesignated.length} feedback with no designation (derive an action, or waive it): ` + names(o.undesignated))
   }

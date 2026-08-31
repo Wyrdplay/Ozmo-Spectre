@@ -342,6 +342,25 @@ Events (SSE)     GET  /api/events?projectId=<id>     — live stream of every mu
                                                      refetch the graph rather than assume you are
                                                      current. Browsers' EventSource does all of
                                                      this for you.
+Designate       POST /api/nodes/:id/designate       {"type":"bug|flaw|threat|question|action",
+                                                      "disposition":"now|later","warpId":..}
+                                                     THE REVIEW VERB. Takes a feedback note and says
+                                                     what it IS and when it gets done, in one call.
+                                                     Creates work DERIVED from the note (the note
+                                                     stays a note, so the review room keeps it) and:
+                                                       now   - the work members and BLOCKS the warp,
+                                                               so it holds the ship gate
+                                                       later - the work leaves the warp and is
+                                                               ranked to the top of the backlog, so
+                                                               it stops holding the gate
+                                                     Idempotent: re-designating reuses the same work
+                                                     node and moves it between now and later.
+                                                     COVERAGE IS NO LONGER A GATE CONDITION. A warp
+                                                     member with no feedback is reported in
+                                                     offenders.uncovered and does NOT refuse the
+                                                     close; the gate holds on undesignated notes,
+                                                     fix-now items, open actions, blockers and
+                                                     unfinished members.
 Point at the UI  POST /api/ui/focus                  {"view":"graph|lists|backlog|warps|reviews|activity|settings","projectId":..,"nodeId":..,"edgeId":..,"warpId":..,"reviewId":..,"tab":"spec|notes|links","modal":"answer|graduate|convert"}
                                                      edgeId selects that connection — its relationship editor opens;
                                                      warpId opens the Warps stage board with that warp selected in the inspector;
@@ -927,7 +946,7 @@ item statuses or verdict enums.
                    members — COVERAGE_EXEMPT, completed by REMOVAL — from shipping having been
                    reviewed and finished by nobody: complete()/waive/tag-done the member, or
                    drop it from the warp.
-   Otherwise 409 with error.offenders {uncovered:[{id,title,type}], undesignated:[{id,title}],
+   Otherwise 409 with error.offenders {uncovered:[{id,title,type}] (REPORTED ONLY - see below), undesignated:[{id,title}],
    pendingActions:[{id,title,feedbackIds,disposition}], blockers:[{id,title,type}],
    incomplete:[{id,title,type}]} — disposition is "address-now" | "undisposed". A node already
    named in pendingActions or blockers is never also named in incomplete (named once).

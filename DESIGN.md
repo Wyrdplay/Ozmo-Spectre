@@ -2248,7 +2248,7 @@ smoke alarm.
 
 # User Workflows
 
-`area` · `nd_2e551e1dab` · 15 members · 39%
+`area` · `nd_2e551e1dab` · 15 members · 44%
 
 ## Charter
 
@@ -2481,6 +2481,13 @@ Four panels, fixed 2x2, each scrolling independently:
 
 Selection is local to the room - nothing navigates away. Every row carries a copyable id and API URL, because handing a finding to an agent is the point.
 
+### Shape
+
+One note stream, full width, with the capture field pinned at the top: a review is a run of
+observations and hunting for the box between each one was the cost. Each note carries its two
+decisions inline. The increment, the content and the gate are strips opened on demand — a drawer
+takes half the room and no more, so looking something up does not lose your place in the stream.
+
 
 ## Synthesis and disposition
 
@@ -2497,6 +2504,20 @@ Turn observations into decisions, and say when each decision gets done.
   - **address-now**: the action members the warp and `blocks` it. It holds the gate and counts 0% in the roll-up, because an increment with an outstanding fix is not finished.
   - **address-later**: the work is institutionalised - converted into persistent work (feature, flaw, question) and ranked in the backlog. It stops being an action, so it stops holding the door. Transient instructions must not rot.
 - An undisposed action holds the gate: neither completed nor converted is not a decision.
+
+### The gesture
+
+`POST /api/nodes/:id/designate {type, disposition, warpId}` is the whole of synthesis and
+disposition in one call, because they are one decision made twice: what a finding IS, and when it
+gets done.
+
+- Work is DERIVED from the note, never converted from it. A converted note stops being feedback and
+  disappears from the room that is still being written in.
+- `now` — the work members the warp and `blocks` it. It holds the gate and reads 0% in the roll-up.
+- `later` — the work leaves the warp, stops blocking, and is ranked to the TOP of the backlog: it
+  was raised while reviewing shipped work, which is newer information than anything already ranked.
+- Idempotent on both axes. Re-designating reuses the same work node and moves it between now and
+  later, because a reviewer changing their mind mid-pass is the ordinary case, not an error.
 
 
 ## Digestion verbs

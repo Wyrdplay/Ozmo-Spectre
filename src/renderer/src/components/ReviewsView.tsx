@@ -10,6 +10,7 @@ import {
   useOrderedTypes, useTypeStyles
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
+import { NoteStream } from './ReviewStream'
 import { renderMarkdown, timeAgo } from '@/lib/markdown'
 import {
   buildSweepPrompt, byRank, computeClosure, isWaived, moveInList, rankPlan,
@@ -349,7 +350,9 @@ function LensIndex({ onOpen }: { onOpen: (id: string) => void }): React.JSX.Elem
                 {closure.openFeedback.length
                   ? `${closure.openFeedback.length} open feedback`
                   : closure.feedback.length ? 'all feedback actioned' : 'no feedback yet'}
-                {' · '}{closure.work.length - closure.offenders.uncovered.length}/{closure.work.length} covered
+                {closure.offenders.uncovered.length > 0
+                  ? `${' · '}${closure.offenders.uncovered.length} unnoted`
+                  : closure.work.length > 0 ? `${' · '}all noted` : ''}
                 {' · '}{timeAgo(w.updatedAt)}
               </div>
             </div>
@@ -497,6 +500,10 @@ function WarpRoom({ id }: { id: string }): React.JSX.Element {
   const [aboutId, setAboutId] = useState<string | null>(null)
   /** the increment boundary the Content panel diffs from */
   const [since, setSince] = useState<number | null>(null)
+  /** which reference strip is open, if any — none is the working state */
+  const [show, setShow] = useState<'increment' | 'content' | 'gate' | null>(null)
+  /** waiving needs a rationale, so it is the one designation that asks */
+  const [waiving, setWaiving] = useState<SpecNode | null>(null)
 
   const warp = graph.nodes.find((n) => n.id === id && n.type === 'warp') ?? null
   const closure = useMemo(() => (warp ? computeClosure(graph, warp.id) : null), [graph, warp])
@@ -528,8 +535,16 @@ function WarpRoom({ id }: { id: string }): React.JSX.Element {
   if (!warp || !closure) return <div className="empty" style={{ flex: 1 }}>this warp is gone</div>
 
   const feedback = closure.feedback
+  // what is holding the door: everything designated "now" and not yet resolved
+  const fixNow = closure.offenders.blockers.length +
+    closure.offenders.pendingActions.filter((a) => a.disposition === 'address-now').length
   const derived = [...maps.derived.values()]
     .filter((d) => d.from.some((f) => feedback.some((fb) => fb.id === f.id)))
+  // note id → the work designated from it. maps.derived is keyed the other way
+  // (work → its parents), and the stream needs to answer "what did THIS note
+  // become" once per row.
+  const derivedOf = new Map<string, SpecNode>()
+  for (const d of derived) for (const parent of d.from) derivedOf.set(parent.id, d.node)
 
   const sweep = async (): Promise<void> => {
     try {
@@ -576,20 +591,68 @@ function WarpRoom({ id }: { id: string }): React.JSX.Element {
         )}
       </div>
 
-      <div className="review-quad">
-        <IncrementPanel warp={warp} closure={closure} selectedId={selectedId} onSelect={select} />
-        <ContentPanel warp={warp} nodeId={selectedId} since={since} />
-        <FeedbackPanel
-          warp={warp}
-          closure={closure}
-          maps={maps}
-          selectedId={selectedId}
-          aboutId={aboutId}
-          onSelect={setSelectedId}
-          onClearAbout={() => setAboutId(null)}
-        />
-        <ActionsPanel warp={warp} closure={closure} derived={derived} maps={maps} onSelect={select} />
+      {/* THE STREAM IS THE ROOM. Everything the four panels showed permanently is
+          still reachable, as strips you open — increment, content, the gate — but
+          the writing surface no longer shares the screen with three things you
+          are not doing. */}
+      <NoteStream
+        warp={warp}
+        closure={closure}
+        derivedOf={derivedOf}
+        aboutId={aboutId}
+        onAbout={setAboutId}
+        onOpen={(nid: string) => { setSelectedId(nid); setShow('content') }}
+        onWaive={setWaiving}
+      />
+
+      <div className="rs-strips">
+        <button
+          className={`rs-strip-tab${show === 'increment' ? ' on' : ''}`}
+          onClick={() => setShow(show === 'increment' ? null : 'increment')}
+          title="what is in this increment, and what carries a note"
+        >
+          increment · {closure.work.length}
+          {closure.offenders.uncovered.length > 0 && (
+            <span className="rs-strip-sub" title="no note about these yet — worth a look, but it no longer refuses the close">
+              {closure.offenders.uncovered.length} unnoted
+            </span>
+          )}
+        </button>
+        <button
+          className={`rs-strip-tab${show === 'content' ? ' on' : ''}`}
+          onClick={() => setShow(show === 'content' ? null : 'content')}
+          title="read what you are reviewing"
+        >
+          content
+        </button>
+        <button
+          className={`rs-strip-tab${show === 'gate' ? ' on' : ''}`}
+          onClick={() => setShow(show === 'gate' ? null : 'gate')}
+          title="close the warp, or send it back"
+        >
+          {fixNow > 0
+            ? <span className="rs-gate-warn">{fixNow} to fix now</span>
+            : closure.fullyActioned ? <span className="rs-gate-ok">ready to close</span> : 'close…'}
+        </button>
       </div>
+
+      {show && (
+        <div className={`rs-drawer ${show}`}>
+          {show === 'increment' && (
+            <IncrementPanel warp={warp} closure={closure} selectedId={selectedId} onSelect={select} />
+          )}
+          {show === 'content' && <ContentPanel warp={warp} nodeId={selectedId} since={since} />}
+          {show === 'gate' && <ActionsPanel warp={warp} closure={closure} derived={derived} maps={maps} onSelect={select} />}
+        </div>
+      )}
+
+      {waiving && (
+        <WaiveModal
+          node={waiving}
+          target={maps.discusses.get(waiving.id)?.[0] ?? null}
+          onClose={() => setWaiving(null)}
+        />
+      )}
     </div>
   )
 }
@@ -1668,8 +1731,9 @@ function ClosePanel({ warp, closure, onSelect }: {
             the gate refused this close — 409. It wants:
             <button className="x" title="Dismiss" onClick={() => setRefusal(null)}>✕</button>
           </div>
-          {offRow('no feedback yet', refusal.uncovered,
-            'COVERAGE — every member of the increment needs at least one piece of feedback (confirmation counts). The ✓ pass control on an increment row answers this in one gesture.')}
+          {/* Coverage is shown, never as a refusal reason — it no longer refuses.
+              It lives in the increment strip, where it reads as "worth a look"
+              rather than "you may not leave". */}
           {offRow('members not finished', refusal.incomplete,
             'COMPLETION — every completable member of the increment must be finished (tag it done/fixed), or dropped from the warp')}
           {offRow('needs a designation', refusal.undesignated,

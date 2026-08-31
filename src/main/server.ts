@@ -462,6 +462,14 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   app.post('/api/nodes/:id/request-sweep', h('nodes.requestSweep', (r) => ({ id: r.params.id })))
   // positive resolution for questions: the answer lands in the file body, the record stays
   app.post('/api/nodes/:id/answer', h('nodes.answer', (r) => ({ id: r.params.id, answer: r.body?.answer })))
+  /**
+   * The review room's designation: what a finding IS, and when it gets done.
+   * `now` members and blocks the warp; `later` leaves it and ranks in the
+   * backlog. One call, because they are one decision made twice.
+   */
+  app.post('/api/nodes/:id/designate',
+    h('nodes.designate', (r) => ({ id: r.params.id, ...r.body })))
+
   // identity-preserving type change: same node, new hat — file moves to the new type's folder
   app.post('/api/nodes/:id/convert', h('nodes.convert', (r) => ({ id: r.params.id, type: r.body?.type })))
 

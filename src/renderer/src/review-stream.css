@@ -1,0 +1,198 @@
+/* The note stream. One column, full width, because the review IS the notes. */
+
+.rs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 10px 14px 16px;
+  gap: 2px;
+}
+
+/* Capture sits at the top and STAYS there: a review is a run of observations,
+   and hunting for the box between each one is the cost this replaces. */
+.rs-capture {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px;
+  background: var(--bg, #0b0e14);
+}
+
+.rs-input {
+  flex: 1;
+  font-size: 13.5px;
+  padding: 9px 12px;
+}
+
+.rs-about {
+  flex: none;
+  max-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 9px;
+  font-size: 11.5px;
+  color: var(--text-dim, #8b96ab);
+  background: transparent;
+  border: 1px dashed var(--border, #26304a);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rs-about.armed {
+  border-style: solid;
+  border-color: var(--accent, #4aa8ff);
+  color: var(--text, #dfe6f2);
+}
+
+.rs-about .x { opacity: 0.5; margin-left: 2px; }
+.rs-about:hover .x { opacity: 1; }
+
+.rs-empty {
+  padding: 26px 4px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-dim, #8b96ab);
+  max-width: 620px;
+}
+
+.rs-list { display: flex; flex-direction: column; }
+
+.rs-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--border, #26304a);
+  min-width: 0;
+}
+
+.rs-row:hover { background: rgba(255, 255, 255, 0.02); }
+.rs-row.waived { opacity: 0.5; }
+
+.rs-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text, #dfe6f2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-title:hover { color: var(--accent, #4aa8ff); }
+
+/* The two decisions. Fixed widths so they line up down the column — a control
+   that moves as the list changes is a control you misclick. */
+.rs-sel {
+  flex: none;
+  font-size: 11.5px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: var(--panel, #121722);
+  color: var(--text, #dfe6f2);
+  border: 1px solid var(--border, #26304a);
+}
+
+.rs-sel.type { width: 104px; }
+.rs-sel.disp { width: 92px; }
+.rs-sel:disabled { opacity: 0.4; }
+
+/* now is a held door; later is scheduled. They should not look alike. */
+.rs-sel.disp.now { border-color: #d97706; color: #f0b45f; }
+.rs-sel.disp.later { opacity: 0.75; }
+
+.rs-tag {
+  flex: none;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-dim, #8b96ab);
+}
+
+.rs-tag.open { color: #f0b45f; }
+
+.rs-waived { margin-top: 14px; }
+
+.rs-waived-head {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim, #8b96ab);
+  padding: 4px 6px;
+  opacity: 0.7;
+}
+
+/* The reference strips. The four panels are still here — as things you open,
+   because they are what you consult, not what you are doing. */
+.rs-strips {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border-top: 1px solid var(--border, #26304a);
+  background: var(--panel, #121722);
+}
+
+.rs-strip-tab {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--border, #26304a);
+  color: var(--text-dim, #8b96ab);
+  cursor: pointer;
+}
+
+.rs-strip-tab:hover { color: var(--text, #dfe6f2); }
+.rs-strip-tab.on { color: var(--text, #dfe6f2); background: rgba(255, 255, 255, 0.04); }
+.rs-strip-tab:last-child { margin-left: auto; border-right: none; border-left: 1px solid var(--border, #26304a); }
+
+.rs-strip-sub { opacity: 0.7; }
+.rs-gate-warn { color: #f0b45f; font-weight: 700; }
+.rs-gate-ok { color: #6ee7a8; font-weight: 700; }
+
+/* Opened, a strip takes half the room and no more: the notes stay on screen,
+   because looking something up should not lose your place in the stream. */
+.rs-drawer {
+  flex: none;
+  height: 46vh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border, #26304a);
+  overflow: hidden;
+}
+
+.rs-drawer > .rp-panel { border: none; flex: 1; min-height: 0; }
+
+/* The link from an observation to what it became. Small, because the note is
+   still the thing you are reading. */
+.rs-work {
+  flex: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim, #8b96ab);
+  font-size: 13px;
+  padding: 0 2px;
+}
+.rs-work:hover { color: var(--accent, #4aa8ff); }
