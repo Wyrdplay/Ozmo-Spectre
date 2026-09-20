@@ -1,0 +1,12 @@
+# The build stage installs its own dependencies; a host node_modules is the
+# wrong platform and 564MB of context nobody needs.
+node_modules
+out
+.git
+.docker
+docs
+*.log
+
+# never bake a vault or a settings file into an image
+.ozmo
+**/OzmoSpecVault

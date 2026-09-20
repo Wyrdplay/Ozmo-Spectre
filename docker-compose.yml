@@ -1,0 +1,127 @@
+# Ozmo Spectre — development server instance.
+#
+#   docker compose up -d --build
+#   docker compose logs -f spectre
+#
+# Reachable at http://127.0.0.1:4821/app on this machine.
+#
+# ── Two things to know before changing anything here ────────────────────────
+#
+# 1. THE PUBLISHED PORT IS THE SECURITY BOUNDARY. `127.0.0.1:4821` means the
+#    container is reachable from this machine and nowhere else. The container
+#    binds 0.0.0.0 internally, which is just its own namespace and exposes
+#    nothing on its own. Changing this to `4821:4820` publishes it on every
+#    interface of the host, which is NOT what you want: while
+#    `agentsUnauthenticated` is on (the shipped default), any caller reaching
+#    this socket with no session gets read, annotate, write AND host — the last
+#    of which includes the filesystem roots the skill installer writes into.
+#
+#    For tailnet access, leave the publish on loopback and put Tailscale in
+#    front of it on the HOST:
+#
+#      tailscale serve --bg 4821
+#
+#    Tailscale then does the authentication this build cannot yet do for itself
+#    (see nd_16cc4672da, "A person is authenticated, not asserted"), and the
+#    socket stays closed to everything else. Do NOT use `tailscale funnel` —
+#    that is the public internet.
+#
+#    Then add the tailnet origin so the browser client is not 403'd by the
+#    Origin check: set OZMO_ALLOWED_ORIGINS below to your MagicDNS URL.
+#
+# 2. ONE WRITER PER VAULT. The desktop app and this container must not hold the
+#    same vault at once — two processes writing one SQLite file is how a board
+#    is lost, and with the sql.js driver each save rewrites the whole file. The
+#    default below is a SEPARATE vault directory for exactly this reason. Point
+#    it at your real vault only when the desktop app is closed.
+
+services:
+  spectre:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      secrets:
+        - extra_ca
+    image: ozmo-spectre:dev
+    container_name: spectre-dev
+    restart: unless-stopped
+
+    ports:
+      # host:127.0.0.1:4821 → container:4820. 4821 so it cannot collide with a
+      # desktop instance already holding 4820 on this machine.
+      - "127.0.0.1:4821:4820"
+
+    environment:
+      OZMO_PORT: "4820"
+      OZMO_BIND_HOST: "0.0.0.0"
+      OZMO_VAULT_PATH: /vault
+      OZMO_DATA_DIR: /data
+
+      # sql.js is the shipped default and keeps the database file byte-readable
+      # by a desktop instance. For a server the native driver is the better
+      # engine — writes are durable when the statement returns instead of
+      # re-serialising the whole file on every save — and the image already
+      # carries its Node-ABI binary. Switch when you want it:
+      #   OZMO_DB_DRIVER: native
+      OZMO_DB_DRIVER: sqljs
+
+      # The vault watcher is OFF by default: a bind mount on Docker Desktop does
+      # not deliver inotify events reliably, and a watcher that fires at random
+      # is worse than none. Turn it on for a Linux host with a native mount.
+      OZMO_WATCH_VAULT: "0"
+
+      # What a browser is allowed to use as its Origin, beyond loopback. Empty
+      # means loopback-only. Set this to your tailnet URL when serving:
+      #   OZMO_ALLOWED_ORIGINS: "https://your-host.your-tailnet.ts.net"
+      OZMO_ALLOWED_ORIGINS: ""
+
+      # What the client should be told to call, when that differs from the bind
+      # (it does, behind Tailscale or any proxy):
+      #   OZMO_PUBLIC_URL: "https://your-host.your-tailnet.ts.net"
+      OZMO_PUBLIC_URL: ""
+
+      # WHO OWNS THIS BOARD.
+      #
+      # The desktop app serves its owner through `atTheMachine` — true only of
+      # the renderer inside the process holding the database. A container has no
+      # such caller, and the account provider refuses the owner's name over the
+      # wire on purpose. So without this, a served board's owner is whoever
+      # reaches /app first, and becomes UNREACHABLE the moment that session is
+      # lost: there is no second way in.
+      #
+      # Setting this claims the owner on a fresh board instead of leaving it to
+      # whoever arrives first. It never transfers ownership — if the board
+      # already has a different owner it says so and changes nothing.
+      OZMO_OWNER: ""
+
+      # LOCKED OUT OF YOUR OWN BOARD? Set this to 1 and restart. The boot log
+      # prints a one-time link that signs the owner back in, and every previous
+      # session for that account is revoked.
+      #
+      # Then set it back to "" and restart. It is separate from OZMO_OWNER
+      # because it mints a credential, and a credential minted on every boot is
+      # a credential sitting in `docker compose logs`.
+      OZMO_OWNER_RECOVERY: ""
+
+    volumes:
+      # The board. A directory on the host so you can open it in Obsidian.
+      - ./.docker/vault:/vault
+      # settings.json — a named volume; nothing here needs to be human-edited.
+      - spectre-data:/data
+
+volumes:
+  spectre-data:
+
+# A root CA for machines behind TLS interception. Norton (and most corporate
+# proxies) re-sign HTTPS with their own root: the host trusts it, a container
+# does not, and `npm ci` fails with UNABLE_TO_VERIFY_LEAF_SIGNATURE. Mounted as
+# a build secret so it never lands in an image layer.
+#
+# On this machine Norton's is at:
+#   C:/ProgramData/Norton/Antivirus/wscert.pem
+# Point OZMO_EXTRA_CA at yours (or leave it — the empty default builds fine on a
+# machine with no interception):
+#   OZMO_EXTRA_CA=/c/ProgramData/Norton/Antivirus/wscert.pem docker compose build
+secrets:
+  extra_ca:
+    file: ${OZMO_EXTRA_CA:-./.docker/no-ca.pem}
