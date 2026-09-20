@@ -12,3 +12,6 @@ export { localAccounts } from '../../src/main/account-local'
 // which is the point: if that no longer loads headless, the suite says so here
 // rather than in production.
 export { registry, capabilityTable, roleAllows } from '../../src/main/registry'
+// Who may hand out which role. The gate enforces it row-by-row and the People
+// card draws its dropdown from it, so a change to the rule is a change here.
+export { rolesGrantableBy } from '../../src/shared/types'

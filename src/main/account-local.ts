@@ -48,6 +48,38 @@ const rowByKey = (key: string): Row | undefined => db.get<Row>('SELECT * FROM ac
  */
 const newToken = (): string => crypto.randomBytes(32).toString('base64url')
 
+/**
+ * The owner row, claiming it if the board has none.
+ *
+ * Shared by the two callers that are allowed to name an owner without asking
+ * anyone: the desktop renderer (which is demonstrably at the machine) and the
+ * host operator who started a container. Both are the same claim, so they are
+ * the same code — a second implementation of "who owns this board" is how the
+ * two would come to disagree.
+ */
+function claimOwner(displayName: string): Row {
+  const existing = db.get<Row>('SELECT * FROM accounts WHERE is_owner = 1')
+  if (existing) return existing
+
+  const name = normaliseDisplayName(displayName || 'Owner')
+  const key = nameKey(name)
+  const taken = rowByKey(key)
+  if (taken) {
+    db.run('UPDATE accounts SET is_owner = 1, role = ?, state = ?, decided_at = ?, decided_by = ? WHERE id = ?',
+      ['owner', 'approved', Date.now(), 'first run', taken.id])
+    return rowById(taken.id)!
+  }
+  const id = newId('ac')
+  db.run(
+    `INSERT INTO accounts (id, display_name, display_name_key, state, role, is_owner, created_at, decided_at, decided_by)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [id, name, key, 'approved', 'owner', 1, Date.now(), Date.now(), 'first run']
+  )
+  const row = rowById(id)!
+  emitEvent('account.claimed', undefined, map(row), name)
+  return row
+}
+
 export function localAccounts(): AccountProvider {
   return {
     name: 'local',
@@ -174,26 +206,37 @@ export function localAccounts(): AccountProvider {
     },
 
     ownerAtTheMachine(displayName: string): Account {
-      const existing = db.get<Row>('SELECT * FROM accounts WHERE is_owner = 1')
-      if (existing) return map(existing)
+      return map(claimOwner(displayName))
+    },
 
-      const name = normaliseDisplayName(displayName || 'Owner')
-      const key = nameKey(name)
-      const taken = rowByKey(key)
-      if (taken) {
-        db.run('UPDATE accounts SET is_owner = 1, role = ?, state = ?, decided_at = ?, decided_by = ? WHERE id = ?',
-          ['owner', 'approved', Date.now(), 'first run', taken.id])
-        return map(rowById(taken.id)!)
+    recoverOwnerSession(displayName: string, client: string): IssuedSession {
+      const row = claimOwner(displayName)
+
+      // Pointing the board at a DIFFERENT name is not recovery, it is a transfer
+      // of ownership — and doing that silently because an environment variable
+      // disagreed with the database is how a board gets lost to a typo. The
+      // existing owner wins, loudly.
+      if (displayName) {
+        const want = nameKey(normaliseDisplayName(displayName))
+        if (want !== row.display_name_key) {
+          throw new Error(
+            `this board is owned by "${row.display_name}", not "${normaliseDisplayName(displayName)}". ` +
+              'Recovery issues a session for the owner it already has; it does not transfer ownership.'
+          )
+        }
       }
-      const id = newId('ac')
-      db.run(
-        `INSERT INTO accounts (id, display_name, display_name_key, state, role, is_owner, created_at, decided_at, decided_by)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
-        [id, name, key, 'approved', 'owner', 1, Date.now(), Date.now(), 'first run']
-      )
-      const acct = map(rowById(id)!)
-      emitEvent('account.claimed', undefined, acct, name)
-      return acct
+
+      // Every existing session goes. Recovery means the old one is gone or out
+      // of the owner's hands, and both of those say the same thing about whether
+      // it should keep working.
+      const had = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM sessions WHERE account_id = ?', [row.id])?.n ?? 0
+      db.run('DELETE FROM sessions WHERE account_id = ?', [row.id])
+
+      const token = newToken()
+      db.run('INSERT INTO sessions (token, account_id, created_at, last_seen_at, client) VALUES (?,?,?,?,?)',
+        [token, row.id, Date.now(), Date.now(), client])
+      console.log(`[ozmo] owner recovery: issued a session for "${row.display_name}", revoked ${had}`)
+      return { account: map(row), token }
     }
   }
 }

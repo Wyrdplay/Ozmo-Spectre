@@ -232,11 +232,34 @@ let riley
     reg.every((m) => mod.roleAllows('owner', m)), reg.filter((m) => !mod.roleAllows('owner', m)).join(', '))
 
   // Nothing that writes the filesystem outside the vault may be a viewer's.
-  const privileged = ['skills.addTarget', 'skills.removeTarget', 'skills.setTargetEnabled',
-    'accounts.approve', 'accounts.reject', 'accounts.setRole', 'accounts.list']
-  ok('every privileged verb is owner-only',
-    privileged.every((m) => !mod.roleAllows('editor', m) && !mod.roleAllows('viewer', m)),
-    privileged.filter((m) => mod.roleAllows('editor', m)).join(', '))
+  // An admin runs the GUEST LIST, not the machine. These two lists are the whole
+  // difference between the roles, so they are asserted separately rather than as
+  // one bag of "privileged".
+  const machineOnly = ['skills.addTarget', 'skills.removeTarget', 'skills.setTargetEnabled',
+    'board.lock', 'board.unlock']
+  ok('machine-facing verbs are the owner alone — not an admin, not an editor, not a viewer',
+    machineOnly.every((m) => mod.roleAllows('owner', m) &&
+      !mod.roleAllows('admin', m) && !mod.roleAllows('editor', m) && !mod.roleAllows('viewer', m)),
+    machineOnly.filter((m) => mod.roleAllows('admin', m) || mod.roleAllows('editor', m)).join(', '))
+
+  const membership = ['accounts.list', 'accounts.approve', 'accounts.reject', 'accounts.setRole']
+  ok('membership is the owner and admins, and nobody below',
+    membership.every((m) => mod.roleAllows('owner', m) && mod.roleAllows('admin', m) &&
+      !mod.roleAllows('editor', m) && !mod.roleAllows('viewer', m)),
+    membership.filter((m) => !mod.roleAllows('admin', m) || mod.roleAllows('editor', m)).join(', '))
+
+  ok('an admin may also change what the board says', mod.roleAllows('admin', 'nodes.update'))
+  ok('an admin may NOT reconfigure the machine', !mod.roleAllows('admin', 'skills.addTarget'))
+  ok('an admin may NOT close the board', !mod.roleAllows('admin', 'board.lock'))
+
+  // The rule the gate enforces row-by-row, asserted on the table that feeds it.
+  ok('the owner may grant admin', mod.rolesGrantableBy('owner').includes('admin'))
+  ok('an admin may NOT grant admin — one borrowed name must not become the guest list',
+    !mod.rolesGrantableBy('admin').includes('admin'))
+  ok('an admin may grant viewer and editor',
+    mod.rolesGrantableBy('admin').includes('viewer') && mod.rolesGrantableBy('admin').includes('editor'))
+  ok('nobody grants owner',
+    !mod.rolesGrantableBy('owner').includes('owner') && !mod.rolesGrantableBy('admin').includes('owner'))
 }
 
 mod.closeDb?.()

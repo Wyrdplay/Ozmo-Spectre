@@ -80,6 +80,24 @@ export interface AccountProvider {
    * settings; afterwards it returns that owner.
    */
   ownerAtTheMachine(displayName: string): Account
+
+  /**
+   * A session for the owner, minted for whoever holds the HOST.
+   *
+   * `ownerAtTheMachine` answers "who is the owner" for a caller the process can
+   * see is local. A container has no such caller — headless never sets
+   * atTheMachine — and `request()` refuses the owner's name over the wire by
+   * design. Between them, a containerised board's owner is claimed exactly once,
+   * in the call that mints their first session, and is unreachable forever after
+   * that session is lost. This is the way back, and it is deliberately not
+   * reachable through the API: only a process started by the person holding the
+   * host may call it.
+   *
+   * Every existing session for the owner is revoked first. Recovery is for the
+   * case where the old one is gone or out of the owner's hands, and both readings
+   * say the same thing about whether it should keep working.
+   */
+  recoverOwnerSession(displayName: string, client: string): IssuedSession
 }
 
 let provider: AccountProvider | null = null

@@ -78,8 +78,21 @@ and no event crosses the wire.
 |---|:--:|:--:|:--:|:--:|:--:|
 | **viewer** (what approving grants) | ✓ | ✓ | | | |
 | **editor** (promoted deliberately) | ✓ | ✓ | ✓ | | |
+| **admin** (granted by the owner) | ✓ | ✓ | ✓ | | ✓ |
 | **owner** (claimed, never granted) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | *an agent, no session, on loopback* | ✓ | ✓ | ✓ | ✓ | |
+
+**Admins decide about viewers and editors; the owner decides about admins.** An admin runs the
+guest list, not the machine — `host` (the vault path, the port, the roots the installer writes
+into) stays at the machine whoever is asking, because re-homing an app from somewhere else is not
+a smaller version of using it.
+
+That the line falls between admin and owner rather than anywhere else follows from the same fact
+as everything below: a display name is asserted, not proved, so an admin account is exactly as
+private as the name on it. That is an acceptable price for approving a viewer and not for minting
+more admins — so the one account whose name *cannot* be claimed over the wire keeps that step.
+Membership used to be refused to every network caller, which read well on a desktop and meant a
+served board had nobody able to let anyone in: a joiner there waited forever.
 
 Enforced in one place — `call()` in the registry — against a table that classifies every one of
 the 73 methods. A method nobody classified requires the most restricted capability, and
