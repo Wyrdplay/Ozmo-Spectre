@@ -203,7 +203,7 @@ function recordRevision(nodeId: string, content: string, actor: string): void {
 // ---------------------------------------------------------------------------
 // Frontmatter sync
 
-function frontmatterFor(r: NodeRow): vault.NodeFrontmatter {
+export function frontmatterFor(r: NodeRow): vault.NodeFrontmatter {
   const tags = tagsFor([r.id]).get(r.id) ?? []
   const linked = db.all<{ title: string; file_path: string; project_id: string }>(
     `SELECT n.title AS title, n.file_path AS file_path, n.project_id AS project_id FROM edges e
