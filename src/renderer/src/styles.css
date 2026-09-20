@@ -962,6 +962,30 @@ button.prov-chip { cursor: pointer; }
 .settings-card code { font-family: var(--mono); font-size: 11.5px; background: var(--bg-active); padding: 2px 7px; border-radius: 5px; }
 .api-url-row { display: flex; align-items: center; gap: 8px; }
 
+/* ---- a board that is closed --------------------------------------------- */
+/* Fixed rather than in the flow, because it is true of the WINDOW and not of
+   whichever view happens to be mounted: a view that forgot to render it would
+   be a view that quietly looks editable. `.app.locked` pays for the space it
+   takes (box-sizing is border-box globally, so the padding is inside 100%). */
+.lock-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 80;
+  display: flex; align-items: center; gap: 10px;
+  min-height: 32px; padding: 6px 14px;
+  background: #3d2f14; border-bottom: 1px solid #6b5518;
+  color: #f3e3bd; font-size: 12px;
+}
+.lock-banner-badge {
+  flex: none; font-size: 9.5px; font-weight: 800; letter-spacing: 0.8px;
+  background: #6b5518; color: #ffeec2; padding: 2px 7px; border-radius: 4px;
+}
+/* the operator's sentence takes the room; the provenance gives way first */
+.lock-banner-message { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lock-banner-meta { flex: none; color: #c9b07a; font-size: 11px; }
+.app.locked { padding-top: 32px; }
+/* a block of controls the lock has closed: visibly inert, and inert in fact —
+   the dimming alone would be a lie the first click exposes */
+.locked-block { opacity: 0.55; pointer-events: none; filter: saturate(0.45); }
+
 /* boot splash */
 .boot { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-faint); gap: 10px; }
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
@@ -1065,3 +1089,9 @@ button.prov-chip { cursor: pointer; }
 .export-err { color: var(--danger, #f87171); font-size: 12.5px; }
 .export-stats { font-size: 12px; color: var(--text-dim); }
 .export-stats .warn { color: var(--warn, #f59e0b); }
+
+/* the loading screen — a wait that explains itself (see LoadingScreen.tsx) */
+.loading-screen .loading-body { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.loading-screen .loading-title { display: flex; align-items: center; gap: 10px; }
+.loading-screen .loading-detail { font-size: 11.5px; opacity: 0.7; font-family: var(--mono, ui-monospace, monospace); }
+.loading-screen .loading-stuck { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--text-dim); }

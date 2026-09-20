@@ -2,11 +2,12 @@ import React, { useEffect, useState } from 'react'
 import { mutateSettings, overlaySettings, useStore } from '@/store'
 import { RpcError, host, rpc } from '@/api'
 import { Confirm, moveByIndex } from './widgets'
+import { BoardLockCard, FrozenWhenLocked } from './BoardLock'
 import {
   EDGE_TYPES, INNER_TEXT_GLYPHS, NODE_SHAPES, NODE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META,
   defaultFlags, isTextGlyph, newId,
   orderedNodeTypes, relStyle, typeStyle,
-  GRANTABLE_ROLES,
+  rolesGrantableBy,
   type Account, type AccountRole, type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type FlagTreatment, type InnerGlyph,
   type NodeFill, type NodeShape, type NodeStyleOverride, type NodeType, type NodeTypeMeta, type Project,
   type SkillTarget, type SkillTargetConfig, type StyleOverrides,
@@ -157,27 +158,48 @@ export function SettingsView(): React.JSX.Element {
             )}
           </div>
 
-          <PeopleCard />
+          {/* Every card below writes — settings.update, a membership verb, or a
+              skill target — and a read-only board refuses all of them. They are
+              frozen as blocks rather than control-by-control: thirty inputs is
+              thirty chances to miss one. The lock card itself stays live, or the
+              board could never be reopened from here. */}
+          <FrozenWhenLocked>
+            <PeopleCard />
+          </FrozenWhenLocked>
 
-          <AppearanceCard settings={settings} />
+          <FrozenWhenLocked>
+            <AppearanceCard settings={settings} />
+          </FrozenWhenLocked>
 
-          <ConnectionColoursCard settings={settings} />
+          <FrozenWhenLocked>
+            <ConnectionColoursCard settings={settings} />
+          </FrozenWhenLocked>
 
-          <FlagsCard flags={settings.flags} />
+          <FrozenWhenLocked>
+            <FlagsCard flags={settings.flags} />
+          </FrozenWhenLocked>
 
-          <SkillTargetsCard settings={settings} projects={projects} />
+          <FrozenWhenLocked>
+            <SkillTargetsCard settings={settings} projects={projects} />
+          </FrozenWhenLocked>
+
+          {/* Closing the board sits next to deleting a project, because they are
+              the same kind of decision: reversible, but not casually. */}
+          <BoardLockCard />
 
           {project && (
-            <div className="settings-card" style={{ borderColor: '#3d2430' }}>
-              <h2 style={{ color: 'var(--danger)' }}>Danger zone</h2>
-              <div className="hint">
-                Delete <b>{project.name}</b> ({project.nodeCount ?? 0} nodes). The database rows are removed;
-                the project folder is moved to the vault trash, not destroyed.
+            <FrozenWhenLocked>
+              <div className="settings-card" style={{ borderColor: '#3d2430' }}>
+                <h2 style={{ color: 'var(--danger)' }}>Danger zone</h2>
+                <div className="hint">
+                  Delete <b>{project.name}</b> ({project.nodeCount ?? 0} nodes). The database rows are removed;
+                  the project folder is moved to the vault trash, not destroyed.
+                </div>
+                <div>
+                  <button className="btn danger" onClick={() => setConfirmDelProject(true)}>Delete project…</button>
+                </div>
               </div>
-              <div>
-                <button className="btn danger" onClick={() => setConfirmDelProject(true)}>Delete project…</button>
-              </div>
-            </div>
+            </FrozenWhenLocked>
           )}
         </div>
       </div>
@@ -305,17 +327,29 @@ function PeopleCard(): React.JSX.Element | null {
   const [nonce, setNonce] = useState(0)
 
   const isOwner = !!session?.account?.isOwner
+  // An admin runs the guest list too — that is the whole point of the role. The
+  // card asks the same question the gate does, so the two cannot drift apart.
+  const canManage = isOwner || session?.role === 'admin'
+  const grantable = rolesGrantableBy(isOwner ? 'owner' : session?.role)
 
   useEffect(() => {
-    if (!isOwner) return
+    if (!canManage) return
     let live = true
     rpc<Account[]>('accounts.list')
       .then((r) => { if (live) setRows(r) })
       .catch(() => { if (live) setRows([]) })
     return () => { live = false }
-  }, [isOwner, nonce])
+  }, [canManage, nonce])
 
-  if (!isOwner) return null
+  if (!canManage) return null
+
+  /**
+   * Admins decide about viewers and editors; the owner decides about admins. The
+   * affordance is omitted rather than disabled for the rows an admin may not
+   * touch — the seam's rule, and the same reason a button that explains why it
+   * does nothing is worse than one that is not drawn.
+   */
+  const mayDecideAbout = (a: Account): boolean => isOwner || (!a.isOwner && a.role !== 'admin')
 
   const decide = async (id: string, verb: 'approve' | 'reject'): Promise<void> => {
     setBusy(id)
@@ -355,8 +389,10 @@ function PeopleCard(): React.JSX.Element | null {
         unnoticed. Accounts are managed by {session?.providerLabel}.
       </div>
       <div className="hint" style={{ marginTop: -4 }}>
-        Owner is not grantable: approving is the privilege that lets someone let themselves in, and a
-        display name is asserted rather than proved. It becomes grantable when a name can be proved.
+        <strong>Admins</strong> decide about viewers and editors; the <strong>owner</strong> decides about
+        admins. A display name is asserted rather than proved, so an admin account is only as private as
+        the name on it — fine for approving a viewer, and the reason appointing another admin stays with
+        the owner, whose name cannot be claimed over the network. Owner itself is never granted.
       </div>
       {rows === null && <div className="hint">reading…</div>}
       {rows !== null && sorted.length === 0 && <div className="hint">nobody has asked to join yet.</div>}
@@ -372,7 +408,7 @@ function PeopleCard(): React.JSX.Element | null {
           <span className="hint" style={{ width: 74, flex: 'none' }}>{a.state}</span>
           <span style={{ width: 96, flex: 'none' }}>
             {a.isOwner && <span className="hint">owner</span>}
-            {!a.isOwner && a.state === 'approved' && (
+            {!a.isOwner && a.state === 'approved' && mayDecideAbout(a) && (
               <select
                 className="input"
                 style={{ width: '100%', padding: '2px 4px', fontSize: 12 }}
@@ -380,17 +416,21 @@ function PeopleCard(): React.JSX.Element | null {
                 disabled={busy === a.id}
                 onChange={(e) => void changeRole(a.id, e.target.value as AccountRole)}
               >
-                {GRANTABLE_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                {grantable.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
+            )}
+            {/* another admin, seen by an admin: their role is stated, not editable */}
+            {!a.isOwner && a.state === 'approved' && !mayDecideAbout(a) && (
+              <span className="hint">{a.role}</span>
             )}
           </span>
           <span style={{ width: 78, flex: 'none' }}>
-            {a.state !== 'approved' && (
+            {a.state !== 'approved' && mayDecideAbout(a) && (
               <button className="btn sm" data-approve={a.id} disabled={busy === a.id} onClick={() => void decide(a.id, 'approve')}>approve</button>
             )}
           </span>
           <span style={{ width: 62, flex: 'none' }}>
-            {a.state !== 'rejected' && !a.isOwner && (
+            {a.state !== 'rejected' && !a.isOwner && mayDecideAbout(a) && (
               <button className="btn sm ghost" data-reject={a.id} disabled={busy === a.id} onClick={() => void decide(a.id, 'reject')}>reject</button>
             )}
           </span>

@@ -9,7 +9,9 @@ import { accounts } from './account'
 import { ApiError } from './services'
 import { onEvent } from './events'
 import { llmsTxt } from './llms'
+import { bundleFilename } from './transfer'
 import type { OzmoEvent } from '@shared/types'
+import { BUNDLE_FORMAT, type ProjectBundle } from '@shared/transfer'
 
 let server: Server | null = null
 let actualPort = 0
@@ -115,7 +117,32 @@ const h = (method: string, payload: (req: Request) => unknown) =>
  */
 const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d{1,5})?$/
 
-export async function startServer(preferredPort: number, getWindow: () => BrowserWindow | null, version: string): Promise<number> {
+/**
+ * How this process is exposed. The desktop app passes nothing and gets exactly
+ * what it always had: loopback, local origins only.
+ *
+ * A SERVED instance (see src/main/headless.ts) must state both parts out loud.
+ * They are one decision, not two — an origin allowlist means nothing while the
+ * socket is loopback-only, and a wider bind with the loopback-only origin check
+ * serves agents but 403s every browser. `account.ts` says the bind and the
+ * boundary must move together; making the caller name both is how this file
+ * refuses to let one move quietly.
+ */
+export interface ServeOptions {
+  /** interface to bind. Default 127.0.0.1 — nothing reaches it from off-box. */
+  host?: string
+  /** extra exact origins a browser may use, beyond loopback. */
+  allowedOrigins?: string[]
+}
+
+export async function startServer(
+  preferredPort: number,
+  getWindow: () => BrowserWindow | null,
+  version: string,
+  opts: ServeOptions = {}
+): Promise<number> {
+  const bindHost = opts.host ?? '127.0.0.1'
+  const extraOrigins = new Set((opts.allowedOrigins ?? []).map((o) => o.trim().replace(/\/$/, '')).filter(Boolean))
   const app = express()
   startEventRecorder()
 
@@ -138,10 +165,13 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
    */
   app.use((req: Request, res: Response, next: NextFunction) => {
     const origin = req.header('origin')
-    if (origin && !LOCAL_ORIGIN.test(origin)) {
+    if (origin && !LOCAL_ORIGIN.test(origin) && !extraOrigins.has(origin.replace(/\/$/, ''))) {
       res.status(403).json({ error: { message:
-        `origin "${origin}" is not allowed — this API is loopback-only and unauthenticated. ` +
-        'Agents should call it directly (no Origin header); browsers only from 127.0.0.1/localhost.' } })
+        `origin "${origin}" is not allowed. ` +
+        (extraOrigins.size
+          ? `Allowed: loopback plus ${[...extraOrigins].join(', ')} (set OZMO_ALLOWED_ORIGINS to change).`
+          : 'This API is loopback-only and unauthenticated. Agents should call it directly ' +
+            '(no Origin header); browsers only from 127.0.0.1/localhost.') } })
       return
     }
     next()
@@ -324,6 +354,58 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   app.get('/api/projects/:id', h('projects.get', (r) => ({ id: r.params.id })))
   app.patch('/api/projects/:id', h('projects.update', (r) => ({ ...r.body, id: r.params.id })))
   app.delete('/api/projects/:id', h('projects.delete', (r) => ({ id: r.params.id })))
+
+  // ---- taking a project somewhere else ------------------------------------
+  //
+  // Hand-written rather than h(), because h() always res.json() and this one
+  // sets a filename. `attachment` where the document export uses `inline`, and
+  // that difference is the point: a document is meant to be read in the window
+  // that asked for it, a bundle is a file you keep.
+  //
+  // ?revisions=0 / ?activity=0 leave the history behind. Everything travels by
+  // default — a copy that quietly holds less than the board is the failure mode
+  // this whole feature exists to prevent.
+  app.get('/api/projects/:id/export', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const bundle = (await Promise.resolve(
+        call(
+          'projects.export',
+          {
+            projectId: req.params.id,
+            includeRevisions: req.query.revisions !== '0' && req.query.revisions !== 'false',
+            includeActivity: req.query.activity !== '0' && req.query.activity !== 'false'
+          },
+          ctxOf(req)
+        )
+      )) as ProjectBundle
+      res.type('application/json; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="${bundleFilename(bundle)}"`)
+      res.send(JSON.stringify(bundle))
+    } catch (e) {
+      next(e)
+    }
+  })
+
+  // The bundle IS the body. It rides the global 10mb json limit, which every
+  // project on the board fits inside today (the largest measures 5.9mb with its
+  // full history). A whole-BOARD bundle will not, and the answer then is to
+  // compress the payload rather than widen the limit for every other route —
+  // this endpoint is reachable without a session on loopback, so the cap is
+  // doing real work.
+  //
+  // The downloaded FILE is a valid body on its own — `--data-binary @bundle.json`
+  // with no wrapping — because the alternative is telling an agent to edit a
+  // 6mb file to nest it under a key before sending it back. `{bundle, onConflict}`
+  // still works, and ?onConflict= covers the raw form.
+  app.post('/api/projects/import', h('projects.import', (r) =>
+    r.body?.format === BUNDLE_FORMAT
+      ? {
+          bundle: r.body,
+          onConflict: typeof r.query.onConflict === 'string' ? r.query.onConflict : undefined
+        }
+      : r.body
+  ))
+
   app.get('/api/projects/:id/graph', h('graph.get', (r) => ({ projectId: r.params.id })))
   app.get('/api/projects/:id/activity', h('activity.list', (r) => ({
     projectId: r.params.id,
@@ -572,6 +654,13 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
   app.get('/api/settings', h('settings.get', () => ({})))
   app.patch('/api/settings', h('settings.update', (r) => r.body))
 
+  // Closing the board, and opening it again. An agent that meets a 403 carrying
+  // `readOnly: true` is told where to go in the same response; these are how a
+  // person puts that message there. Lock state is readable from session.current,
+  // which is open, so there is no GET here.
+  app.post('/api/board/lock', h('board.lock', (r) => r.body))
+  app.post('/api/board/unlock', h('board.unlock', () => ({})))
+
   // --- misc ---
   app.get('/api/search', h('search.run', (r) => ({ projectId: r.query.projectId as string, q: r.query.q as string })))
   app.post('/api/ui/focus', h('ui.focus', (r) => r.body))
@@ -610,6 +699,33 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
     })
   }
 
+  /**
+   * THE BARE ROOT.
+   *
+   * Everything here lives under a path — `/app` for the board, `/llms.txt` for
+   * agents, `/api` for both — and nothing answered `/`. Typing the host and port
+   * into a browser got Express's `Cannot GET /`, which reads as a broken server
+   * rather than a URL one segment short, and it is the first thing anyone tries.
+   *
+   * A browser came for the board, so it goes there. 302 rather than 301: a
+   * permanent redirect is cached by the browser and would have to be un-taught
+   * one machine at a time if `/` ever means something else.
+   */
+  app.get('/', (_req, res) => {
+    if (fs.existsSync(path.join(webDir, 'index.web.html'))) {
+      res.redirect(302, '/app')
+      return
+    }
+    res
+      .type('text/plain')
+      .send(
+        'Ozmo Spectre — this is a board core, not a web page.\n\n' +
+          '  /app       the board (not built in this tree yet: npm run build:web)\n' +
+          '  /llms.txt  what an agent should read first\n' +
+          '  /api/health\n'
+      )
+  })
+
   app.get('/api/debug/screenshot', async (_req, res) => {
     const win = getWindow()
     if (!win) {
@@ -634,15 +750,15 @@ export async function startServer(preferredPort: number, getWindow: () => Browse
     res.status(status).json({ error: { message, ...extra } })
   })
 
-  actualPort = await listen(app, preferredPort)
+  actualPort = await listen(app, preferredPort, bindHost)
   return actualPort
 }
 
-function listen(app: express.Express, preferred: number): Promise<number> {
+function listen(app: express.Express, preferred: number, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const tryPort = (port: number, attemptsLeft: number): void => {
       const s = app
-        .listen(port, '127.0.0.1', () => {
+        .listen(port, host, () => {
           server = s
           resolve(port)
         })

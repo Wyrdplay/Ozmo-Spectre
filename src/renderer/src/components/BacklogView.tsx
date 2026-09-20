@@ -6,6 +6,7 @@ import {
   FlagChips, FlagFilterChips, ProgressBar, StageChip, TypeDot,
   hiddenFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useTypeStyles
 } from './widgets'
+import { useBoardLock } from './BoardLock'
 import { timeAgo } from '@/lib/markdown'
 
 /** Fractional ranks are renormalized to integers once midpoints collapse below this. */
@@ -18,6 +19,7 @@ interface BacklogRow {
 }
 
 export function BacklogView(): React.JSX.Element {
+  const lock = useBoardLock()
   const backlog = useStore((s) => s.backlog)
   const refreshBacklog = useStore((s) => s.refreshBacklog)
   const graph = useStore((s) => s.graph)
@@ -155,6 +157,9 @@ export function BacklogView(): React.JSX.Element {
 
   /** Move the dragged top-level row (with its indented children) to display index `insertAt`. */
   const reorder = async (id: string, insertAt: number): Promise<void> => {
+    // Reordering persists `rank` on every row it moves. On a closed board the
+    // rows would slide and then snap back on the next refresh.
+    if (lock) return
     const list = displayRows
     const start = list.findIndex((r) => r.node.id === id)
     if (start < 0) return

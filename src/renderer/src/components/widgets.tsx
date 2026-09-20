@@ -500,31 +500,48 @@ export function ProgressBar({ value, color }: { value: number; color?: string })
   )
 }
 
-export function TagsEditor({ tags, onChange }: { tags: string[]; onChange: (tags: string[]) => void }): React.JSX.Element {
+/**
+ * `disabled` here means "still shows the tags, cannot change them" — the tags
+ * are content and a closed board is still worth reading. So the ✕ buttons and
+ * the draft input go, and nothing else does.
+ */
+export function TagsEditor({ tags, onChange, disabled }: {
+  tags: string[]
+  onChange: (tags: string[]) => void
+  disabled?: boolean
+}): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const commit = (): void => {
+    if (disabled) return
     const t = draft.trim().toLowerCase()
     if (t && !tags.includes(t)) onChange([...tags, t])
     setDraft('')
   }
   return (
-    <div className="tags-editor input" onClick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus()}>
+    <div
+      className="tags-editor input"
+      onClick={(e) => { if (!disabled) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus() }}
+    >
       {tags.map((t) => (
         <span key={t} className="tag">
           {t}
-          <button onClick={(e) => { e.stopPropagation(); onChange(tags.filter((x) => x !== t)) }}>×</button>
+          {!disabled && (
+            <button onClick={(e) => { e.stopPropagation(); onChange(tags.filter((x) => x !== t)) }}>×</button>
+          )}
         </span>
       ))}
-      <input
-        value={draft}
-        placeholder={tags.length ? '' : 'add tags…'}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit() }
-          if (e.key === 'Backspace' && !draft && tags.length) onChange(tags.slice(0, -1))
-        }}
-        onBlur={commit}
-      />
+      {!disabled && (
+        <input
+          value={draft}
+          placeholder={tags.length ? '' : 'add tags…'}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit() }
+            if (e.key === 'Backspace' && !draft && tags.length) onChange(tags.slice(0, -1))
+          }}
+          onBlur={commit}
+        />
+      )}
     </div>
   )
 }

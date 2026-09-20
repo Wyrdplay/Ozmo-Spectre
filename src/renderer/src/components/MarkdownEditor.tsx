@@ -50,6 +50,17 @@ export function MarkdownEditor({ nodeId, value, onSave }: {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const onSaveRef = useRef(onSave)
   onSaveRef.current = onSave
+  // This editor saves without being asked — 1.2s after a keystroke, on Ctrl+S,
+  // and again on unmount. Under a lock every one of those is a refused request,
+  // and the unmount one arrives from a component that has already gone, so its
+  // error toast has nothing on screen to point at. The lock is read here rather
+  // than passed in because three call sites would each have to remember to.
+  const lock = useStore((s) => s.session?.readOnly ?? null)
+  // A lock arriving mid-edit drops you back to reading, rather than leaving a
+  // caret blinking in a box whose contents can no longer go anywhere.
+  useEffect(() => {
+    if (lock) setMode('preview')
+  }, [lock])
   // checkbox toggles apply to a local copy immediately (no flicker) until the
   // saved content round-trips through the store and comes back as `value`
   const [localValue, setLocalValue] = useState<string | null>(null)
@@ -64,6 +75,9 @@ export function MarkdownEditor({ nodeId, value, onSave }: {
   const doSave = async (): Promise<void> => {
     const view = viewRef.current
     if (!view || !dirtyRef.current) return
+    // The one gate that matters: the debounce, the keymap and the unmount flush
+    // all arrive here, so closing this closes all three.
+    if (lock) return
     const content = view.state.doc.toString()
     try {
       await onSaveRef.current(content)
@@ -167,14 +181,25 @@ export function MarkdownEditor({ nodeId, value, onSave }: {
     if (lastRenderedRef.current === src) return
     lastRenderedRef.current = src
     el.innerHTML = renderMarkdown(src)
-    // this preview persists checkbox toggles, so its checkboxes are live
-    el.querySelectorAll('input[type="checkbox"][data-task]').forEach((cb) => cb.removeAttribute('disabled'))
+    // This preview persists checkbox toggles, so its checkboxes are live —
+    // unless the board is closed, in which case they stay as renderMarkdown
+    // left them: disabled. A tickable box on a read-only board is a promise the
+    // next request breaks.
+    if (!lock) {
+      el.querySelectorAll('input[type="checkbox"][data-task]').forEach((cb) => cb.removeAttribute('disabled'))
+    }
     void hydrateMarkdown(el)
-  }, [mode, nodeId, value, localValue])
+  }, [mode, nodeId, value, localValue, lock])
 
   const onToggleTask = (input: HTMLInputElement): void => {
     const attr = input.getAttribute('data-task')
     if (attr === null) return
+    // Belt behind the disabled attribute above: a stale render, or a click that
+    // lands between a lock arriving and the re-render, must not write.
+    if (lock) {
+      input.checked = !input.checked
+      return
+    }
     const base = localValueRef.current ?? valueRef.current
     const next = toggleTask(base, Number(attr))
     if (next === null) {
@@ -235,9 +260,19 @@ export function MarkdownEditor({ nodeId, value, onSave }: {
     <div className="spec-editor">
       <div className="editor-bar">
         <button className={`btn sm ${mode === 'preview' ? '' : 'ghost'}`} onClick={() => setMode('preview')}>read</button>
-        <button className={`btn sm ${mode === 'edit' ? '' : 'ghost'}`} onClick={() => setMode('edit')}>edit</button>
-        <span className={`status ${dirty ? 'dirty' : ''}`}>
-          {dirty ? 'unsaved · autosaves' : saved ? 'saved ✓' : 'ctrl+s to save'}
+        <button
+          className={`btn sm ${mode === 'edit' ? '' : 'ghost'}`}
+          disabled={!!lock}
+          title={lock ? `This board is read-only — ${lock.message}` : undefined}
+          onClick={() => setMode('edit')}
+        >
+          edit
+        </button>
+        {/* the status line is a promise about what happens next, so under a lock
+            it must stop saying "autosaves" — that is the sentence that makes a
+            closed board feel open */}
+        <span className={`status ${dirty && !lock ? 'dirty' : ''}`}>
+          {lock ? 'read only' : dirty ? 'unsaved · autosaves' : saved ? 'saved ✓' : 'ctrl+s to save'}
         </span>
       </div>
       {/* ONE of these, never both (faykarta: "displays the content twice").

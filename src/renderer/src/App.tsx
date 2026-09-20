@@ -15,11 +15,17 @@ import { Palette } from './components/Palette'
 import { ExportDialog } from './components/ExportDialog'
 import { Toasts } from './components/widgets'
 import { Onboarding } from './components/Onboarding'
+import { WorkspaceChooser } from './components/WorkspaceChooser'
+import { LoadingScreen } from './components/LoadingScreen'
+import { LockBanner } from './components/BoardLock'
 import { inTextField, matches } from './lib/shortcuts'
 
 export default function App(): React.JSX.Element {
   const booted = useStore((s) => s.booted)
   const session = useStore((s) => s.session)
+  const workspaceGate = useStore((s) => s.workspaceGate)
+  const switching = useStore((s) => s.switching)
+  const workspaces = useStore((s) => s.workspaces)
   const view = useStore((s) => s.view)
   const selection = useStore((s) => s.selection)
   const quickAdd = useStore((s) => s.quickAdd)
@@ -45,11 +51,29 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [setPalette, showQuickAdd])
 
-  if (!booted) {
+  // Opening a board can be a network round trip now, so the wait says what it is
+  // waiting for and eventually offers a way out of it. The chooser wins over the
+  // loading screen: a human who has asked to change workspace should not be made
+  // to watch the one that is failing.
+  const openingWs = workspaces?.workspaces.find((w) => w.id === workspaces.activeId)
+  if (!workspaceGate && (switching || !booted)) {
     return (
-      <div className="boot">
-        <span className="pulse">◈</span> waking the spec engine…
-      </div>
+      <LoadingScreen
+        title={switching ? `Opening ${switching}…` : 'waking the spec engine…'}
+        detail={openingWs?.url ?? openingWs?.vaultPath}
+      />
+    )
+  }
+
+  // WHERE COMES BEFORE WHO. The chooser sits in front of the door, because the
+  // door is a different door per server — there is no identity to ask about
+  // until the board is chosen.
+  if (workspaceGate) {
+    return (
+      <>
+        <WorkspaceChooser />
+        <Toasts />
+      </>
     )
   }
 
@@ -68,7 +92,11 @@ export default function App(): React.JSX.Element {
   const showInspector = selection && (view === 'graph' || view === 'lists' || view === 'backlog' || view === 'warps')
 
   return (
-    <div className="app">
+    // A closed board reads normally, so without this the app would look entirely
+    // ordinary and only fail on the first attempt to change something. The state
+    // is announced rather than discovered.
+    <div className={session.readOnly ? 'app locked' : 'app'}>
+      {session.readOnly && <LockBanner lock={session.readOnly} />}
       <Sidebar />
       <div className="content">
         {view === 'graph' && <GraphView />}

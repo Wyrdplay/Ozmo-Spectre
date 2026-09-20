@@ -3,7 +3,8 @@ import {
   edgeRelationships,
   type AppInfo, type AppSettings, type Project, type GraphPayload, type SpecNode, type WarpSummary,
   type ActivityEntry, type OzmoEvent, type NodeType, type EdgeType, type FlagRule, type FogClass,
-  type FogReport, type SkillsPayload, type SessionInfo, type Account
+  type FogReport, type SkillsPayload, type SessionInfo, type Account,
+  type Workspace, type WorkspaceList
 } from '@shared/types'
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
@@ -201,6 +202,12 @@ const flushSettings = async (): Promise<void> => {
 export const mutateSettings = (patch: SettingsMutation, opts?: { flush?: boolean }): void => {
   const cur = useStore.getState().settings
   if (!cur) return
+  // A read-only board refuses settings.update, and this applies OPTIMISTICALLY —
+  // so without this the appearance, colour and flag cards would paint a change
+  // the next refresh silently takes back, which is worse than refusing it. One
+  // return covers roughly twenty controls, because they all write through here.
+  // The controls are disabled too; this is the belt behind that brace.
+  if (!useStore.getState().canWrite()) return
   useStore.setState({ settings: { ...cur, ...patch } })
   settingsPending = { ...settingsPending, ...patch }
   if (settingsTimer) {
@@ -244,6 +251,15 @@ interface OzmoState {
   /** review-node ids open as room tabs in the Reviews lens (UI state only) */
   openReviewIds: string[]
   activeReviewId: string | null
+  /** the machine's workspace registry — desktop only; null where the host cannot choose */
+  workspaces: WorkspaceList | null
+  /** show the chooser instead of the board. True when nothing is active, and
+   *  whenever the human opens it deliberately. */
+  workspaceGate: boolean
+  /** a workspace is opening: the name to say while it does. Null when idle.
+   *  Switching is in-place, so this is the only thing that tells the human
+   *  anything is happening — without it the window just sits there. */
+  switching: string | null
   typeFilters: Record<NodeType, boolean>
   /** relationship-type visibility on the canvas — 'relates' governs bare connections.
    *  VISUAL-ONLY: the simulation keeps every link so the layout stays stable while lensing. */
@@ -337,6 +353,11 @@ interface OzmoState {
   openReview: (id: string) => void
   closeReview: (id: string) => void
   setActiveReview: (id: string | null) => void
+  refreshWorkspaces: () => Promise<void>
+  createWorkspace: (p: { kind: 'local' | 'server'; name?: string; vaultPath?: string; url?: string }) => Promise<void>
+  activateWorkspace: (id: string) => Promise<void>
+  removeWorkspace: (id: string) => Promise<void>
+  setWorkspaceGate: (open: boolean) => void
   toggleTypeFilter: (t: NodeType) => void
   soloTypeFilter: (t: NodeType) => void
   toggleRelationshipFilter: (t: EdgeType) => void
@@ -384,6 +405,15 @@ interface OzmoState {
    * the gate.
    */
   canWrite: () => boolean
+  /**
+   * May this client COMMENT on the board?
+   *
+   * Separate from canWrite because the server separates them: `annotate` is its
+   * own capability, and a viewer has it. The two answers only diverge in two
+   * places — a viewer (may comment, may not write) and a read-only board (may do
+   * neither) — which is exactly why one predicate cannot serve both.
+   */
+  canAnnotate: () => boolean
 }
 
 /**
@@ -428,6 +458,9 @@ export const useStore = create<OzmoState>((set, get) => ({
   detailVersion: 0,
   openReviewIds: [],
   activeReviewId: null,
+  workspaces: null,
+  workspaceGate: false,
+  switching: null,
   typeFilters: { ...ALL_TYPES },
   relationshipFilters: { ...ALL_RELS },
   hiddenFlags: [],
@@ -450,6 +483,26 @@ export const useStore = create<OzmoState>((set, get) => ({
   hiddenFogClasses: [],
 
   boot: async () => {
+    // WHERE IS THE BOARD, BEFORE WHO I AM. You cannot ask "who am I" until you
+    // know where, because the answer differs per server — so on a host that can
+    // choose, the workspace question comes first and nothing else is asked
+    // until it is answered. A browser client skips this: it is already pointed
+    // at the only core it can see.
+    if (host().can.chooseWorkspace) {
+      try {
+        const workspaces = await rpc<WorkspaceList>('workspaces.list')
+        set({ workspaces })
+        if (!workspaces.activeId) {
+          set({ booted: true, workspaceGate: true })
+          return
+        }
+      } catch (e) {
+        // An unreachable registry is not a reason to hide the board: fall
+        // through and let the ordinary boot report whatever is actually wrong.
+        console.warn('workspaces unavailable', e)
+      }
+    }
+
     // WHO AM I, BEFORE WHAT IS ON THE BOARD. Asking for projects first would
     // mean the first thing an unapproved viewer sees is a refusal, and the
     // client would have to reverse-engineer the onboarding screen out of an
@@ -458,7 +511,12 @@ export const useStore = create<OzmoState>((set, get) => ({
     try {
       session = await rpc<SessionInfo>('session.current')
     } catch (e) {
-      set({ booted: true })
+      // A workspace that cannot be reached must not strand you at a door you
+      // can never open: the door belongs to a server that is not answering. Go
+      // back to the question before it, where the workspace can be changed or
+      // removed. Without this, an unreachable server workspace is only
+      // recoverable by hand-editing workspaces.json.
+      set({ booted: true, workspaceGate: host().can.chooseWorkspace })
       get().toast(`cannot reach Spectre: ${e instanceof Error ? e.message : e}`, 'error')
       return
     }
@@ -758,6 +816,40 @@ export const useStore = create<OzmoState>((set, get) => ({
     }),
   setActiveReview: (id) => set({ activeReviewId: id }),
 
+  refreshWorkspaces: async () => {
+    if (!host().can.chooseWorkspace) return
+    set({ workspaces: await rpc<WorkspaceList>('workspaces.list') })
+  },
+
+  createWorkspace: async (p) => {
+    await rpc<Workspace>('workspaces.create', p)
+    await get().refreshWorkspaces()
+  },
+
+  // Switching is a RELAUNCH, not a live swap: the database, the vault watcher
+  // and the HTTP server are all bound at boot. `updateSettings` already answers
+  // a vault change the same way, and this is that act with a better name.
+  // Switching happens IN PLACE in the main process; this call returns once the
+  // new workspace is open. `workspace.changed` then re-boots the renderer
+  // against it. The name is set first so the screen can say what it is waiting
+  // for from the moment the click lands.
+  activateWorkspace: async (id) => {
+    const name = get().workspaces?.workspaces.find((w) => w.id === id)?.name ?? 'workspace'
+    set({ switching: name, workspaceGate: false })
+    try {
+      await rpc('workspaces.activate', { id })
+    } catch (e) {
+      set({ switching: null, workspaceGate: true })
+      throw e
+    }
+  },
+
+  removeWorkspace: async (id) => {
+    set({ workspaces: await rpc<WorkspaceList>('workspaces.remove', { id }) })
+  },
+
+  setWorkspaceGate: (open) => set({ workspaceGate: open }),
+
   toggleTypeFilter: (t) => set((s) => ({ typeFilters: { ...s.typeFilters, [t]: !s.typeFilters[t] } })),
 
   // ctrl-click a chip: show only that type; ctrl-click it again while solo: restore all
@@ -836,14 +928,24 @@ export const useStore = create<OzmoState>((set, get) => ({
       return { helpOpen }
     }),
 
-  showQuickAdd: (pos, linkTo, type) =>
+  showQuickAdd: (pos, linkTo, type) => {
+    // Reached from about a dozen gestures — double-clicking the canvas, Ctrl+N,
+    // "+ child" in the lists, the context menus, the review synthesiser. Refusing
+    // once here beats gating twelve call sites, and it says WHY: a dialog that
+    // opens and then fails on Create is the thing this whole pass is fixing.
+    const lock = get().session?.readOnly
+    if (lock) {
+      get().toast(lock.message, 'error')
+      return
+    }
     set({
       quickAdd: {
         open: true, x: pos?.x, y: pos?.y,
         linkTo: linkTo?.length ? linkTo.map((l) => (typeof l === 'string' ? { nodeId: l } : { ...l })) : undefined,
         type
       }
-    }),
+    })
+  },
   hideQuickAdd: () => set({ quickAdd: { open: false } }),
   setPalette: (open) => set({ palette: open }),
   setExportScope: (exportScope) => set({ exportScope }),
@@ -880,11 +982,32 @@ export const useStore = create<OzmoState>((set, get) => ({
   canWrite: () => {
     const s = get().session
     if (!s) return false
+    // THE LOCK COMES FIRST, before `atTheMachine` — the same order the gate uses
+    // on the server, and for the same reason. Every other rule here asks whether
+    // a caller is trusted enough; this one says the board is closed, and the
+    // person most likely to edit a board that has moved is the one sitting at
+    // it. Putting this after the short-circuit below would let the desktop
+    // through and miss the case the lock exists for.
+    if (s.readOnly) return false
     // At the machine is the owner, and an agent-shaped client (no session) is
     // served as an editor — both may write. Only a signed-in viewer may not.
     if (s.atTheMachine) return true
     if (s.state !== 'approved') return false
     return s.role !== 'viewer'
+  },
+
+  canAnnotate: () => {
+    const s = get().session
+    if (!s) return false
+    // A LOCK IS WIDER THAN A VIEWER GATE, and this is the one place the two
+    // differ. `annotate` is its own capability: a viewer may comment on a board
+    // they cannot change, which is most of the point of being a viewer. A
+    // read-only board refuses everything that is not `read`, comments included —
+    // so canWrite() alone would wrongly keep the note boxes live under a lock,
+    // and wrongly hide them from viewers.
+    if (s.readOnly) return false
+    if (s.atTheMachine) return true
+    return s.state === 'approved'
   },
 
   setLink: (link) => {
@@ -909,6 +1032,36 @@ export const useStore = create<OzmoState>((set, get) => ({
 
   handleEvent: (evt) => {
     const s = get()
+    // The core underneath this window is now a different board. Re-run the SAME
+    // boot the app runs at startup rather than a bespoke "reload" path: a second
+    // way to open a board is a second way for it to be subtly wrong.
+    if (evt.type === 'workspace.changed') {
+      const d = (evt.data ?? {}) as WorkspaceList
+      set({
+        workspaces: d,
+        booted: false,
+        session: null,
+        projects: [],
+        projectId: null,
+        graph: { nodes: [], edges: [] },
+        backlog: [],
+        warps: [],
+        activity: [],
+        selection: null
+      })
+      void get()
+        .boot()
+        .finally(() => set({ switching: null }))
+      return
+    }
+    // The board has just been closed or reopened. The lock rides on the SESSION —
+    // it is what every refusal cites, and session.current is the open method a
+    // client uses to discover it — so re-read that rather than patching a field
+    // here. One answer to "may I write on this board", arrived at one way.
+    if (evt.type === 'board.locked' || evt.type === 'board.unlocked') {
+      void get().refreshSession()
+      return
+    }
     if (evt.type === 'settings.updated') {
       // flag rules shape every computed graph payload — refresh so highlights
       // follow the new rules without a relaunch. Unflushed local edits stay

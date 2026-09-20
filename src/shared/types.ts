@@ -256,11 +256,33 @@ export type AccountState = 'pending' | 'approved' | 'rejected'
  * Approving someone makes them a VIEWER. Promoting is a second, deliberate
  * decision, so the careless path is the safe one.
  */
-export type AccountRole = 'viewer' | 'editor' | 'owner'
+export type AccountRole = 'viewer' | 'editor' | 'admin' | 'owner'
 
-export const ACCOUNT_ROLES: AccountRole[] = ['viewer', 'editor', 'owner']
+export const ACCOUNT_ROLES: AccountRole[] = ['viewer', 'editor', 'admin', 'owner']
 
-/** The roles a person can be given. `owner` is claimed, never granted. */
+/**
+ * Who may hand out which role.
+ *
+ * ADMINS DECIDE ABOUT VIEWERS AND EDITORS; THE OWNER DECIDES ABOUT ADMINS. That
+ * one sentence is the whole rule, and it is here rather than in the UI because
+ * the gate enforces it and the dropdown only has to agree.
+ *
+ * The reason it stops where it does: a display name is asserted, not proved, so
+ * anyone who knows an approved name can ask for a session under it. The owner's
+ * name is the single exception — account-local refuses it over the wire. That
+ * makes an admin's account exactly as private as their name, which is fine for
+ * approving a viewer and not fine for minting more admins. So that one step
+ * stays with the account whose name cannot be borrowed.
+ *
+ * When a name becomes provable, this can collapse into a plain hierarchy.
+ */
+export function rolesGrantableBy(role: AccountRole | undefined): AccountRole[] {
+  if (role === 'owner') return ['viewer', 'editor', 'admin']
+  if (role === 'admin') return ['viewer', 'editor']
+  return []
+}
+
+/** What an admin may hand out. `owner` is claimed, never granted. */
 export const GRANTABLE_ROLES: AccountRole[] = ['viewer', 'editor']
 
 export interface Account {
@@ -294,12 +316,48 @@ export interface SessionInfo {
   atTheMachine: boolean
   /** True when unauthenticated agents on loopback are still served. */
   agentsUnauthenticated: boolean
+  /**
+   * Set when this board is read-only. session.current is an open method, so a
+   * client learns the board is closed — and why, and where it went — before it
+   * tries to write, rather than one refusal at a time.
+   */
+  readOnly?: BoardLock | null
+}
+
+/**
+ * A board that answers reads and refuses everything else.
+ *
+ * The case this exists for is a board that has MOVED. After a migration the two
+ * copies are indistinguishable from the outside, and the likeliest thing to
+ * happen next is someone — very often the person who did the migrating — editing
+ * the dead one out of habit and losing that work when it is overwritten.
+ *
+ * So the message is not decoration; it is the whole point. A refusal that only
+ * says "read-only" leaves the caller to guess where the board went, and an agent
+ * cannot guess. Put the new address in it.
+ */
+export interface BoardLock {
+  since: number
+  /** shown verbatim in every refusal — say where the board went and what to do */
+  message: string
+  /** who locked it, for the same reason every decision here records a name */
+  by: string
 }
 
 export interface AppSettings {
   vaultPath: string
   apiPort: number
   humanName: string
+  /**
+   * Present = this board is read-only. Absent = ordinary.
+   *
+   * REFUSED through the settings API, exactly as agentsUnauthenticated and
+   * skillTargets are, and for the same reason: an unauthenticated PATCH that
+   * lifts the lock is not a setting, it is the lock with extra steps. It moves
+   * through board.lock / board.unlock, which record who did it and tell every
+   * connected client.
+   */
+  readOnly?: BoardLock
   /**
    * Serve agents that present no session, on loopback, as they always have been.
    *
@@ -575,6 +633,41 @@ export function orderedNodeTypes(typeOrder?: NodeType[] | null): NodeType[] {
 // The rule with id "done" is semantically special: matching it is what "done"
 // means for backlog exclusion and progress fallback. Its conditions are yours
 // to edit — the vocabulary is user-defined.
+
+/**
+ * A WORKSPACE — a named binding to one core.
+ *
+ * `local`  the core is this process, over a vault directory on this machine
+ * `server` the core is somewhere else, over HTTP
+ *
+ * The list is HOST state (per machine, beside settings.json) and never board
+ * state: you need a workspace before you have a database to put one in. It is
+ * also the most host-shaped state there is — a caller who could add a workspace
+ * could re-point somebody's app at a core they control — so the verbs are
+ * refused to every network caller, exactly as vaultPath and apiPort are.
+ */
+export type WorkspaceKind = 'local' | 'server'
+
+export interface Workspace {
+  id: string
+  name: string
+  kind: WorkspaceKind
+  /** local only: the vault directory this board lives in */
+  vaultPath?: string
+  /** server only: the base URL of the core, no trailing slash */
+  url?: string
+  /** server only: whether a session token is held for it. The TOKEN ITSELF never
+   *  leaves the main process — a renderer needs to know it is signed in, not what
+   *  the credential is. */
+  hasToken?: boolean
+  lastOpenedAt?: number
+  createdAt: number
+}
+
+export interface WorkspaceList {
+  workspaces: Workspace[]
+  activeId: string | null
+}
 
 export type FlagTreatment = 'ring' | 'dim' | 'badge'
 

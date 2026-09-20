@@ -1,10 +1,15 @@
 import * as svc from './services'
+import * as ws from './workspaces'
+import { probe } from './remote'
+import { switchWorkspace } from './lifecycle'
 import * as fog from './fog'
 import { accounts, type Account } from './account'
 import * as skills from './skills'
 import { buildDocument } from './document'
-import { getSettings, updateSettings } from './settings'
+import { exportProject, importProject } from './transfer'
+import { getBoardLock, getSettings, setBoardLock, updateSettings } from './settings'
 import { emitEvent } from './events'
+import { rolesGrantableBy } from '@shared/types'
 import type { AccountRole, AppInfo, SessionInfo } from '@shared/types'
 
 export interface Ctx {
@@ -84,6 +89,14 @@ const CAPABILITY: Record<string, Capability> = {
   'activity.list': 'read',
   'search.run': 'read',
   'document.build': 'read',
+  // Exporting a project is a READ, for the same reason building a document is:
+  // it copies rows and bodies out and writes nothing back. That the copy happens
+  // to be round-trippable is a property of the FORMAT, not a privilege — so this
+  // is not `host`, and a viewer who may read the board may take a copy of it.
+  // The board already decided this: export is the escape hatch that keeps "your
+  // words are yours" true, and an escape hatch only the owner can reach is not
+  // one.
+  'projects.export': 'read',
   'settings.get': 'read',
   // Reading skills is reading the board — a skill IS a node. Rendering and
   // diffing only compute; they touch no disk.
@@ -109,6 +122,13 @@ const CAPABILITY: Record<string, Capability> = {
   'projects.create': 'write',
   'projects.update': 'write',
   'projects.delete': 'write',
+  // Importing a project writes nodes, edges and markdown — the same things
+  // nodes.create writes, in bulk and in one transaction. It is NOT `host`: it
+  // touches nothing outside the vault, takes no path from the caller (paths are
+  // rebuilt from sanitised titles inside a folder this side chooses), and
+  // configures nothing about the machine. An editor who may create a node may
+  // bring one in.
+  'projects.import': 'write',
   'nodes.create': 'write',
   'nodes.update': 'write',
   'nodes.delete': 'write',
@@ -174,11 +194,118 @@ const CAPABILITY: Record<string, Capability> = {
   'session.current': 'read',
   'session.request': 'read',
   'session.signOut': 'read',
-  'app.info': 'read'
+  'app.info': 'read',
+
+  // ---- host: the machine, not the board -----------------------------------
+  // Workspaces are the most host-shaped state there is, and unlike vaultPath a
+  // workspace can carry a stored CREDENTIAL for a remote core. So these are
+  // `host` AND guarded to atTheMachine in their handlers — not even a tokenless
+  // loopback agent gets them. There is no status quo to preserve (the verbs are
+  // new), which is the same reasoning that made membership owner-only.
+  // Closing a board is not a change to what it SAYS — nothing in it moves — so
+  // it is not `write`, and an editor signed in from elsewhere should not be able
+  // to shut the board for everyone. It is `host` for the same reason skill
+  // targets are: at the machine, or a loopback agent acting for whoever is.
+  'board.lock': 'host',
+  'board.unlock': 'host',
+  'workspaces.list': 'host',
+  'workspaces.create': 'host',
+  'workspaces.remove': 'host',
+  'workspaces.activate': 'host',
+  'workspaces.probe': 'host'
+}
+
+/**
+ * Some verbs are not about the board at all, and no role should reach them from
+ * off-box. `atTheMachine` is true only for the desktop renderer, in the process
+ * that owns the database — see the gate below.
+ */
+function atTheMachineOnly(c: Ctx, method: string): void {
+  if (!c.atTheMachine) {
+    throw new svc.ApiError(
+      `${method} configures the app on this machine, not the board. ` +
+        'It is available in the desktop app, at that machine.',
+      403
+    )
+  }
+}
+
+/**
+ * ADMINS DECIDE ABOUT VIEWERS AND EDITORS; THE OWNER DECIDES ABOUT ADMINS.
+ *
+ * The capability table answers "may you run the guest list at all". This answers
+ * "about whom", and the two are separate because promoting someone to your own
+ * level is not a larger version of approving them — it is the step that turns
+ * one borrowed display name into unlimited membership control.
+ *
+ * While a name is asserted rather than proved, an admin account is exactly as
+ * private as the name written on it. So an admin decides about people who
+ * cannot in turn decide about anyone, and the one account whose name cannot be
+ * borrowed over the wire — the owner — decides about the admins.
+ */
+function assertMayDecideAbout(c: Ctx, targetId: string, granting?: AccountRole): void {
+  // The desktop renderer is served as the owner (see sessionInfo), so it lands
+  // here as one rather than as an account with no role.
+  const callerRole: AccountRole | undefined = c.atTheMachine ? 'owner' : c.account?.role
+  if (callerRole === 'owner') return
+
+  const target = accounts().get(targetId)
+  if (!target) throw new svc.ApiError('no such account', 404)
+  if (target.isOwner) {
+    throw new svc.ApiError('the board owner is not an account an admin decides about', 403)
+  }
+  if (target.role === 'admin') {
+    throw new svc.ApiError(
+      `another admin is the owner's decision — a display name is asserted rather than proved, so an admin ` +
+        `who could appoint admins would turn one borrowed name into the whole guest list`,
+      403
+    )
+  }
+  if (granting && !rolesGrantableBy(callerRole).includes(granting)) {
+    throw new svc.ApiError(
+      `an admin may grant ${rolesGrantableBy(callerRole).join(' or ')} — "${granting}" is the owner's to give`,
+      403
+    )
+  }
 }
 
 /** Unclassified means membership — the most restricted. See the note above. */
 const capabilityOf = (method: string): Capability => CAPABILITY[method] ?? 'membership'
+
+/**
+ * The two verbs that must answer while the board is read-only, or a locked board
+ * could never be unlocked and the lock would be a one-way door.
+ */
+const LOCK_EXEMPT = new Set(['board.lock', 'board.unlock'])
+
+/**
+ * A READ-ONLY BOARD REFUSES EVERYTHING BUT READS.
+ *
+ * Checked before `atTheMachine`, deliberately — unlike every other rule here,
+ * which asks whether a caller is trusted enough. This one is not about trust at
+ * all: the board is closed, and the person most likely to edit a board that has
+ * moved is the one sitting at it, working from habit. A lock that let the
+ * desktop through would miss the case it was built for.
+ *
+ * It is a WORKFLOW gate, not a security boundary — the same thing the README
+ * says about agentsUnauthenticated, and for the same reason: anything that can
+ * reach this socket can also rewrite settings.json. It stops the accidental
+ * edit and it tells the caller where the board went, which is what it is for.
+ */
+function refuseIfReadOnly(method: string): void {
+  const lock = getBoardLock()
+  if (!lock) return
+  if (LOCK_EXEMPT.has(method)) return
+  if (capabilityOf(method) === 'read') return
+  throw new svc.ApiError(lock.message, 403, {
+    readOnly: true,
+    since: lock.since,
+    lockedBy: lock.by,
+    // named separately from `message` so a client can render the operator's
+    // words without the refusal wrapped around them
+    lockMessage: lock.message
+  })
+}
 
 /**
  * What each role may do. A SET, not a rank: reading the table answers "may a
@@ -194,6 +321,11 @@ const capabilityOf = (method: string): Capability => CAPABILITY[method] ?? 'memb
 const ALLOWED: Record<AccountRole, Set<Capability>> = {
   viewer: new Set<Capability>(['read', 'annotate']),
   editor: new Set<Capability>(['read', 'annotate', 'write']),
+  // An admin runs the GUEST LIST, not the machine. `host` is the vault path, the
+  // port and the filesystem roots the installer writes into — a remote admin
+  // changing those is re-homing somebody else's app, which is the objection that
+  // keeps host at the machine regardless of who is asking.
+  admin: new Set<Capability>(['read', 'annotate', 'write', 'membership']),
   owner: new Set<Capability>(['read', 'annotate', 'write', 'host', 'membership'])
 }
 
@@ -219,7 +351,11 @@ function sessionInfo(ctx: Ctx): SessionInfo {
     provider: provider.name,
     providerLabel: provider.label,
     atTheMachine: !!ctx.atTheMachine,
-    agentsUnauthenticated: getSettings().agentsUnauthenticated !== false
+    agentsUnauthenticated: getSettings().agentsUnauthenticated !== false,
+    // session.current is open, so this is how any client — signed in or not —
+    // learns the board is closed, instead of finding out one refused write at a
+    // time.
+    readOnly: getBoardLock()
   }
 }
 
@@ -258,6 +394,19 @@ export const registry: Record<string, Handler> = {
   'projects.get': (p) => svc.getProject(p),
   'projects.update': (p, c) => svc.updateProject(p, c.actor),
   'projects.delete': (p, c) => svc.deleteProject(p, c.actor),
+  'projects.export': (p) => {
+    // Provenance for the bundle header. Informational only — an importer must
+    // never trust it, and does not.
+    const info = appInfoProvider()
+    return exportProject(p as never, {
+      app: 'Ozmo Spectre',
+      version: info.version,
+      exportedFrom: info.apiBase,
+      platform: process.platform
+    })
+  },
+
+  'projects.import': (p, c) => importProject(p as never, c.actor),
 
   'graph.get': (p) => svc.getGraph(p),
 
@@ -382,9 +531,58 @@ export const registry: Record<string, Handler> = {
 
   // ---- who is on the board (owner only; enforced in authorise) ----------
   'accounts.list': () => accounts().list(),
-  'accounts.approve': (p, c) => accounts().approve((p as { id: string }).id, c.actor),
-  'accounts.reject': (p, c) => accounts().reject((p as { id: string }).id, c.actor, (p as { note?: string })?.note),
-  'accounts.setRole': (p, c) => accounts().setRole((p as { id: string }).id, (p as { role: AccountRole }).role, c.actor),
+  'accounts.approve': (p, c) => {
+    const id = (p as { id: string }).id
+    assertMayDecideAbout(c, id)
+    return accounts().approve(id, c.actor)
+  },
+  'accounts.reject': (p, c) => {
+    const id = (p as { id: string }).id
+    assertMayDecideAbout(c, id)
+    return accounts().reject(id, c.actor, (p as { note?: string })?.note)
+  },
+  'accounts.setRole': (p, c) => {
+    const id = (p as { id: string }).id
+    const role = (p as { role: AccountRole }).role
+    assertMayDecideAbout(c, id, role)
+    return accounts().setRole(id, role, c.actor)
+  },
+
+  /**
+   * Close the board, and say where it went.
+   *
+   * The message is required rather than optional. The reason this verb exists is
+   * a board that has MOVED, and a refusal reading only "read-only" leaves the
+   * caller — very often an agent with no human beside it — to work out where to
+   * go next. There is no useful default for that sentence, so it is asked for.
+   */
+  'board.lock': (p, c) => {
+    const raw = (p as { message?: unknown })?.message
+    const message = typeof raw === 'string' ? raw.trim() : ''
+    if (!message) {
+      throw new svc.ApiError(
+        'board.lock needs a message. It is shown verbatim in every refusal, so say where the board moved ' +
+          'and what to do instead — e.g. "Moved to http://127.0.0.1:4821/app — edit there."',
+        400
+      )
+    }
+    if (message.length > 500) {
+      throw new svc.ApiError('that message is too long (max 500 characters)', 400)
+    }
+    const lock = { since: Date.now(), message, by: c.actor }
+    setBoardLock(lock)
+    emitEvent('board.locked', undefined, lock, c.actor)
+    console.log(`[ozmo] board LOCKED by ${c.actor} — ${message}`)
+    return { readOnly: lock }
+  },
+
+  'board.unlock': (_p, c) => {
+    const was = getBoardLock()
+    setBoardLock(null)
+    emitEvent('board.unlocked', undefined, { was }, c.actor)
+    console.log(`[ozmo] board unlocked by ${c.actor}`)
+    return { readOnly: null, wasLocked: !!was }
+  },
 
   'settings.get': () => getSettings(),
   'settings.update': (p, c) => {
@@ -411,6 +609,60 @@ export const registry: Record<string, Handler> = {
     // renderer (and SSE listeners) so open views recompute without a relaunch
     emitEvent('settings.updated', undefined, res.settings, c.actor)
     return res
+  },
+
+  // WORKSPACES — where the board is, asked before who you are.
+  //
+  // Refused to anything but the desktop renderer. A caller who could add a
+  // workspace could re-point somebody's app at a core they control, or read back
+  // a board they were never on; a caller who could remove one could strand it.
+  // A served instance answers none of these: a container is a core, not a
+  // chooser, and its registry has no list to give.
+  'workspaces.list': (_p, c) => {
+    atTheMachineOnly(c, 'workspaces.list')
+    return ws.listWorkspaces()
+  },
+  // Ask a URL whether there is a Spectre behind it, BEFORE it becomes a
+  // workspace. A typo saved as a workspace is a workspace that strands you on
+  // the next boot; better to fail while the URL is still in a text box.
+  'workspaces.probe': async (p, c) => {
+    atTheMachineOnly(c, 'workspaces.probe')
+    try {
+      return await probe(ws.normaliseUrl(String(p?.url ?? '')))
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) }
+    }
+  },
+  'workspaces.create': (p, c) => {
+    atTheMachineOnly(c, 'workspaces.create')
+    try {
+      return ws.createWorkspace(p ?? {})
+    } catch (e) {
+      throw new svc.ApiError(e instanceof Error ? e.message : String(e), 400)
+    }
+  },
+  'workspaces.remove': (p, c) => {
+    atTheMachineOnly(c, 'workspaces.remove')
+    try {
+      return ws.removeWorkspace(String(p?.id ?? ''))
+    } catch (e) {
+      throw new svc.ApiError(e instanceof Error ? e.message : String(e), 404)
+    }
+  },
+  'workspaces.activate': async (p, c) => {
+    atTheMachineOnly(c, 'workspaces.activate')
+    let res: { workspace: unknown; relaunchRequired: boolean }
+    try {
+      res = ws.activateWorkspace(String(p?.id ?? ''))
+    } catch (e) {
+      throw new svc.ApiError(e instanceof Error ? e.message : String(e), 404)
+    }
+    // Switch IN PLACE. This used to answer `relaunchRequired` and let the
+    // renderer call app.relaunch(), which under electron-vite dev orphaned the
+    // app from its own renderer server and left a black window in front of a
+    // perfectly healthy core. Nothing about the switch needed a new process.
+    if (res.relaunchRequired) await switchWorkspace()
+    return { ...res, relaunchRequired: false }
   },
 
   'ui.focus': (p, c) => {
@@ -442,7 +694,11 @@ export function authorised(method: string, ctx: Ctx): void {
 }
 
 function authorise(method: string, ctx: Ctx): void {
+  // OPEN_METHODS stay open even when locked: signing in and asking what this
+  // board is are how a caller DISCOVERS the lock rather than meeting it as a
+  // wall of refusals.
   if (OPEN_METHODS.has(method)) return
+  refuseIfReadOnly(method)
   if (ctx.atTheMachine) return
 
   if (ctx.account) {
@@ -462,11 +718,25 @@ function authorise(method: string, ctx: Ctx): void {
     // holds it. Two checks because they fail differently — that one stops the
     // owner's name being CLAIMED, this one stops an owner session being USED
     // from somewhere else if a future provider ever issues one.
-    if (need === 'membership' || need === 'host') {
+    // `host` is refused to EVERY network caller, the owner included. It is the
+    // machine's configuration — vault path, port, the roots the skill installer
+    // writes into — and re-homing an app from somewhere else is not a smaller
+    // version of using it.
+    //
+    // `membership` WAS refused here too, and is not any more. A board served to
+    // people needs somebody who can let them in, and a container has no caller
+    // that is ever `atTheMachine` to be that somebody: a joiner on a served
+    // board waited forever, which made invitations a feature that only worked on
+    // a desktop. It now falls through to the role check, which grants it to
+    // `admin` and `owner` and to nobody else.
+    //
+    // What that deliberately does NOT open: the owner's name still cannot be
+    // claimed over the wire (account-local), `owner` still cannot be granted
+    // (setRole), and an admin still cannot make another admin. The step that
+    // would let someone let themselves in stays off-box.
+    if (need === 'host') {
       throw new svc.ApiError(
-        need === 'membership'
-          ? 'who is on this board is decided at the machine it runs on, in the desktop app — not over the network'
-          : 'how the machine running this board is configured is decided at that machine, in the desktop app',
+        'how the machine running this board is configured is decided at that machine, in the desktop app',
         403
       )
     }

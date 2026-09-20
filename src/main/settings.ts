@@ -1,17 +1,17 @@
-import { app } from 'electron'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { appDir, documentsDir, userDataDir } from './paths'
 import {
   EDGE_TYPES, INNER_GLYPHS, NODE_SHAPES, NODE_TYPES, WARP_STAGES, defaultFlags, isTextGlyph, newId,
-  type AppSettings, type EdgeType, type FlagCondition, type FlagRule, type InnerGlyph, type NodeFill,
+  type AppSettings, type BoardLock, type EdgeType, type FlagCondition, type FlagRule, type InnerGlyph, type NodeFill,
   type NodeInnerStyle, type NodeShape, type NodeStyleOverride, type NodeType, type SkillTargetConfig,
   type StyleOverrides, type WarpStage
 } from '@shared/types'
 import { ApiError } from './services'
 
 const DEFAULTS = (): AppSettings => ({
-  vaultPath: path.join(app.getPath('documents'), 'OzmoSpecVault'),
+  vaultPath: path.join(documentsDir(), 'OzmoSpecVault'),
   apiPort: 4820,
   agentsUnauthenticated: true,
   humanName: os.userInfo().username || 'human',
@@ -167,7 +167,7 @@ function migrateLegacyUserData(): void {
 let settings: AppSettings | null = null
 
 function settingsFile(): string {
-  return path.join(app.getPath('userData'), 'settings.json')
+  return path.join(userDataDir(), 'settings.json')
 }
 
 /**
@@ -405,10 +405,10 @@ function seedSkillTargets(includeGlobal: boolean): SkillTargetConfig[] {
   // that path is discovered, not assumed. Packaged builds run out of an asar
   // with no .git, so nothing is added there.
   try {
-    const self = app.getAppPath()
+    const self = appDir()
     if (path.isAbsolute(self) && fs.existsSync(path.join(self, '.git'))) repo('tgt_self', self)
   } catch {
-    // getAppPath before app-ready, or an unreadable path — skip the self target
+    // the app path before the host is ready, or an unreadable path — skip the self target
   }
   if (includeGlobal) {
     candidates.push({
@@ -459,6 +459,23 @@ export function setSkillTargets(next: SkillTargetConfig[]): AppSettings {
 /** The current allowlist (always an array — an unseeded read seeds it). */
 export function getSkillTargets(): SkillTargetConfig[] {
   return getSettings().skillTargets ?? []
+}
+
+/**
+ * THE write path for readOnly — the only one. `updateSettings` refuses the field
+ * outright, so a lock is lifted by a verb that names who lifted it or not at all.
+ */
+export function setBoardLock(lock: BoardLock | null): AppSettings {
+  const next = { ...getSettings() }
+  if (lock) next.readOnly = lock
+  else delete next.readOnly
+  saveSettings(next)
+  return next
+}
+
+/** The lock, or null. Read on every gated call, so it stays a field lookup. */
+export function getBoardLock(): BoardLock | null {
+  return getSettings().readOnly ?? null
 }
 
 export function getSettings(): AppSettings {
@@ -531,6 +548,16 @@ export function updateSettings(patch: Partial<AppSettings>): { settings: AppSett
       'skillTargets is not editable through settings — the settings API is unauthenticated on loopback, ' +
         'so a writable-root allowlist reachable this way would be an arbitrary-file-write primitive. ' +
         'Use the skills.addTarget / skills.removeTarget verbs, which validate the root and log the change.',
+      400
+    )
+  }
+  // Third of the same kind. A board is read-only so that edits STOP; a settings
+  // patch that clears it is the thing it exists to prevent, arriving through a
+  // different door. The verbs say who lifted it and tell every open client.
+  if ('readOnly' in patch) {
+    throw new ApiError(
+      'readOnly is not editable through settings — lifting the lock is exactly what a read-only board refuses. ' +
+        'Use board.lock / board.unlock, which record who did it and notify connected clients.',
       400
     )
   }

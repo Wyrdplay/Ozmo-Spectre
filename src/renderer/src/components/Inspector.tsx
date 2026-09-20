@@ -10,6 +10,7 @@ import {
   useCopyFlash, useOrderedTypes, useRelStyles, useTypeStyles
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
+import { lockedProps, useBoardLock } from './BoardLock'
 import { timeAgo } from '@/lib/markdown'
 
 /** Confirm dialog for the action terminal verb: optional note, then the node is removed. */
@@ -612,10 +613,20 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
     if (focusModal === 'graduate' && detail.tags.includes('answered')) setGraduateOpen(true)
   }, [focusModal, detail, id])
 
+  // Read once for every control below. Text stays `readOnly` rather than
+  // `disabled` so a closed board can still be selected and copied from — reading
+  // is the thing it is still for.
+  const lock = useBoardLock()
+  const canAnnotate = useStore((s) => s.canAnnotate())
+
   if (!detail) return null
   const meta = styleOf(detail.type)
 
   const patch = async (p: Record<string, unknown>): Promise<void> => {
+    // The funnel for title, stage, progress and tags. Guarded as well as the
+    // controls, because a blur can fire from a field that was focused before the
+    // lock arrived.
+    if (lock) return
     try {
       await rpc('nodes.update', { id, ...p })
     } catch (e) {
@@ -630,6 +641,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
 
   const addNote = async (): Promise<void> => {
     if (postingNote.current || !note.trim()) return
+    // `annotate`, not `write` — a viewer keeps this, a locked board does not.
+    if (!canAnnotate) return
     postingNote.current = true
     const body = note.trim()
     setNote('')
@@ -658,6 +671,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
         <input
           className="inspector-title"
           value={title}
+          readOnly={!!lock}
+          title={lock ? `This board is read-only — ${lock.message}` : undefined}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={commitTitle}
           onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
@@ -667,8 +682,9 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <select
               className="input"
               style={{ width: 'auto', padding: '4px 8px' }}
-              title="Stage — where this increment is in the pipeline"
+              title={lock ? `This board is read-only — ${lock.message}` : 'Stage — where this increment is in the pipeline'}
               value={detail.stage ?? 'concept'}
+              disabled={!!lock}
               onChange={(e) => patch({ stage: e.target.value })}
             >
               {WARP_STAGES.map((s) => (
@@ -680,7 +696,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <button
               className="btn sm"
               style={{ background: meta.color, borderColor: meta.color, color: '#1a2e05', fontWeight: 700 }}
-              title="Complete this action — the spec absorbed it, the node is removed"
+              title={lock ? `This board is read-only — ${lock.message}` : 'Complete this action — the spec absorbed it, the node is removed'}
+              disabled={!!lock}
               onClick={() => setCompleteOpen(true)}
             >
               ✓ action it
@@ -699,7 +716,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <button
               className="btn sm"
               style={{ background: meta.color, borderColor: meta.color, color: '#2a1403', fontWeight: 700 }}
-              title="Answer this question — the answer lands in the spec body, the record stays (dimmed)"
+              title={lock ? `This board is read-only — ${lock.message}` : 'Answer this question — the answer lands in the spec body, the record stays (dimmed)'}
+              disabled={!!lock}
               onClick={() => setAnswerOpen(true)}
             >
               ✎ answer…
@@ -709,7 +727,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <button
               className="btn sm"
               style={{ color: meta.color }}
-              title="Graduate — turn the answer into a durable node (principle by default), linked back to this question"
+              title={lock ? `This board is read-only — ${lock.message}` : 'Graduate — turn the answer into a durable node (principle by default), linked back to this question'}
+              disabled={!!lock}
               onClick={() => setGraduateOpen(true)}
             >
               ⤴ graduate…
@@ -724,6 +743,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
                 max={100}
                 value={detail.progress ?? eff}
                 style={{ flex: 1, accentColor: meta.color }}
+                {...lockedProps(lock)}
                 onChange={(e) => setDetail({ ...detail, progress: Number(e.target.value) })}
                 onMouseUp={(e) => patch({ progress: Number((e.target as HTMLInputElement).value) })}
               />
@@ -738,7 +758,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             </button>
           )}
         </div>
-        <TagsEditor tags={detail.tags} onChange={(tags) => patch({ tags })} />
+        <TagsEditor tags={detail.tags} disabled={!!lock} onChange={(tags) => patch({ tags })} />
       </div>
 
       <div className="tabs">
@@ -779,7 +799,15 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             ))}
             <textarea
               className="input"
-              placeholder="Add a note… (enter to post, shift+enter for newline)"
+              placeholder={
+                canAnnotate
+                  ? 'Add a note… (enter to post, shift+enter for newline)'
+                  : lock
+                    ? 'This board is read-only — notes are closed too'
+                    : 'Viewing only'
+              }
+              disabled={!canAnnotate}
+              title={lock ? `This board is read-only — ${lock.message}` : undefined}
               value={note}
               onChange={(e) => setNote(e.target.value)}
               onKeyDown={(e) => {
@@ -862,7 +890,10 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10, display: 'flex', gap: 8 }}>
               <button
                 className="btn sm ghost"
-                title="Change this node's type in place — same id, links, tags, notes and history"
+                title={lock
+                  ? `This board is read-only — ${lock.message}`
+                  : "Change this node's type in place — same id, links, tags, notes and history"}
+                disabled={!!lock}
                 onClick={() => setConvertOpen(true)}
               >
                 ⇄ convert to…
@@ -870,13 +901,16 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
               {detail.type !== 'warp' && (
                 <button
                   className="btn sm ghost"
-                  title="Archive with a note — kept and dimmed, out of the backlog, reversible"
+                  title={lock
+                    ? `This board is read-only — ${lock.message}`
+                    : 'Archive with a note — kept and dimmed, out of the backlog, reversible'}
+                  disabled={!!lock}
                   onClick={() => setPruneOpen(true)}
                 >
                   prune…
                 </button>
               )}
-              <button className="btn sm danger" onClick={() => setConfirmDel(true)}>Delete {detail.type}…</button>
+              <button className="btn sm danger" {...lockedProps(lock)} onClick={() => setConfirmDel(true)}>Delete {detail.type}…</button>
             </div>
           </div>
         )}
@@ -964,6 +998,11 @@ function EdgeInspector({ id }: { id: string }): React.JSX.Element | null {
     }
   }, [id, detailVersion])
 
+  // Every edge mutation — label, relationships, annotate, delete — goes through
+  // `call` below, so one guard there covers the panel.
+  const lock = useBoardLock()
+  const canAnnotate = useStore((s) => s.canAnnotate())
+
   if (!edge) return null
   const rels = edgeRelationships(edge)
   const headColor = rels.length === 1 ? relOf(rels[0].type).color
@@ -972,6 +1011,9 @@ function EdgeInspector({ id }: { id: string }): React.JSX.Element | null {
   const titleOf = (nid: string): string => (nid === edge.sourceId ? edge.sourceTitle : edge.targetTitle)
 
   const call = async (method: string, p: Record<string, unknown>): Promise<void> => {
+    // `edges.annotate` is the one verb here a viewer keeps, so it asks the
+    // annotate predicate; everything else is a write. Both are false under lock.
+    if (method === 'edges.annotate' ? !canAnnotate : !!lock) return
     try {
       await rpc(method, { id, ...p })
     } catch (e) {

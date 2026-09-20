@@ -6,6 +6,7 @@ import {
 import { useStore } from '@/store'
 import { rpc } from '@/api'
 import { FlagChips, Modal, ProgressBar, TypeDot, flagDecor, flagRowStyle, useCopyFlash, useFlagRules, useTypeStyles } from './widgets'
+import { useBoardLock } from './BoardLock'
 import { buildSweepPrompt, computeClosure } from '@/lib/review'
 
 /**
@@ -36,6 +37,7 @@ function StageIds({ warps }: { warps: WarpSummary[] }): React.JSX.Element {
  * inspector (goal spec, members + addressed nodes under Links).
  */
 export function WarpsView(): React.JSX.Element {
+  const lock = useBoardLock()
   const warps = useStore((s) => s.warps)
   const refreshWarps = useStore((s) => s.refreshWarps)
   const graph = useStore((s) => s.graph)
@@ -90,6 +92,8 @@ export function WarpsView(): React.JSX.Element {
     const id = dragId
     setDragId(null)
     if (!id) return
+    // Moving a card between columns IS the stage change — a write.
+    if (lock) return
     const w = warps.find((x) => x.warp.id === id)
     if (!w || w.warp.stage === stage) return
     try {

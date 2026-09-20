@@ -28,7 +28,6 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import matter from 'gray-matter'
-import { app } from 'electron'
 import { unifiedDiff } from '@shared/diff'
 import type {
   InstalledSkill, SkillDriftState, SkillRow, SkillTarget, SkillTargetConfig, SkillsPayload, SpecNode
@@ -36,6 +35,7 @@ import type {
 import * as db from './db'
 import * as svc from './services'
 import * as vault from './vault'
+import { appDir } from './paths'
 import { GLOBAL_SKILL_TARGET_ID, getSettings, getSkillTargets, setSkillTargets } from './settings'
 import { emitEvent } from './events'
 
@@ -146,7 +146,7 @@ function gitFacts(root: string): { isGitRepo: boolean; branch: string | null } {
  *  runs out of an asar with no `.git` and gets no self target. */
 function selfRoot(): string | null {
   try {
-    const p = app.getAppPath()
+    const p = appDir()
     return path.isAbsolute(p) && fs.existsSync(path.join(p, '.git')) ? path.resolve(p) : null
   } catch {
     return null

@@ -464,6 +464,14 @@ export function GraphView(): React.JSX.Element {
   const [autoPin, setAutoPin] = useState(true)
   const autoPinRef = useRef(autoPin)
   autoPinRef.current = autoPin
+  // The canvas writes from pointer and key handlers that close over stale
+  // renders, so the lock needs a ref as well as the reactive read below.
+  const lock = useStore((s) => s.session?.readOnly ?? null)
+  const lockRef = useRef(lock)
+  lockRef.current = lock
+  // Reactive, unlike the getState() read this replaced: a `board.locked` event
+  // arriving over the stream must take the button away without a reload.
+  const canWrite = useStore((s) => s.canWrite())
   /** selMenu: right-click landed on a member of a 2+ selection — show the selection-wide menu */
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeId: string; sub: 'warp' | 'area' | null; selMenu: boolean } | null>(null)
   const ctxMenuRef = useRef<HTMLDivElement>(null)
@@ -1854,6 +1862,15 @@ export function GraphView(): React.JSX.Element {
   /** drag-end persistence for one node: auto-pin (or keep an existing pin), guarded
    *  against stale payloads until the PATCH round-trips. Same rules single or group. */
   const persistDrop = (n: SimNode): void => {
+    // A closed board does not remember where you put things. Release the node
+    // back to the simulation instead of leaving it parked at a position that
+    // will not survive the next refresh: a drag that looks like it stuck and has
+    // not is worse than one that visibly springs back.
+    if (lockRef.current) {
+      n.fx = null
+      n.fy = null
+      return
+    }
     if (autoPinRef.current) {
       n.data.pinned = true
       guardDrop(n)
@@ -2022,6 +2039,8 @@ export function GraphView(): React.JSX.Element {
       // preventDefault so the browser print dialog never appears.
       if (matches('pin-toggle', e)) {
         e.preventDefault()
+        // pinning IS a write — it persists x/y and the pinned flag
+        if (lockRef.current) return
         const sel = selectionRef.current
         if (sel?.kind !== 'nodes' || !sel.ids.length) return
         const members = nodesRef.current.filter((n) => sel.ids.includes(n.id))
@@ -2055,7 +2074,8 @@ export function GraphView(): React.JSX.Element {
         const sel = selectionRef.current
         if (!dragRef.current && sel?.kind === 'nodes' && sel.ids.length >= 2) select(null)
       }
-      if (matches('delete', e) && selectionRef.current) {
+      // A confirm dialog that can only end in a refusal should not open at all.
+      if (matches('delete', e) && selectionRef.current && !lockRef.current) {
         const sel = selectionRef.current
         if (sel.kind === 'nodes') {
           if (sel.ids.length >= 2) {
@@ -2458,7 +2478,7 @@ export function GraphView(): React.JSX.Element {
           re-layout
         </button>
         <div className="divider" />
-        {useStore.getState().canWrite() && (
+        {canWrite && (
           <button className="btn sm primary" onClick={() => showQuickAdd()}>+ node</button>
         )}
       </div>
