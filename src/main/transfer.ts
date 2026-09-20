@@ -134,6 +134,13 @@ interface ActRow {
 const byId = <T extends { id: string }>(a: T, b: T): number => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 export function exportProject(opts: ExportOptions, source: BundleSource): ProjectBundle {
+  // Checked before it reaches the driver. An absent projectId binds as undefined,
+  // which sql.js answers with "Wrong API use : tried to bind a value of an
+  // unknown type" — a 500 that describes the database's disappointment rather
+  // than the caller's mistake.
+  if (typeof opts?.projectId !== 'string' || !opts.projectId.trim()) {
+    throw new ApiError('projectId is required', 400)
+  }
   const project = db.get<ProjectRow>('SELECT * FROM projects WHERE id = ?', [opts.projectId])
   if (!project) throw new ApiError('project not found', 404)
   const pid = project.id
