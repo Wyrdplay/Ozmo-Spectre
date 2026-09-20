@@ -273,10 +273,20 @@ function assertMayDecideAbout(c: Ctx, targetId: string, granting?: AccountRole):
 const capabilityOf = (method: string): Capability => CAPABILITY[method] ?? 'membership'
 
 /**
- * The two verbs that must answer while the board is read-only, or a locked board
- * could never be unlocked and the lock would be a one-way door.
+ * What must still answer while the board is read-only.
+ *
+ * board.lock / board.unlock, or the lock would be a one-way door.
+ *
+ * And ALL of workspaces.*, which is not a detail. A workspace is which board
+ * this window opens — machine state, not this board's contents — and refusing
+ * it locked the app INSIDE the board it was being told to leave: the chooser
+ * would not load, so the one gesture that reaches the board the message points
+ * at was the one the message made impossible. A lock freezes a board; it does
+ * not imprison the window on it. (These stay guarded by atTheMachineOnly, so
+ * this exempts nothing from anybody but the desktop renderer.)
  */
 const LOCK_EXEMPT = new Set(['board.lock', 'board.unlock'])
+const LOCK_EXEMPT_PREFIX = /^workspaces\./
 
 /**
  * A READ-ONLY BOARD REFUSES EVERYTHING BUT READS.
@@ -295,7 +305,7 @@ const LOCK_EXEMPT = new Set(['board.lock', 'board.unlock'])
 function refuseIfReadOnly(method: string): void {
   const lock = getBoardLock()
   if (!lock) return
-  if (LOCK_EXEMPT.has(method)) return
+  if (LOCK_EXEMPT.has(method) || LOCK_EXEMPT_PREFIX.test(method)) return
   if (capabilityOf(method) === 'read') return
   throw new svc.ApiError(lock.message, 403, {
     readOnly: true,
