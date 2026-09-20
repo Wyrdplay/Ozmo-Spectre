@@ -55,6 +55,12 @@ export interface HostCapabilities {
    * BOARD, which every client may edit.
    */
   configureHost: boolean
+  /**
+   * Choose which board this app opens. A DESKTOP question: the list of
+   * workspaces is per machine, and a browser client is already pointed at the
+   * only core it can see — the one that served it.
+   */
+  chooseWorkspace: boolean
 }
 
 export interface Host {

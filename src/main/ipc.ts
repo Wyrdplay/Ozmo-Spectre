@@ -6,9 +6,38 @@ import { ApiError } from './services'
 import { getSettings } from './settings'
 import * as db from './db'
 import * as vault from './vault'
+import { forwardRpc, getRemoteTarget } from './remote'
+import { setWorkspaceToken } from './workspaces'
+
+/**
+ * Verbs that are about THIS MACHINE and are never forwarded. Everything else on
+ * a server workspace belongs to the remote board, including the session: you
+ * sign in to the board you are looking at, not to the app.
+ */
+const LOCAL_ONLY = /^workspaces\./
 
 export function registerIpc(): void {
   ipcMain.handle('rpc', async (_e, method: string, payload: unknown) => {
+    const remote = getRemoteTarget()
+    if (remote && !LOCAL_ONLY.test(method)) {
+      const res = await forwardRpc(remote.target, method, payload)
+      // The CREDENTIAL stays in the main process. The renderer asks the remote
+      // for a session in the ordinary way and never has to know that the token
+      // it got back has to outlive the window — a session belongs to a
+      // workspace, and this is the only place that knows which one is open.
+      if (method === 'session.request' && res.ok) {
+        const token = (res.data as { token?: string } | undefined)?.token
+        if (token) {
+          remote.target.token = token
+          setWorkspaceToken(remote.workspaceId, token)
+        }
+      }
+      if (method === 'session.signOut' && res.ok) {
+        remote.target.token = null
+        setWorkspaceToken(remote.workspaceId, null)
+      }
+      return res
+    }
     try {
       // AT THE MACHINE. This renderer lives inside the process that owns the
       // database and the vault; both are on this person's own disk. A login

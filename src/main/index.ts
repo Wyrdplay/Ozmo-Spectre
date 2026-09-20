@@ -1,17 +1,19 @@
 import { app, BrowserWindow } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { getSettings } from './settings'
-import { openDb, flushDb } from './db'
-import * as vault from './vault'
-import { registerWatcherHandlers } from './services'
-import { seedIfEmpty } from './seed'
-import { startServer, stopServer, getPort } from './server'
 import { registerIpc } from './ipc'
-import { setAccountProvider } from './account'
-import { localAccounts } from './account-local'
-import { setAppInfoProvider } from './registry'
 import { onEvent } from './events'
+import { setHostPaths } from './paths'
+import { initLifecycle, openWorkspace, closeWorkspace } from './lifecycle'
+
+// The desktop host answers the three path questions the core cannot. Installed
+// at module scope, but every accessor is lazy: `app.getPath` is not called until
+// something actually reads a path, which is after `whenReady`.
+setHostPaths({
+  documents: () => app.getPath('documents'),
+  userData: () => app.getPath('userData'),
+  appDir: () => app.getAppPath()
+})
 
 let mainWindow: BrowserWindow | null = null
 
@@ -78,28 +80,8 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  const settings = getSettings()
-  vault.initVault(settings.vaultPath)
-  await openDb(path.join(settings.vaultPath, '.ozmo', 'spec.db'))
-  registerWatcherHandlers()
-  // Accounts before the server: the first request can arrive the instant it
-  // listens, and a gate that is not installed yet is a gate that is open.
-  setAccountProvider(localAccounts())
-  seedIfEmpty()
-  vault.startWatcher()
-
-  const port = await startServer(settings.apiPort, () => mainWindow, app.getVersion())
-  console.log(`[ozmo] API listening on http://127.0.0.1:${port}  (docs: /llms.txt)`)
-  console.log(`[ozmo] vault: ${settings.vaultPath}`)
-
-  setAppInfoProvider(() => ({
-    version: app.getVersion(),
-    port: getPort(),
-    apiBase: `http://127.0.0.1:${getPort()}`,
-    vaultPath: getSettings().vaultPath,
-    humanName: getSettings().humanName,
-    platform: process.platform
-  }))
+  initLifecycle({ version: app.getVersion(), getWindow: () => mainWindow })
+  await openWorkspace()
 
   registerIpc()
   onEvent((evt) => {
@@ -118,7 +100,5 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  flushDb()
-  stopServer()
-  vault.stopWatcher()
+  void closeWorkspace()
 })

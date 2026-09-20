@@ -44,6 +44,33 @@ function writeToken(token: string | null): void {
   }
 }
 
+/**
+ * A token handed over out of band, in the URL.
+ *
+ * The owner of a board cannot ask for a session over the wire — account-local
+ * refuses their name on purpose — and a container has no caller who is ever "at
+ * the machine" to be served instead. So the only way back in is a token minted
+ * by whoever holds the host (OZMO_OWNER_RECOVERY in headless.ts), and telling
+ * that person to paste it into devtools is not a recovery path.
+ *
+ * Taken once, then REMOVED from the address bar: a credential in a URL is a
+ * credential in browser history, in a screenshot, and in whatever gets pasted
+ * into a chat window next.
+ */
+function adoptTokenFromQuery(): void {
+  const params = new URLSearchParams(window.location.search)
+  const handed = params.get('session')
+  if (!handed) return
+  writeToken(handed)
+  params.delete('session')
+  const q = params.toString()
+  try {
+    window.history.replaceState({}, '', window.location.pathname + (q ? `?${q}` : '') + window.location.hash)
+  } catch {
+    /* an embedded view may refuse to rewrite history; the token is stored anyway */
+  }
+}
+
 function resolveApiBase(): string {
   const fromQuery = new URLSearchParams(window.location.search).get('api')
   if (fromQuery) {
@@ -67,6 +94,7 @@ function resolveApiBase(): string {
 
 export function webHost(actor = 'web'): Host {
   const base = resolveApiBase()
+  adoptTokenFromQuery()
   let token = readToken()
 
   return {
@@ -79,7 +107,10 @@ export function webHost(actor = 'web'): Host {
       revealFile: false,
       openInObsidian: false,
       relaunch: false,
-      configureHost: false
+      configureHost: false,
+      // A browser client is already pointed at the only core it can see: the one
+      // that served it. Choosing between boards is a desktop question.
+      chooseWorkspace: false
     },
 
     sessionToken: () => token,

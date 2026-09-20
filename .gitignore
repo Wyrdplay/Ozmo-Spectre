@@ -20,3 +20,6 @@ id_rsa
 id_ed25519
 .npmrc
 .netrc
+
+# docker development instance: vault + local state
+.docker/

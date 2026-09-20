@@ -35,7 +35,8 @@ export function electronHost(): Host {
       revealFile: true,
       openInObsidian: true,
       relaunch: true,
-      configureHost: true
+      configureHost: true,
+      chooseWorkspace: true
     },
     call: (method, payload) => b().call(method, payload),
     // Nothing to hold. The desktop renderer is inside the core's own process

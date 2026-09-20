@@ -65,6 +65,9 @@ export function Sidebar(): React.JSX.Element {
   const session = useStore((s) => s.session)
   const canWrite = useStore((s) => s.canWrite())
   const projectId = useStore((s) => s.projectId)
+  const workspaces = useStore((s) => s.workspaces)
+  const setWorkspaceGate = useStore((s) => s.setWorkspaceGate)
+  const activeWorkspace = workspaces?.workspaces.find((w) => w.id === workspaces.activeId) ?? null
   const setProject = useStore((s) => s.setProject)
   const view = useStore((s) => s.view)
   const setView = useStore((s) => s.setView)
@@ -163,7 +166,21 @@ export function Sidebar(): React.JSX.Element {
         </svg>
         <div>
           Spectre
-          <span className="sub">human + agent canvas</span>
+          {/* Which board you are on belongs in the chrome, not in a settings
+              page: once there is more than one it is the first thing you need
+              to know, and the last thing you should have to go looking for. */}
+          {activeWorkspace ? (
+            <button
+              className="sub ws-switch"
+              onClick={() => setWorkspaceGate(true)}
+              title={`${activeWorkspace.kind === 'local' ? activeWorkspace.vaultPath : activeWorkspace.url}
+Switch workspace`}
+            >
+              {activeWorkspace.name} ›
+            </button>
+          ) : (
+            <span className="sub">human + agent canvas</span>
+          )}
         </div>
       </div>
 

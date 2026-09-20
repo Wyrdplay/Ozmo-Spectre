@@ -1,0 +1,179 @@
+/* The workspace chooser — the screen in front of the door.
+   Its own file, like onboarding.css: a full-screen gate is not part of the
+   board's chrome and should not have to share a stylesheet with it. */
+
+.ws-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 24px;
+  z-index: 50;
+}
+
+.ws-panel {
+  width: min(720px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--bg-panel, #11151d);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px 24px;
+}
+
+.ws-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.ws-head h1 {
+  margin: 0;
+  font-size: 19px;
+  letter-spacing: 0.2px;
+}
+.ws-sub {
+  margin: 4px 0 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.ws-empty {
+  color: var(--text-faint);
+  font-size: 12.5px;
+  margin: 0 0 16px;
+}
+
+.ws-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-row {
+  display: grid;
+  grid-template-columns: 58px minmax(90px, auto) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-active);
+}
+.ws-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft, rgba(56, 189, 248, 0.08));
+}
+
+/* the kind is the first thing to read: it says who runs the core */
+.ws-kind {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  text-align: center;
+  padding: 3px 0;
+  border-radius: 10px;
+}
+.ws-kind.local {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.12);
+}
+.ws-kind.server {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.ws-name {
+  font-weight: 650;
+  font-size: 13px;
+}
+.ws-open {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.ws-where {
+  color: var(--text-faint);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-note {
+  color: #f59e0b;
+  font-style: normal;
+}
+
+.ws-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ws-err {
+  color: #f87171;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
+.ws-add {
+  display: flex;
+  gap: 8px;
+}
+
+.ws-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.ws-form label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.ws-pick {
+  display: flex;
+  gap: 8px;
+}
+.ws-pick .input {
+  flex: 1;
+}
+.ws-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* the switcher in the sidebar brand — a label that happens to be clickable,
+   not a button that happens to hold a label */
+.ws-switch {
+  display: block;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ws-switch:hover {
+  color: var(--accent);
+}
+
+.ws-found {
+  color: #4ade80;
+  font-size: 11.5px;
+  margin: 2px 0 0;
+}
