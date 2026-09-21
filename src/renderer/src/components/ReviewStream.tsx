@@ -1,10 +1,21 @@
 import React, { useRef, useState } from 'react'
 import { useStore } from '@/store'
-import { rpc } from '@/api'
+import { rpc, RpcError } from '@/api'
 import { NODE_TYPES, type NodeType, type SpecNode } from '@shared/types'
 import { isWaived, byRank, type Closure } from '@/lib/review'
 import { TypeDot } from './widgets'
 import '../review-stream.css'
+
+/**
+ * Both calls this file makes are writes — filing a note and designating one — so
+ * unlike the review room's wrapper there is no read list to keep. Same shape as
+ * ReviewsView's rpcW so the two read alike.
+ */
+async function rpcW<T>(method: string, payload?: unknown): Promise<T> {
+  const lock = useStore.getState().session?.readOnly
+  if (lock) throw new RpcError(lock.message, 403, { readOnly: true })
+  return rpc<T>(method, payload)
+}
 
 /**
  * THE REVIEW IS WRITING NOTES.
@@ -42,6 +53,7 @@ export function NoteStream({ warp, closure, derivedOf, aboutId, onAbout, onOpen,
   onWaive: (node: SpecNode) => void
 }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
+  const lock = useStore((s) => s.session?.readOnly ?? null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const captureRef = useRef<HTMLInputElement>(null)
@@ -60,7 +72,7 @@ export function NoteStream({ warp, closure, derivedOf, aboutId, onAbout, onOpen,
       // A note MEMBERS what it is about — that is what makes it cover the thing.
       // With nothing armed it members the warp, which is a note about the
       // increment as a whole rather than an orphan.
-      await rpc('nodes.create', {
+      await rpcW('nodes.create', {
         projectId: warp.projectId,
         type: 'feedback',
         title,
@@ -94,9 +106,12 @@ export function NoteStream({ warp, closure, derivedOf, aboutId, onAbout, onOpen,
           className="input rs-input"
           ref={captureRef}
           autoFocus
-          placeholder="what did you notice? — enter to file, and keep going"
+          placeholder={lock
+            ? 'This board is read-only — notes are closed'
+            : 'what did you notice? — enter to file, and keep going'}
+          title={lock ? lock.message : undefined}
           value={text}
-          disabled={busy}
+          disabled={busy || !!lock}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -171,7 +186,7 @@ function NoteRow({ note, work, warp, closure, onOpen, onWaive }: {
     }
     setBusy(true)
     try {
-      await rpc('nodes.designate', { id: note.id, type, disposition, warpId: warp.id })
+      await rpcW('nodes.designate', { id: note.id, type, disposition, warpId: warp.id })
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
     } finally {

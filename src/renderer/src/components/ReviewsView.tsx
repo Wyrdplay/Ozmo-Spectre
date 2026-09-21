@@ -11,6 +11,30 @@ import {
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
 import { NoteStream } from './ReviewStream'
+
+/**
+ * Every call this view makes, with the board's lock respected first.
+ *
+ * The review room is the densest write surface in the app — a rank drag, a pass,
+ * a waive, a ship, a send-back, half a dozen selects — spread across nine
+ * components in one file. Gating each affordance would be forty places to
+ * remember, so the calls are gated instead and the refusal carries the
+ * operator's own message rather than a round trip that was always going to come
+ * back 403.
+ *
+ * The reads are named rather than the writes: a verb nobody listed is treated as
+ * a write, so the careless path is the safe one and a new call added here is
+ * refused on a closed board until somebody decides otherwise.
+ */
+const REVIEW_READS = new Set(['activity.list', 'nodes.get', 'nodes.diff'])
+
+async function rpcW<T>(method: string, payload?: unknown): Promise<T> {
+  const lock = useStore.getState().session?.readOnly
+  if (lock && !REVIEW_READS.has(method)) {
+    throw new RpcError(lock.message, 403, { readOnly: true })
+  }
+  return rpc<T>(method, payload)
+}
 import { renderMarkdown, timeAgo } from '@/lib/markdown'
 import {
   buildSweepPrompt, byRank, computeClosure, isWaived, moveInList, rankPlan,
@@ -83,11 +107,11 @@ function DesignateModal({ node, type, verb, container, onClose }: {
     if (busy) return
     setBusy(true)
     try {
-      await rpc('nodes.convert', { id: node.id, type })
+      await rpcW('nodes.convert', { id: node.id, type })
       let unscoped = false
       if (memberEdge && !scoped) {
         try {
-          await rpc('edges.removeRelationship', { id: memberEdge.id, type: 'member' })
+          await rpcW('edges.removeRelationship', { id: memberEdge.id, type: 'member' })
           unscoped = true
         } catch (e) {
           toast(`designated, but leaving the warp failed: ${e instanceof Error ? e.message : e}`)
@@ -102,9 +126,9 @@ function DesignateModal({ node, type, verb, container, onClose }: {
         {
           label: 'Undo',
           run: () => {
-            rpc('nodes.convert', { id: node.id, type: was })
+            rpcW('nodes.convert', { id: node.id, type: was })
               .then(() => (unscoped && container
-                ? rpc('edges.create', { sourceId: node.id, targetId: container.id, type: 'member' })
+                ? rpcW('edges.create', { sourceId: node.id, targetId: container.id, type: 'member' })
                 : Promise.resolve()))
               .then(() => toast(`reverted to ${was}`, 'info'))
               .catch((e) => toast(e instanceof Error ? e.message : String(e)))
@@ -214,7 +238,7 @@ function useRankDrag(items: SpecNode[]): {
     const ordered = moveInList(items, from, to)
     const plan = rankPlan(ordered, movedId)
     try {
-      for (const p of plan) await rpc('nodes.update', { id: p.id, rank: p.rank })
+      for (const p of plan) await rpcW('nodes.update', { id: p.id, rank: p.rank })
     } catch (e) {
       toast(`reorder failed: ${e instanceof Error ? e.message : e}`)
     }
@@ -410,7 +434,7 @@ function FeedbackInbox({ inbox, maps }: { inbox: SpecNode[]; maps: FeedbackMaps 
     setBusy(true)
     const warp = graph.nodes.find((n) => n.id === warpId)
     try {
-      for (const nid of ids) await rpc('edges.create', { sourceId: nid, targetId: warpId, type: 'member' })
+      for (const nid of ids) await rpcW('edges.create', { sourceId: nid, targetId: warpId, type: 'member' })
       setSelected(new Set())
       toast(`sent ${ids.length} to "${warp?.title ?? warpId}" — it lives in that review now`, 'info')
     } catch (e) {
@@ -522,7 +546,7 @@ function WarpRoom({ id }: { id: string }): React.JSX.Element {
   // the diff boundary: the warp's latest "stage → implement", else its creation
   useEffect(() => {
     let alive = true
-    rpc<{ subjectId: string; summary: string; at: number }[]>('activity.list', { projectId, limit: 500 })
+    rpcW<{ subjectId: string; summary: string; at: number }[]>('activity.list', { projectId, limit: 500 })
       .then((acts) => {
         if (!alive) return
         const entered = acts.find((a) => a.subjectId === id && a.summary.includes('stage → implement'))
@@ -548,7 +572,7 @@ function WarpRoom({ id }: { id: string }): React.JSX.Element {
 
   const sweep = async (): Promise<void> => {
     try {
-      await rpc('nodes.requestSweep', { id: warp.id })
+      await rpcW('nodes.requestSweep', { id: warp.id })
       const prompt = buildSweepPrompt(info?.apiBase ?? 'http://127.0.0.1:4820', projectId ?? '', warp)
       await navigator.clipboard.writeText(prompt)
       setSweepCopied(true)
@@ -840,12 +864,12 @@ function PassModal({ node, warp, onClose }: { node: SpecNode; warp: SpecNode; on
     inFlight.current = true
     setBusy(true)
     try {
-      const fb = await rpc<SpecNode>('nodes.pass', { id: node.id, warpId: warp.id, body: body.trim() })
+      const fb = await rpcW<SpecNode>('nodes.pass', { id: node.id, warpId: warp.id, body: body.trim() })
       onClose()
       toast(`passed — "${node.title}" is covered and waived`, 'info', {
         label: 'Undo',
         run: () => {
-          rpc('nodes.unwaive', { id: fb.id, note: 'pass undone' })
+          rpcW('nodes.unwaive', { id: fb.id, note: 'pass undone' })
             .then(() => toast('pass undone — the feedback is open again', 'info'))
             .catch((e) => toast(e instanceof Error ? e.message : String(e)))
         }
@@ -919,7 +943,7 @@ function ContentPanel({ warp, nodeId, since }: { warp: SpecNode; nodeId: string;
 
   useEffect(() => {
     let alive = true
-    rpc<NodeDetail>('nodes.get', { id: nodeId })
+    rpcW<NodeDetail>('nodes.get', { id: nodeId })
       .then((d) => {
         if (!alive) return
         setDetail(d)
@@ -940,7 +964,7 @@ function ContentPanel({ warp, nodeId, since }: { warp: SpecNode; nodeId: string;
 
   useEffect(() => {
     if (!showDiff || diff || since == null) return
-    rpc<NodeDiff>('nodes.diff', { id: nodeId, since }).then(setDiff).catch(() => setDiffErr(true))
+    rpcW<NodeDiff>('nodes.diff', { id: nodeId, since }).then(setDiff).catch(() => setDiffErr(true))
   }, [showDiff, diff, nodeId, since])
 
   const reviewOpen = warpStageOpen(warp.stage)
@@ -958,7 +982,7 @@ function ContentPanel({ warp, nodeId, since }: { warp: SpecNode; nodeId: string;
       return
     }
     try {
-      await rpc('nodes.update', { id: detail.id, title: t })
+      await rpcW('nodes.update', { id: detail.id, title: t })
     } catch (e) {
       setTitle(detail.title)
       toast(e instanceof Error ? e.message : String(e))
@@ -971,7 +995,7 @@ function ContentPanel({ warp, nodeId, since }: { warp: SpecNode; nodeId: string;
     const body = note.trim()
     setNote('') // clear first: a key repeat must not find the same text still there
     try {
-      await rpc('nodes.annotate', { id: detail.id, body })
+      await rpcW('nodes.annotate', { id: detail.id, body })
     } catch (e) {
       setNote(body)
       toast(e instanceof Error ? e.message : String(e))
@@ -1054,7 +1078,7 @@ function ContentPanel({ warp, nodeId, since }: { warp: SpecNode; nodeId: string;
                 value={detail.content}
                 onSave={async (content) => {
                   try {
-                    await rpc('nodes.setContent', { id: detail.id, content })
+                    await rpcW('nodes.setContent', { id: detail.id, content })
                   } catch (e) {
                     toast(e instanceof Error ? e.message : String(e))
                     throw e
@@ -1132,7 +1156,7 @@ function FeedbackPanel({ warp, closure, maps, selectedId, aboutId, onSelect, onC
     const title = capture.trim()
     const detail = body.trim()
     try {
-      const created = await rpc<SpecNode>('nodes.create', {
+      const created = await rpcW<SpecNode>('nodes.create', {
         projectId,
         type: 'feedback',
         title,
@@ -1147,7 +1171,7 @@ function FeedbackPanel({ warp, closure, maps, selectedId, aboutId, onSelect, onC
         // meant to cover stayed uncovered with no error the reviewer could act
         // on. The label matters: it is what the room reads back as "discusses".
         try {
-          await rpc('edges.create', {
+          await rpcW('edges.create', {
             projectId, sourceId: created.id, targetId: about.id, type: 'relates', label: 'discusses'
           })
         } catch (e) {
@@ -1325,7 +1349,7 @@ function FeedbackRow({ node, maps, host, container, selected, active, onToggle, 
     if (busy) return
     setBusy(true)
     try {
-      await rpc('nodes.unwaive', { id: node.id, note: 'waive undone — back in the review' })
+      await rpcW('nodes.unwaive', { id: node.id, note: 'waive undone — back in the review' })
       toast('waive undone — this feedback needs a designation again', 'info')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
@@ -1428,10 +1452,10 @@ function WaiveModal({ node, target, onClose }: { node: SpecNode; target: SpecNod
     if (busy || !note.trim()) return
     setBusy(true)
     try {
-      await rpc('nodes.waive', { id: node.id, note: note.trim(), ...(into ? { into: into.id } : {}) })
+      await rpcW('nodes.waive', { id: node.id, note: note.trim(), ...(into ? { into: into.id } : {}) })
       if (pruneTarget && target) {
         try {
-          await rpc('nodes.prune', { id: target.id, note: note.trim() })
+          await rpcW('nodes.prune', { id: target.id, note: note.trim() })
         } catch (e) {
           toast(`waived, but pruning the target failed: ${e instanceof Error ? e.message : e}`)
         }
@@ -1440,7 +1464,7 @@ function WaiveModal({ node, target, onClose }: { node: SpecNode; target: SpecNod
       toast(into ? 'waived — covered' : 'waived', 'info', {
         label: 'Undo',
         run: () => {
-          rpc('nodes.unwaive', { id: node.id, note: 'waive undone' })
+          rpcW('nodes.unwaive', { id: node.id, note: 'waive undone' })
             .then(() => toast('waive undone', 'info'))
             .catch((e) => toast(e instanceof Error ? e.message : String(e)))
         }
@@ -1517,8 +1541,8 @@ function ActionsPanel({ warp, closure, derived, maps, onSelect }: {
   // address now = it joins the increment AND gates it: member + blocks
   const addressNow = async (actionId: string): Promise<void> => {
     try {
-      await rpc('edges.create', { sourceId: actionId, targetId: warp.id, type: 'member' })
-      await rpc('edges.create', { sourceId: actionId, targetId: warp.id, type: 'blocks' })
+      await rpcW('edges.create', { sourceId: actionId, targetId: warp.id, type: 'member' })
+      await rpcW('edges.create', { sourceId: actionId, targetId: warp.id, type: 'blocks' })
       toast('address now — it is in the increment and blocks the ship until completed', 'info')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
@@ -1646,7 +1670,7 @@ function ClosePanel({ warp, closure, onSelect }: {
     setBusy(true)
     setRefusal(null)
     try {
-      await rpc('nodes.update', { id: warp.id, stage: 'ship' })
+      await rpcW('nodes.update', { id: warp.id, stage: 'ship' })
       toast(`"${warp.title}" shipped — the restage IS the close`, 'info')
     } catch (e) {
       // the gate's 409 renders HERE, beside the button that earned it
@@ -1662,7 +1686,7 @@ function ClosePanel({ warp, closure, onSelect }: {
     if (!stage || busy) return
     setBusy(true)
     try {
-      await rpc('nodes.update', { id: warp.id, stage })
+      await rpcW('nodes.update', { id: warp.id, stage })
       toast(`sent back to ${stage} — the review stays open`, 'info')
       setSendBack('')
     } catch (e) {
@@ -1781,7 +1805,7 @@ function CompleteModal({ node, onClose }: { node: SpecNode; onClose: () => void 
     if (busy) return
     setBusy(true)
     try {
-      await rpc('nodes.complete', { id: node.id, ...(note.trim() ? { note: note.trim() } : {}) })
+      await rpcW('nodes.complete', { id: node.id, ...(note.trim() ? { note: note.trim() } : {}) })
       onClose()
       toast('action completed — now waive the feedback it covered', 'info')
     } catch (e) {
