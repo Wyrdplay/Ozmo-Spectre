@@ -35,6 +35,11 @@
 #    default below is a SEPARATE vault directory for exactly this reason. Point
 #    it at your real vault only when the desktop app is closed.
 
+# The project name is PINNED, not taken from the folder: the data volume is named
+# after it (ozmo-spec-engine_spectre-data), and a checkout folder renamed or cloned
+# elsewhere must still find the same volume rather than start on an empty one.
+name: ozmo-spec-engine
+
 services:
   spectre:
     build:
