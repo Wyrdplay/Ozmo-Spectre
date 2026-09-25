@@ -199,10 +199,28 @@ export function Sidebar(): React.JSX.Element {
     { key: 'warps', label: 'Warps', badge: liveWarpCount },
     { key: 'reviews', label: 'Reviews', badge: openReviewCount },
     { key: 'archive', label: 'Archive' },
+    { key: 'activity', label: 'Activity' }
+  ]
+  // Everything above is scoped to the project picked in the dropdown. These are
+  // not: skills install across every project, settings configure the app and
+  // the machine, and export is a tool rather than a view of this board. They
+  // sit apart, at the bottom, so the eye learns which half follows the picker.
+  const APP_NAV: { key: View; label: string; badge?: number }[] = [
     { key: 'agentic', label: 'Agentic', badge: driftedCount },
-    { key: 'activity', label: 'Activity' },
     { key: 'settings', label: 'Settings' }
   ]
+  const navButton = (n: { key: View; label: string; badge?: number }): React.JSX.Element => (
+    <button
+      key={n.key}
+      className={`nav-item ${view === n.key ? 'active' : ''}`}
+      onClick={() => setView(n.key)}
+      title={collapsed ? n.label : undefined}
+    >
+      {ICONS[n.key]}
+      <span className="nav-label">{n.label}</span>
+      {n.badge ? <span className="badge">{n.badge}</span> : null}
+    </button>
+  )
 
   return (
     <div className={collapsed ? 'sidebar collapsed' : 'sidebar'}>
@@ -249,27 +267,20 @@ Switch workspace`}
         </select>
       </div>
 
-      {NAV.map((n) => (
-        <button
-          key={n.key}
-          className={`nav-item ${view === n.key ? 'active' : ''}`}
-          onClick={() => setView(n.key)}
-          title={collapsed ? n.label : undefined}
-        >
-          {ICONS[n.key]}
-          <span className="nav-label">{n.label}</span>
-          {n.badge ? <span className="badge">{n.badge}</span> : null}
-        </button>
-      ))}
+      {NAV.map(navButton)}
 
-      <button
-        className="nav-item"
-        title="Export this project — or an area, a warp, a selection or a query — as one markdown document"
-        onClick={() => setExportScope('project')}
-      >
-        <span className="nav-icon" aria-hidden>⤓</span>
-        <span className="nav-label">Export…</span>
-      </button>
+      <div className="nav-group-app">
+        <div className="nav-group-label">App</div>
+        {APP_NAV.map(navButton)}
+        <button
+          className="nav-item"
+          title="Export a project — or an area, a warp, a selection or a query — as one markdown document"
+          onClick={() => setExportScope('project')}
+        >
+          <span className="nav-icon" aria-hidden>⤓</span>
+          <span className="nav-label">Export…</span>
+        </button>
+      </div>
 
       <div className="sidebar-footer">
         <button
