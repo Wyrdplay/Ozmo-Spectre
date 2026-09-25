@@ -59,6 +59,9 @@ interface ProjectRow {
 interface NodeRow {
   id: string
   project_id: string
+  graph_id?: string | null
+  is_graph?: number
+  subfolder?: string | null
   type: string
   title: string
   stage: string | null
@@ -277,6 +280,8 @@ export function exportProject(opts: ExportOptions, source: BundleSource): Projec
       slug: r.slug ?? null,
       description: r.description ?? null,
       skillOptions: r.skill_options ?? null,
+      ...(r.graph_id ? { graphId: r.graph_id } : {}),
+      ...(r.is_graph ? { isGraph: true, subfolder: r.subfolder ?? null } : {}),
       // severReferences already has a word for "this content used to be live and
       // is now a copy", and it is the word the UI already knows how to show.
       tags: materialised
@@ -545,14 +550,36 @@ export async function importProject(opts: ImportOptions, actor: string): Promise
   // what makes a folder-name collision harmless.
   const usedNames = new Set<string>()
   const relPaths = new Map<string, string>()
+  // HOME survives the trip: a node's folder is its chain of sub-graph folders,
+  // each name sanitised here (never trusted), homes outside the bundle dropped
+  const bundleById = new Map(b.nodes.map((n) => [n.id, n]))
+  const homeOf = (n: (typeof b.nodes)[number]): string | null => {
+    const g = n.graphId ? bundleById.get(n.graphId) : undefined
+    return g && g.isGraph ? g.id : null
+  }
+  const subOf = (g: (typeof b.nodes)[number]): string => vault.sanitizeFileName(g.subfolder || g.title) || 'Sub-graph'
+  const chainOf = (graphId: string | null): string[] => {
+    const parts: string[] = []
+    const seen = new Set<string>()
+    let cur = graphId
+    while (cur && !seen.has(cur)) {
+      seen.add(cur)
+      const g = bundleById.get(cur)
+      if (!g) break
+      parts.unshift(subOf(g))
+      cur = homeOf(g)
+    }
+    return parts
+  }
   for (const n of b.nodes) {
     const tf = NODE_TYPES[n.type as keyof typeof NODE_TYPES].folder
+    const dir = [...chainOf(homeOf(n)), tf].join('/')
     const base = vault.sanitizeFileName(n.title)
     let leaf = base
     let i = 2
-    while (usedNames.has(`${tf}/${leaf}`.toLowerCase())) leaf = `${base} ${i++}`
-    usedNames.add(`${tf}/${leaf}`.toLowerCase())
-    relPaths.set(n.id, path.join(folder, tf, `${leaf}.md`))
+    while (usedNames.has(`${dir}/${leaf}`.toLowerCase())) leaf = `${base} ${i++}`
+    usedNames.add(`${dir}/${leaf}`.toLowerCase())
+    relPaths.set(n.id, path.join(folder, ...chainOf(homeOf(n)), tf, `${leaf}.md`))
   }
 
   // Deferred links are only real if this board already holds the far end. The
@@ -583,12 +610,15 @@ export async function importProject(opts: ImportOptions, actor: string): Promise
         db.run(
           `INSERT INTO nodes (id, project_id, type, title, progress, pinned, x, y, file_path,
                               created_at, updated_at, created_by, rank, stage, shared,
-                              references_node_id, slug, description, skill_options)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)`,
+                              references_node_id, slug, description, skill_options,
+                              graph_id, is_graph, subfolder)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)`,
           [
             id, pid, n.type, n.title, n.progress, n.pinned, n.x, n.y, relPaths.get(n.id)!,
             n.createdAt, n.updatedAt, n.createdBy, n.rank, n.stage,
-            n.slug ?? null, n.description ?? null, n.skillOptions ?? null
+            n.slug ?? null, n.description ?? null, n.skillOptions ?? null,
+            homeOf(n) ? nodeIds.get(homeOf(n)!) ?? null : null,
+            n.isGraph ? 1 : 0, n.isGraph ? subOf(n) : null
           ]
         )
         for (const t of n.tags) db.run('INSERT INTO node_tags (node_id, tag) VALUES (?, ?)', [id, t])

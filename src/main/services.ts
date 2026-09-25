@@ -3,7 +3,7 @@ import fs from 'fs'
 import crypto from 'crypto'
 import {
   NODE_TYPES, EDGE_TYPES, RELATIONSHIP_TYPES, STAGE_PROGRESS, WARP_STAGES, warpStageOpen, warpAcceptsFeedback,
-  doneRule, prunedRule, NODE_FAMILY, isNodeFamily, familyOf,
+  doneRule, prunedRule, NODE_FAMILY, isNodeFamily, familyOf, SUBGRAPH_TYPES,
   defaultEdgeFor, newId, slugify,
   type NodeType, type EdgeType, type RelationshipType, type EdgeRelationship, type WarpStage,
   type Project, type SpecNode, type SpecEdge, type Annotation,
@@ -51,6 +51,12 @@ interface NodeRow {
    *  remaining SKILL.md frontmatter as a JSON string */
   slug?: string | null; description?: string | null; skill_options?: string | null
   annotation_count?: number
+  /** HOME: the sub-graph node this lives in (null = project top level) */
+  graph_id?: string | null
+  /** 1 when the node's body is a graph of its own */
+  is_graph?: number
+  /** a sub-graph's folder name, relative to its own home's folder */
+  subfolder?: string | null
 }
 
 /** skill_options is stored as JSON text; a corrupt value must never crash a read. */
@@ -73,6 +79,8 @@ function mapNode(r: NodeRow, tags: string[] = []): SpecNode {
     ...(r.description ? { description: r.description } : {}),
     ...(skillOptions ? { skillOptions } : {}),
     id: r.id, projectId: r.project_id, type: r.type as NodeType, family: familyOf(r.type as NodeType), title: r.title,
+    graphId: r.graph_id ?? null,
+    bodyKind: r.is_graph ? 'graph' : r.references_node_id ? 'reference' : 'document',
     stage: r.stage ?? null, progress: r.progress ?? null, rank: r.rank ?? null, tags,
     x: r.x, y: r.y, pinned: !!r.pinned, filePath: r.file_path,
     createdAt: r.created_at, updatedAt: r.updated_at, createdBy: r.created_by,
@@ -520,8 +528,25 @@ export function graphInternal(projectId: string): DecoratedGraph {
   return { nodes, edges, done, resolved, foreignNodes }
 }
 
-export function getGraph(p: { projectId: string }): GraphPayload {
+export function getGraph(p: { projectId: string; graph?: unknown; scope?: unknown }): GraphPayload {
   const { nodes, edges, foreignNodes } = graphInternal(p.projectId)
+  const inScope = scopedIds(p.projectId, p.graph, p.scope)
+  if (inScope) {
+    // a scoped read: this graph's nodes, every connection touching them, and
+    // the far end of each connection that crosses the boundary as a PORTAL —
+    // read-only, carrying its own home, so the edge has something to land on
+    const byId = new Map([...nodes, ...foreignNodes].map((n) => [n.id, n]))
+    const scopedEdges = edges.filter((e) => inScope.has(e.sourceId) || inScope.has(e.targetId))
+    const portals = new Map<string, SpecNode>()
+    for (const e of scopedEdges) {
+      for (const end of [e.sourceId, e.targetId]) {
+        if (inScope.has(end) || portals.has(end)) continue
+        const n = byId.get(end)
+        if (n) portals.set(end, { ...n, portal: true })
+      }
+    }
+    return { nodes: [...nodes.filter((n) => inScope.has(n.id)), ...portals.values()], edges: scopedEdges }
+  }
   // the canvas is the one consumer that wants them: a cross-project connection
   // needs both endpoints present or it has nothing to attach to
   return { nodes: [...nodes, ...foreignNodes], edges }
@@ -673,11 +698,17 @@ function computeProgress(nodes: SpecNode[], edges: SpecEdge[], done: Set<string>
 // ---------------------------------------------------------------------------
 // Nodes
 
-export function listNodes(p: { projectId: string; type?: string; family?: string; status?: string; tag?: string; q?: string; unassigned?: boolean }): SpecNode[] {
+export function listNodes(p: { projectId: string; type?: string; family?: string; status?: string; tag?: string; q?: string; unassigned?: boolean; graph?: unknown; scope?: unknown }): SpecNode[] {
   need(p.status === undefined, STATUS_GONE)
   projectRow(p.projectId)
   const where: string[] = ['n.project_id = ?']
   const params: unknown[] = [p.projectId]
+  const inScope = scopedIds(p.projectId, p.graph, p.scope)
+  if (inScope) {
+    const ids = [...inScope]
+    where.push(ids.length ? `n.id IN (${ids.map(() => '?').join(',')})` : '0')
+    params.push(...ids)
+  }
   if (p.type) { where.push('n.type = ?'); params.push(p.type) }
   if (p.family) {
     need(isNodeFamily(p.family), `invalid family "${p.family}" (fog|frontier|spec|policy)`)
@@ -785,11 +816,20 @@ export function createNode(
     projectId: string; type: NodeType; title: string; status?: string; stage?: string; tags?: string[]; content?: string
     progress?: number | null; x?: number; y?: number; pinned?: boolean; linkTo?: LinkToEntry[]
     slug?: string | null; description?: string | null; skillOptions?: Record<string, unknown> | null
+    /** HOME: create it inside this sub-graph (default: the project top level) */
+    graphId?: string | null
   },
   actor: string
 ): SpecNode {
   need(p.status === undefined, STATUS_GONE)
   const proj = projectRow(p.projectId)
+  const home = p.graphId ? String(p.graphId) : null
+  if (home) {
+    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [home])
+    need(g, `graph "${home}" not found`, 404)
+    need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+    need(g!.project_id === p.projectId, `graph "${home}" belongs to another project`, 400)
+  }
   const meta = NODE_TYPES[p.type]
   need(meta, `invalid node type "${p.type}"`)
   need(p.title?.trim(), 'title is required')
@@ -832,7 +872,7 @@ export function createNode(
   const t = now()
   const title = p.title.trim()
   const tags = [...new Set((p.tags ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean))]
-  const filePath = vault.createNodeFile(proj.folder, meta.folder, title,
+  const filePath = vault.createNodeFile(graphFolder(proj.folder, home), meta.folder, title,
     { id, type: p.type, name: slug, description, stage, progress: p.progress ?? null,
       skill: parseSkillOptions(skillOptions), tags, links: [] },
     p.content ?? '')
@@ -840,10 +880,10 @@ export function createNode(
   const legacy = db.hasLegacyStatusColumn()
   db.tx(() => {
     db.run(
-      `INSERT INTO nodes (id, project_id, type, title, ${legacy ? 'status, ' : ''}stage, progress, pinned, x, y, file_path, slug, description, skill_options, created_at, updated_at, created_by)
-       VALUES (?,?,?,?,${legacy ? '?,' : ''}?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO nodes (id, project_id, type, title, ${legacy ? 'status, ' : ''}stage, progress, pinned, x, y, file_path, slug, description, skill_options, created_at, updated_at, created_by, graph_id)
+       VALUES (?,?,?,?,${legacy ? '?,' : ''}?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, p.projectId, p.type, title, ...(legacy ? [''] : []), stage, p.progress ?? null, p.pinned ? 1 : 0, p.x ?? null, p.y ?? null, filePath,
-        slug, description, skillOptions, t, t, actor]
+        slug, description, skillOptions, t, t, actor, home]
     )
     for (const tag of tags) db.run('INSERT INTO node_tags (node_id, tag) VALUES (?,?)', [id, tag])
   })
@@ -1099,6 +1139,10 @@ export type ArchiveVerb = 'archived' | 'deleted' | 'completed' | 'answered' | 'p
 function archiveNode(
   r: NodeRow, actor: string, verb: ArchiveVerb, note: string, why: string, detail: Record<string, unknown> = {}
 ): string[] {
+  if (r.is_graph) {
+    const n = residentCount(r.id)
+    need(n === 0, `"${r.title}" is a sub-graph holding ${n} node${n === 1 ? '' : 's'} — move them out or demote it first`, 409)
+  }
   let content = ''
   try { content = vault.readBody(r.file_path) } catch { content = '' }
   const tags = (tagsFor([r.id]).get(r.id) ?? [])
@@ -1374,8 +1418,27 @@ export function restoreNode(p: { id: string }, actor: string): NodeDetail & { re
     need(!db.get("SELECT 1 AS x FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ?", [a.project_id, row.slug]),
       `a live skill already uses the slug "${row.slug}" — rename that one first`, 409)
   }
+  // its home may have stopped being a graph (demoted) while it was away — then
+  // it comes back to the nearest graph above that still is one, or the project
+  // top level. Where the file goes is recomputed from the home, never trusted
+  // from the old path: folders move.
+  let home: string | null = typeof row.graph_id === 'string' ? row.graph_id : null
+  const seenHomes = new Set<string>()
+  while (home && !seenHomes.has(home)) {
+    seenHomes.add(home)
+    const h = db.get<{ is_graph: number; graph_id: string | null; project_id: string }>(
+      'SELECT is_graph, graph_id, project_id FROM nodes WHERE id = ?', [home])
+    if (h && h.project_id === a.project_id && h.is_graph) break
+    home = h && h.project_id === a.project_id ? h.graph_id : null
+  }
+  if (home && seenHomes.has(home) && !db.get('SELECT 1 AS x FROM nodes WHERE id = ? AND is_graph = 1', [home])) home = null
+  row.graph_id = home
+  const projFolder = projectRow(a.project_id).folder
+  const typeFolder = NODE_TYPES[a.type as NodeType]?.folder ?? ''
+  const wantedPath = path.join(graphFolder(projFolder, home), typeFolder, path.basename(String(row.file_path ?? `${a.title}.md`)))
+  if (row.is_graph && row.subfolder) row.subfolder = freeSubfolder(graphFolder(projFolder, home), home, a.project_id, String(row.subfolder))
   const cols = Object.keys(row)
-  const livePath = vault.restoreFile(a.file_path, String(row.file_path ?? ''))
+  const livePath = vault.restoreFile(a.file_path, wantedPath)
   row.file_path = livePath
   row.updated_at = now()
   const edges = db.all<ArchivedEdgeRow>('SELECT * FROM archived_edges WHERE source_id = ? OR target_id = ?', [a.id, a.id])
@@ -1418,6 +1481,226 @@ export function restoreNode(p: { id: string }, actor: string): NodeDetail & { re
   return { ...getNode({ id: a.id }), restoredEdges: back.length }
 }
 
+
+// ---------------------------------------------------------------------------
+// Hierarchy — every node has ONE home: its project's top level (graph_id NULL)
+// or a SUB-GRAPH node. A node whose body is a graph (is_graph) owns a vault
+// sub-folder; the folder tree IS the hierarchy on disk, and the database owns
+// the links, so a connection may join nodes at any depth.
+//
+// Promotion makes a node a sub-graph and moves NOTHING — what goes inside is
+// chosen, node by node, with move (owner ruling: "only what I pick"). Demotion
+// moves every resident back up one level and removes the folder.
+
+const SUBGRAPH_OK = new Set<NodeType>(SUBGRAPH_TYPES)
+
+/** The vault-relative folder a graph's files live in: the project folder for
+ *  the top level (graphId null), else the chain of sub-folders down to it. */
+function graphFolder(projectFolder: string, graphId: string | null | undefined): string {
+  const parts: string[] = []
+  const seen = new Set<string>()
+  let cur = graphId ?? null
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    const g = db.get<{ subfolder: string | null; graph_id: string | null; is_graph: number }>(
+      'SELECT subfolder, graph_id, is_graph FROM nodes WHERE id = ?', [cur])
+    if (!g || !g.is_graph || !g.subfolder) break
+    parts.unshift(g.subfolder)
+    cur = g.graph_id
+  }
+  return path.join(projectFolder, ...parts)
+}
+
+/** Is `ancestorId` this graph itself or one of the graphs above it? */
+function isWithin(graphId: string | null, ancestorId: string): boolean {
+  const seen = new Set<string>()
+  let cur = graphId
+  while (cur && !seen.has(cur)) {
+    if (cur === ancestorId) return true
+    seen.add(cur)
+    cur = db.get<{ graph_id: string | null }>('SELECT graph_id FROM nodes WHERE id = ?', [cur])?.graph_id ?? null
+  }
+  return false
+}
+
+/** A sub-folder name free within a parent folder — on disk AND among siblings. */
+function freeSubfolder(parentFolder: string, graphId: string | null, projectId: string, title: string, exceptId?: string): string {
+  const base = vault.sanitizeFileName(title) || 'Sub-graph'
+  const taken = (name: string): boolean =>
+    fs.existsSync(vault.absPath(path.join(parentFolder, name))) ||
+    !!db.get(
+      `SELECT 1 AS x FROM nodes WHERE project_id = ? AND is_graph = 1 AND LOWER(subfolder) = LOWER(?)
+       AND ${graphId ? 'graph_id = ?' : 'graph_id IS NULL'} ${exceptId ? 'AND id <> ?' : ''}`,
+      [projectId, name, ...(graphId ? [graphId] : []), ...(exceptId ? [exceptId] : [])])
+  let name = base
+  let i = 2
+  while (taken(name)) name = `${base} ${i++}`
+  return name
+}
+
+/** How many nodes live directly in a sub-graph. */
+const residentCount = (graphId: string): number =>
+  db.get<{ c: number }>('SELECT COUNT(*) AS c FROM nodes WHERE graph_id = ?', [graphId])?.c ?? 0
+
+/**
+ * PROMOTE — the node's body becomes a graph of its own: it gets a vault
+ * sub-folder and can hold nodes. Nothing moves in; choose what does with move.
+ * Any non-fog type may be a sub-graph (owner ruling), actions excepted.
+ */
+export function promoteNode(p: { id: string }, actor: string): SpecNode {
+  const r = nodeRow(p.id)
+  need(SUBGRAPH_OK.has(r.type as NodeType),
+    `a ${r.type} cannot hold a sub-graph — only ${SUBGRAPH_TYPES.join(', ')} can (findings about a spec are never a place a spec lives)`, 400)
+  need(!r.references_node_id, `"${r.title}" is a reference to another project's node — promote it where it lives`, 400)
+  need(!r.is_graph, `"${r.title}" is already a sub-graph`, 409)
+  const proj = projectRow(r.project_id)
+  const parent = graphFolder(proj.folder, r.graph_id)
+  const sub = freeSubfolder(parent, r.graph_id ?? null, r.project_id, r.title)
+  fs.mkdirSync(vault.absPath(path.join(parent, sub)), { recursive: true })
+  db.run('UPDATE nodes SET is_graph = 1, subfolder = ?, updated_at = ? WHERE id = ?', [sub, now(), r.id])
+  const node = loadNode(r.id)
+  logActivity(r.project_id, actor, 'node.promoted', 'node', r.id,
+    `promoted ${r.type} "${r.title}" to a sub-graph (folder "${sub}")`, { subfolder: sub })
+  emitEvent('node.updated', r.project_id, node, actor)
+  emitEvent('node.promoted', r.project_id, { id: r.id, title: r.title, subfolder: sub }, actor)
+  return node
+}
+
+/**
+ * MOVE — change a node's HOME. Its file moves to the target graph's folder (a
+ * sub-graph node brings its whole folder, and every file under it, along).
+ * Links never move and never break: the database owns them, at any depth.
+ * `graphId: null` = the project's top level.
+ */
+async function moveHome(r: NodeRow, target: string | null, actor: string): Promise<{ moved: boolean; filePath: string }> {
+  if ((r.graph_id ?? null) === target) return { moved: false, filePath: r.file_path }
+  if (target) {
+    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
+    need(g, `graph "${target}" not found`, 404)
+    need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+    need(g!.project_id === r.project_id, `"${g!.title}" is in another project — a node moves within its project`, 400)
+    need(target !== r.id, 'a node cannot live inside itself', 400)
+    need(!isWithin(g!.graph_id ?? null, r.id),
+      `"${g!.title}" is inside "${r.title}" — a sub-graph cannot move into its own contents`, 400)
+  }
+  const proj = projectRow(r.project_id)
+  const meta = NODE_TYPES[r.type as NodeType]
+  const toFolder = graphFolder(proj.folder, target)
+  let filePath = r.file_path
+  await vault.withWatcherPaused(() => {
+    if (r.is_graph && r.subfolder) {
+      // the whole folder travels, then every path under it is re-rooted
+      const fromDir = path.join(graphFolder(proj.folder, r.graph_id), r.subfolder)
+      const sub = freeSubfolder(toFolder, target, r.project_id, r.subfolder, r.id)
+      const toDir = path.join(toFolder, sub)
+      vault.moveFolder(fromDir, toDir)
+      const prefix = fromDir + path.sep
+      for (const d of db.all<{ id: string; file_path: string }>('SELECT id, file_path FROM nodes WHERE project_id = ? AND file_path LIKE ?',
+        [r.project_id, `${fromDir}${path.sep}%`])) {
+        if (d.file_path.startsWith(prefix)) db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [path.join(toDir, d.file_path.slice(prefix.length)), d.id])
+      }
+      db.run('UPDATE nodes SET subfolder = ? WHERE id = ?', [sub, r.id])
+    }
+    filePath = vault.moveNodeFile(r.file_path, toFolder, meta.folder, r.title)
+    db.run('UPDATE nodes SET graph_id = ?, file_path = ?, updated_at = ? WHERE id = ?', [target, filePath, now(), r.id])
+  })
+  refreshNodeFile(r.id)
+  const where = target ? `"${db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [target])?.title}"` : 'the project top level'
+  logActivity(r.project_id, actor, 'node.moved', 'node', r.id, `moved ${r.type} "${r.title}" into ${where}`,
+    { from: r.graph_id ?? null, to: target })
+  emitEvent('node.updated', r.project_id, loadNode(r.id), actor)
+  emitEvent('node.moved', r.project_id, { id: r.id, from: r.graph_id ?? null, to: target }, actor)
+  return { moved: true, filePath }
+}
+
+/** Move one node — or several (`ids`) — into a sub-graph, or to the top level (`graphId: null`). */
+export async function moveNodes(p: { id?: string; ids?: unknown; graphId?: unknown }, actor: string): Promise<{ ok: true; moved: string[] }> {
+  need(p.graphId === null || typeof p.graphId === 'string', 'graphId is required — a sub-graph node id, or null for the project top level')
+  const ids = p.id ? [p.id] : p.ids
+  need(Array.isArray(ids) && ids.length > 0 && ids.every((x) => typeof x === 'string'), 'id, or ids: [node ids], is required')
+  const rows = (ids as string[]).map((id) => nodeRow(id))
+  // validate every move before any file moves, so a bad batch moves nothing
+  const target = (p.graphId as string | null) || null
+  for (const r of rows) {
+    if (target) {
+      const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
+      need(g, `graph "${target}" not found`, 404)
+      need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+      need(g!.project_id === r.project_id, `"${r.title}" and "${g!.title}" are in different projects`, 400)
+      need(target !== r.id && !isWithin(g!.graph_id ?? null, r.id), `"${r.title}" cannot move into itself or its own contents`, 400)
+    }
+  }
+  const moved: string[] = []
+  for (const r of rows) {
+    // re-read: an earlier move in this batch may have re-rooted this node's path
+    if ((await moveHome(nodeRow(r.id), target, actor)).moved) moved.push(r.id)
+  }
+  return { ok: true, moved }
+}
+
+/**
+ * DEMOTE — the sub-graph goes back to being a plain node. Every resident moves
+ * up one level (its links untouched), then the empty folder is removed.
+ */
+export async function demoteNode(p: { id: string }, actor: string): Promise<SpecNode & { movedUp: number }> {
+  const r = nodeRow(p.id)
+  need(r.is_graph, `"${r.title}" is not a sub-graph`, 409)
+  const residents = db.all<NodeRow>('SELECT * FROM nodes WHERE graph_id = ? ORDER BY is_graph DESC, id', [r.id])
+  for (const c of residents) await moveHome(nodeRow(c.id), r.graph_id ?? null, actor)
+  const proj = projectRow(r.project_id)
+  const dir = path.join(graphFolder(proj.folder, r.graph_id), r.subfolder ?? '')
+  if (r.subfolder) vault.removeEmptyFolder(dir)
+  db.run('UPDATE nodes SET is_graph = 0, subfolder = NULL, updated_at = ? WHERE id = ?', [now(), r.id])
+  const node = loadNode(r.id)
+  logActivity(r.project_id, actor, 'node.demoted', 'node', r.id,
+    `demoted sub-graph "${r.title}" — ${residents.length} node${residents.length === 1 ? '' : 's'} moved up`, { movedUp: residents.map((c) => c.id) })
+  emitEvent('node.updated', r.project_id, node, actor)
+  emitEvent('node.demoted', r.project_id, { id: r.id, title: r.title, movedUp: residents.length }, actor)
+  return { ...node, movedUp: residents.length }
+}
+
+/** Every graph id at or below `root` (null = top level): the `down` scope's homes. */
+function graphClosure(projectId: string, root: string | null): Set<string | null> {
+  const out = new Set<string | null>([root])
+  const queue: (string | null)[] = [root]
+  while (queue.length) {
+    const cur = queue.shift()!
+    for (const g of db.all<{ id: string }>(
+      `SELECT id FROM nodes WHERE project_id = ? AND is_graph = 1 AND ${cur ? 'graph_id = ?' : 'graph_id IS NULL'}`,
+      [projectId, ...(cur ? [cur] : [])])) {
+      if (!out.has(g.id)) {
+        out.add(g.id)
+        queue.push(g.id)
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * The node ids a scoped read covers. `graph` = a sub-graph node id, or 'root'
+ * for the project's top level; `scope` = local (that graph only) | down (it
+ * and everything beneath). Undefined `graph` = no scoping (the whole project,
+ * exactly what every read returned before hierarchy).
+ */
+export function scopedIds(projectId: string, graph: unknown, scope: unknown): Set<string> | null {
+  if (graph === undefined || graph === null || graph === '') return null
+  need(typeof graph === 'string', 'graph must be a sub-graph node id, or "root"')
+  need(scope === undefined || scope === '' || scope === 'local' || scope === 'down', 'scope must be local or down')
+  const root = graph === 'root' ? null : graph as string
+  if (root) {
+    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [root])
+    need(g, `graph "${root}" not found`, 404)
+    need(g!.project_id === projectId, `graph "${root}" belongs to another project`, 400)
+    need(g!.is_graph, `"${g!.title}" is not a sub-graph`, 400)
+  }
+  const homes = (scope ?? 'local') === 'down' ? graphClosure(projectId, root) : new Set<string | null>([root])
+  const out = new Set<string>()
+  for (const n of db.all<{ id: string; graph_id: string | null }>('SELECT id, graph_id FROM nodes WHERE project_id = ?', [projectId])) {
+    if (homes.has(n.graph_id ?? null)) out.add(n.id)
+  }
+  return out
+}
 
 // ---------------------------------------------------------------------------
 // Clearing the fog
@@ -2358,6 +2641,8 @@ export async function convertNode(p: { id: string; type?: string }, actor: strin
   const from = r.type as NodeType
   const to = p.type as NodeType
   need(to !== from, `"${r.title}" already is ${from === 'idea' || from === 'action' ? 'an' : 'a'} ${from} — pick a different type to convert to`)
+  need(!r.is_graph || SUBGRAPH_TYPES.includes(to),
+    `"${r.title}" is a sub-graph, and a ${to} cannot hold one — demote it first`, 400)
 
   // Relationship re-validation under the new type. member requires its TARGET
   // to be a warp or an area UNLESS the member's source is feedback (feedback may
@@ -2437,7 +2722,7 @@ export async function convertNode(p: { id: string; type?: string }, actor: strin
   // cross-directory rename as an external delete+create.
   const proj = projectRow(r.project_id)
   await vault.withWatcherPaused(() => {
-    const rel = vault.moveNodeFile(r.file_path, proj.folder, meta.folder, r.title)
+    const rel = vault.moveNodeFile(r.file_path, graphFolder(proj.folder, r.graph_id), meta.folder, r.title)
     if (rel !== r.file_path) db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [rel, p.id])
     refreshNodeFile(p.id)
   })

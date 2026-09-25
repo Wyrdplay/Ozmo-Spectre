@@ -427,7 +427,12 @@ export async function startServer(
       : r.body
   ))
 
-  app.get('/api/projects/:id/graph', h('graph.get', (r) => ({ projectId: r.params.id })))
+  app.get('/api/projects/:id/graph', h('graph.get', (r) => ({
+    projectId: r.params.id,
+    // hierarchy: graph=<sub-graph id>|root, scope=local|down — absent = the whole project
+    graph: typeof r.query.graph === 'string' && r.query.graph ? r.query.graph : undefined,
+    scope: typeof r.query.scope === 'string' && r.query.scope ? r.query.scope : undefined
+  })))
   app.get('/api/projects/:id/activity', h('activity.list', (r) => ({
     projectId: r.params.id,
     limit: r.query.limit ? Number(r.query.limit) : undefined,
@@ -440,6 +445,9 @@ export async function startServer(
     type: r.query.type as string | undefined,
     // family=fog|frontier|spec|policy — derived from type (frontier = open work only)
     family: r.query.family as string | undefined,
+    // hierarchy: graph=<sub-graph id>|root, scope=local|down
+    graph: typeof r.query.graph === 'string' && r.query.graph ? r.query.graph : undefined,
+    scope: typeof r.query.scope === 'string' && r.query.scope ? r.query.scope : undefined,
     status: r.query.status as string | undefined,
     tag: r.query.tag as string | undefined,
     q: r.query.q as string | undefined,
@@ -453,6 +461,12 @@ export async function startServer(
   // DELETE is ARCHIVE — nothing on the board is hard-deleted (see /api/archive)
   app.delete('/api/nodes/:id', h('nodes.delete', (r) => ({ id: r.params.id, note: r.body?.note })))
   app.post('/api/nodes/:id/archive', h('nodes.archive', (r) => ({ id: r.params.id, note: r.body?.note })))
+  // HIERARCHY — a node's body becomes a graph (promote) or stops being one
+  // (demote); move changes a node's HOME (its file follows, its links never move)
+  app.post('/api/nodes/:id/promote', h('nodes.promote', (r) => ({ id: r.params.id })))
+  app.post('/api/nodes/:id/demote', h('nodes.demote', (r) => ({ id: r.params.id })))
+  app.post('/api/nodes/:id/move', h('nodes.move', (r) => ({ id: r.params.id, graphId: r.body?.graphId })))
+  app.post('/api/projects/:id/nodes/move', h('nodes.move', (r) => ({ ids: r.body?.ids, graphId: r.body?.graphId })))
   // THE ARCHIVE — search it (every project, or one), read one node whole, search
   // its preserved links, restore. /edges is registered before /:id on purpose.
   const archiveQuery = (r: Request): Record<string, unknown> => ({
@@ -507,6 +521,8 @@ export async function startServer(
   app.get('/api/projects/:id/fog', h('fog.get', (r) => ({
     projectId: r.params.id,
     areaId: typeof r.query.area === 'string' && r.query.area.trim() !== '' ? r.query.area.trim() : undefined,
+    graph: typeof r.query.graph === 'string' && r.query.graph ? r.query.graph : undefined,
+    scope: typeof r.query.scope === 'string' && r.query.scope ? r.query.scope : undefined,
     ...fogFlags(r)
   })))
   // :id is a CONTAINER — an area or a warp (400 otherwise, with the pointer)

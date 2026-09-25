@@ -282,6 +282,16 @@ function migrate(): void {
   // access people already had, which is a migration that looks like a bug to
   // everyone it happens to. New approvals get `viewer` — that is a decision
   // about the future, not a licence to rewrite the past.
+  // HOME — hierarchical nodes. Every node lives in exactly ONE graph: its
+  // project's top level (graph_id NULL) or a SUB-GRAPH node (graph_id = that
+  // node's id). A node whose body is a graph has is_graph = 1 and a vault
+  // sub-folder named by `subfolder` (relative to its own home's folder, so a
+  // project or parent rename never has to touch it). Guarded adds.
+  const homeCols = all<{ name: string }>('PRAGMA table_info(nodes)').map((c) => c.name)
+  if (!homeCols.includes('graph_id')) driver.exec('ALTER TABLE nodes ADD COLUMN graph_id TEXT')
+  if (!homeCols.includes('is_graph')) driver.exec('ALTER TABLE nodes ADD COLUMN is_graph INTEGER NOT NULL DEFAULT 0')
+  if (!homeCols.includes('subfolder')) driver.exec('ALTER TABLE nodes ADD COLUMN subfolder TEXT')
+  driver.exec('CREATE INDEX IF NOT EXISTS idx_nodes_graph ON nodes(graph_id)')
   // ARCHIVED PROJECTS — deleting a project archives it (nothing on the board is
   // hard-deleted); purge is the separate, host-only removal. Guarded adds.
   const projectCols = all<{ name: string }>('PRAGMA table_info(projects)').map((c) => c.name)

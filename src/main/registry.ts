@@ -158,6 +158,10 @@ const CAPABILITY: Record<string, Capability> = {
   // was resolved under the old keep-the-record rule. Both only write the board.
   'refine.submit': 'write',
   'nodes.archive': 'write',
+  // hierarchy: a node's body becomes a graph; nodes change home
+  'nodes.promote': 'write',
+  'nodes.demote': 'write',
+  'nodes.move': 'write',
   'archive.restore': 'write',
   'archive.restoreEdge': 'write',
   'archive.restoreProject': 'write',
@@ -438,6 +442,9 @@ export const registry: Record<string, Handler> = {
 
   'nodes.list': (p) => svc.listNodes(p),
   'nodes.archive': (p, c) => svc.archiveNodeVerb(p, c.actor),
+  'nodes.promote': (p, c) => svc.promoteNode(p, c.actor),
+  'nodes.demote': (p, c) => svc.demoteNode(p, c.actor),
+  'nodes.move': (p, c) => svc.moveNodes(p, c.actor),
   'archive.list': (p) => svc.listArchive(p),
   'archive.get': (p) => svc.getArchived(p),
   'archive.edges': (p) => svc.listArchivedEdges(p),

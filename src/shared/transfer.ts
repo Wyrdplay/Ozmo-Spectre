@@ -60,6 +60,11 @@ export interface BundleNode {
   description?: string | null
   skillOptions?: string | null
   tags: string[]
+  /** HOME: the sub-graph node (in this bundle) it lives in; absent = top level */
+  graphId?: string | null
+  /** true when its body is a graph of its own; `subfolder` names that folder */
+  isGraph?: boolean
+  subfolder?: string | null
   /**
    * True when this node was a REFERENCE to a node in another project and the
    * borrowed content was baked in at export. The live board is never touched to

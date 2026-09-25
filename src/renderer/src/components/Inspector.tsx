@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships,
+  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, SUBGRAPH_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships,
   type NodeDetail, type EdgeWithTitles, type Annotation, type EdgeType, type NodeType, type RelationshipType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
@@ -454,6 +454,123 @@ function ConvertModal({ detail, onClose }: { detail: NodeDetail; onClose: () => 
   )
 }
 
+/**
+ * HOME, said out loud: a sub-graph node shows how much lives inside it; a node
+ * that lives inside one says where, one click from its container.
+ */
+function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null {
+  const graphNodes = useStore((s) => s.graph.nodes)
+  const selectNode = useStore((s) => s.selectNode)
+  const setFocusNode = useStore((s) => s.setFocusNode)
+  const inside = detail.bodyKind === 'graph' ? graphNodes.filter((n) => n.graphId === detail.id).length : 0
+  const home = detail.graphId ? graphNodes.find((n) => n.id === detail.graphId) : null
+  if (detail.bodyKind !== 'graph' && !home) return null
+  return (
+    <>
+      {detail.bodyKind === 'graph' && (
+        <span className="chip home-chip" title="This node's body is a graph of its own — nodes live inside it">
+          ▣ sub-graph · {inside} inside
+        </span>
+      )}
+      {home && (
+        <button
+          className="chip home-chip link"
+          title={`Lives inside the sub-graph "${home.title}" — open it`}
+          onClick={() => { selectNode(home.id); setFocusNode(home.id) }}
+        >
+          in {home.title}
+        </button>
+      )}
+    </>
+  )
+}
+
+/**
+ * The hierarchy verbs for one node: make it a sub-graph (nothing moves in —
+ * you choose what does), demote it (its residents move up a level), and move
+ * it into a sub-graph or back to the top level. Its links never move.
+ */
+function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { message: string } | null }): React.JSX.Element {
+  const toast = useStore((s) => s.toast)
+  const graphNodes = useStore((s) => s.graph.nodes)
+  const [picking, setPicking] = useState(false)
+  const [confirmDemote, setConfirmDemote] = useState(false)
+  const canHold = SUBGRAPH_TYPES.includes(detail.type) && detail.bodyKind !== 'reference'
+  const residents = graphNodes.filter((n) => n.graphId === detail.id).length
+  // a node cannot move into itself or anything inside it
+  const within = (graphId: string | null | undefined): boolean => {
+    const seen = new Set<string>()
+    let cur = graphId ?? null
+    while (cur && !seen.has(cur)) {
+      if (cur === detail.id) return true
+      seen.add(cur)
+      cur = graphNodes.find((n) => n.id === cur)?.graphId ?? null
+    }
+    return false
+  }
+  const locked = lock ? `This board is read-only — ${lock.message}` : null
+  const run = async (method: string, payload: unknown, done: string): Promise<void> => {
+    try {
+      await rpc(method, payload)
+      toast(done, 'info')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    }
+  }
+  return (
+    <>
+      {detail.bodyKind !== 'graph' && canHold && (
+        <button className="btn sm ghost" disabled={!!lock}
+          title={locked ?? 'Give this node a graph of its own. Nothing moves in — choose what does with "move into…"'}
+          onClick={() => void run('nodes.promote', { id: detail.id }, `"${detail.title}" is now a sub-graph — move nodes into it`)}>
+          ▣ make sub-graph
+        </button>
+      )}
+      {detail.bodyKind === 'graph' && (
+        <button className="btn sm ghost" disabled={!!lock}
+          title={locked ?? `Back to a plain node: the ${residents} node${residents === 1 ? '' : 's'} inside move up one level, links untouched`}
+          onClick={() => setConfirmDemote(true)}>
+          demote…
+        </button>
+      )}
+      {picking ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+          <NodePicker
+            autoFocus
+            placeholder="move into which sub-graph…"
+            exclude={new Set([detail.id, ...(detail.graphId ? [detail.graphId] : [])])}
+            filter={(n) => n.bodyKind === 'graph' && n.projectId === detail.projectId && !within(n.id)}
+            onPick={(n) => { setPicking(false); void run('nodes.move', { id: detail.id, graphId: n.id }, `moved into "${n.title}"`) }}
+          />
+          <div style={{ display: 'flex', gap: 6 }}>
+            {detail.graphId && (
+              <button className="btn sm" onClick={() => { setPicking(false); void run('nodes.move', { id: detail.id, graphId: null }, 'moved to the top level') }}>
+                ↑ to the top level
+              </button>
+            )}
+            <button className="btn sm ghost" onClick={() => setPicking(false)}>cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn sm ghost" disabled={!!lock}
+          title={locked ?? 'Change where this node lives — its file follows, its links never move'}
+          onClick={() => setPicking(true)}>
+          ⤷ move into…
+        </button>
+      )}
+      {confirmDemote && (
+        <Confirm
+          title={`Demote "${detail.title}"?`}
+          confirmLabel="Demote"
+          body={`It stops being a sub-graph. The ${residents} node${residents === 1 ? '' : 's'} inside move up one level; every link stays exactly as it is.`}
+          onConfirm={() => void run('nodes.demote', { id: detail.id }, `"${detail.title}" demoted`)}
+          onClose={() => setConfirmDemote(false)}
+        />
+      )}
+    </>
+  )
+}
+
 export function Inspector(): React.JSX.Element | null {
   const selection = useStore((s) => s.selection)
   if (!selection) return null
@@ -818,6 +935,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             </button>
           )}
           <FlagChips flags={detail.flags} all />
+          <HomeChips detail={detail} />
           {meta.hasProgress && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 1, minWidth: 130 }}>
               <input
@@ -1028,6 +1146,9 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
               >
                 ▢ archive…
               </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+              <HierarchyControls detail={detail} lock={lock} />
             </div>
           </div>
         )}

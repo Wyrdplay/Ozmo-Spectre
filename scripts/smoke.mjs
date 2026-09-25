@@ -913,6 +913,100 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
     !(await req('GET', '/api/archive/projects')).json.some((p) => p.id === lp))
 }
 
+// HIERARCHY — a node's body may be a graph of its own. Promote moves nothing;
+// move changes a node's home (its file follows, its links never move); demote
+// sends every resident up one level. Reads take graph + scope.
+{
+  const hp = (await req('POST', `/api/projects`, { name: `hier-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${hp}/nodes`, { type, title, ...extra })).json
+  const F = await mk('feature', 'Rendering')
+  const A = await mk('area', 'Engine Core')
+  const B = await mk('bug', 'Shadow acne')
+  const X = await mk('action', 'Tune the bias')
+  const G = await mk('feature', 'Shadows')
+  ok('hierarchy: nodes start at the top level as documents', F.graphId === null && F.bodyKind === 'document', JSON.stringify(F))
+  // promote: only non-fog, non-action types; nothing moves
+  ok('hierarchy: a bug cannot hold a sub-graph', (await req('POST', `/api/nodes/${B.id}/promote`, {})).status === 400)
+  ok('hierarchy: an action cannot hold a sub-graph', (await req('POST', `/api/nodes/${X.id}/promote`, {})).status === 400)
+  const pf = await req('POST', `/api/nodes/${F.id}/promote`, {})
+  ok('hierarchy: promote makes the body a graph, and moves nothing', pf.status === 200 && pf.json.bodyKind === 'graph' &&
+    (await req('GET', `/api/projects/${hp}/nodes?graph=${F.id}`)).json.length === 0, JSON.stringify(pf.json))
+  ok('hierarchy: promoting twice 409', (await req('POST', `/api/nodes/${F.id}/promote`, {})).status === 409)
+  // create inside, and move in
+  const H = await mk('component', 'Shadow map', { graphId: F.id, content: 'cascaded, 4 splits' })
+  ok('hierarchy: a node can be created inside a sub-graph', H.graphId === F.id && H.filePath.includes('Rendering'), JSON.stringify(H))
+  ok('hierarchy: creating inside a non-graph 400', (await req('POST', `/api/projects/${hp}/nodes`, { type: 'feature', title: 'x', graphId: G.id })).status === 400)
+  const mv = await req('POST', `/api/nodes/${G.id}/move`, { graphId: F.id })
+  const g1 = (await req('GET', `/api/nodes/${G.id}`)).json
+  ok('hierarchy: move changes home and the file follows', mv.status === 200 && mv.json.moved.includes(G.id) &&
+    g1.graphId === F.id && g1.filePath.includes('Rendering'), JSON.stringify(g1).slice(0, 300))
+  // nesting and the cycle guards
+  await req('POST', `/api/nodes/${G.id}/promote`, {})
+  const Q = await mk('question', 'PCF or VSM?', { graphId: G.id, linkTo: [{ nodeId: B.id, type: 'blocks', outgoing: true }] })
+  ok('hierarchy: sub-graphs nest — a file two levels down', Q.graphId === G.id && /Rendering[\\/]Shadows/.test(Q.filePath), Q.filePath)
+  ok('hierarchy: a sub-graph cannot move into itself', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: F.id })).status === 400)
+  ok('hierarchy: …nor into its own contents', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: G.id })).status === 400)
+  ok('hierarchy: …nor into a node that is not a graph', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: A.id })).status === 400)
+  // a whole sub-graph moves, folder and all
+  await req('POST', `/api/nodes/${A.id}/promote`, {})
+  const mf = await req('POST', `/api/nodes/${F.id}/move`, { graphId: A.id })
+  const q2 = (await req('GET', `/api/nodes/${Q.id}`)).json
+  ok('hierarchy: moving a sub-graph re-roots everything beneath it', mf.status === 200 &&
+    /Engine Core[\\/]Rendering[\\/]Shadows/.test(q2.filePath), q2.filePath)
+  ok('hierarchy: files are still readable after the folder moved',
+    (await req('GET', `/api/nodes/${H.id}/content`)).json.content?.includes('cascaded'))
+  ok('hierarchy: links never move — the cross-level blocks still holds', q2.edges.some((e) => rels(e).some((r) => r.type === 'blocks')))
+  // scoped reads
+  const rootLocal = (await req('GET', `/api/projects/${hp}/graph?graph=root&scope=local`)).json
+  const ids = (xs) => xs.filter((n) => !n.portal).map((n) => n.id).sort().join()
+  ok('hierarchy: graph=root local is the top level only', ids(rootLocal.nodes) === [A.id, B.id, X.id].sort().join(), JSON.stringify(rootLocal.nodes.map((n) => [n.title, n.portal])))
+  ok('hierarchy: a boundary-crossing link brings its far end as a PORTAL', rootLocal.nodes.some((n) => n.id === Q.id && n.portal === true) &&
+    rootLocal.edges.some((e) => rels(e).some((r) => r.type === 'blocks')))
+  const aDown = (await req('GET', `/api/projects/${hp}/graph?graph=${A.id}&scope=down`)).json
+  ok('hierarchy: scope=down is the sub-graph and everything beneath', ids(aDown.nodes) === [F.id, G.id, H.id, Q.id].sort().join(), JSON.stringify(aDown.nodes.map((n) => n.title)))
+  ok('hierarchy: scope=local stops at one level', (await req('GET', `/api/projects/${hp}/nodes?graph=${A.id}&scope=local`)).json.map((n) => n.id).join() === F.id)
+  ok('hierarchy: an unscoped read is still the whole project', (await req('GET', `/api/projects/${hp}/graph`)).json.nodes.length === 7)
+  ok('hierarchy: bad scope 400', (await req('GET', `/api/projects/${hp}/graph?graph=root&scope=sideways`)).status === 400)
+  ok('hierarchy: graph must be a sub-graph 400', (await req('GET', `/api/projects/${hp}/graph?graph=${B.id}`)).status === 400)
+  const fogDown = (await req('GET', `/api/projects/${hp}/fog?graph=${A.id}&scope=down`)).json
+  const fogRoot = (await req('GET', `/api/projects/${hp}/fog?graph=root&scope=local`)).json
+  const fogIds = (r) => [...r.takeable, ...r.blocked].map((i) => i.id)
+  ok('hierarchy: fog scoped down finds the question two levels in, not the top-level bug',
+    fogIds(fogDown).includes(Q.id) && !fogIds(fogDown).includes(B.id), JSON.stringify(fogIds(fogDown)))
+  ok('hierarchy: fog scoped to the top level finds the bug, not the question',
+    fogIds(fogRoot).includes(B.id) && !fogIds(fogRoot).includes(Q.id), JSON.stringify(fogIds(fogRoot)))
+  // a sub-graph with residents cannot be archived out from under them
+  ok('hierarchy: archiving a sub-graph with residents 409', (await req('POST', `/api/nodes/${F.id}/archive`, {})).status === 409)
+  // export/import keeps the hierarchy
+  const bundle = (await req('GET', `/api/projects/${hp}/export`)).json
+  const imp = await req('POST', `/api/projects/import?onConflict=duplicate`, bundle)
+  const ip = imp.json.projectId
+  const inodes = (await req('GET', `/api/projects/${ip}/nodes`)).json
+  const byTitle = (t) => inodes.find((n) => n.title === t)
+  ok('hierarchy: export/import keeps homes and sub-graphs', imp.status === 200 && byTitle('Shadows')?.bodyKind === 'graph' &&
+    byTitle('PCF or VSM?')?.graphId === byTitle('Shadows')?.id && /Engine Core[\\/]Rendering[\\/]Shadows/.test(byTitle('PCF or VSM?')?.filePath ?? ''),
+    JSON.stringify(inodes.map((n) => [n.title, n.graphId, n.bodyKind, n.filePath])))
+  await req('DELETE', `/api/projects/${ip}?purge=1`)
+  // demote: residents move up one level, links intact
+  const dm = await req('POST', `/api/nodes/${G.id}/demote`, {})
+  const q3 = (await req('GET', `/api/nodes/${Q.id}`)).json
+  ok('hierarchy: demote moves residents up one level', dm.status === 200 && dm.json.movedUp === 1 && dm.json.bodyKind === 'document' &&
+    q3.graphId === F.id && q3.edges.some((e) => rels(e).some((r) => r.type === 'blocks')), JSON.stringify(q3).slice(0, 300))
+  ok('hierarchy: demoting a document 409', (await req('POST', `/api/nodes/${G.id}/demote`, {})).status === 409)
+  // archive + restore: a node whose home went away comes back to the top level
+  await req('POST', `/api/nodes/${H.id}/archive`, {})
+  await req('POST', `/api/nodes/${Q.id}/move`, { graphId: null })
+  await req('POST', `/api/nodes/${G.id}/move`, { graphId: null })
+  await req('POST', `/api/nodes/${F.id}/demote`, {})
+  const rh = await req('POST', `/api/archive/${H.id}/restore`, {})
+  ok('hierarchy: restoring into a graph that is gone lands at its parent level', rh.status === 200 && rh.json.graphId === A.id &&
+    (await req('GET', `/api/nodes/${H.id}/content`)).json.content?.includes('cascaded'), JSON.stringify(rh.json).slice(0, 300))
+  // batch move to the top level
+  const bm = await req('POST', `/api/projects/${hp}/nodes/move`, { ids: [H.id, F.id], graphId: null })
+  ok('hierarchy: batch move to the top level', bm.status === 200 && (await req('GET', `/api/projects/${hp}/nodes?graph=root`)).json.length === 7)
+  await req('DELETE', `/api/projects/${hp}?purge=1`)
+}
+
 // REFINE — a pass over the fog becomes ONE action the responded items derive
 {
   const rp = (await req('POST', `/api/projects`, { name: `refine-${Date.now()}` })).json.id

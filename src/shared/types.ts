@@ -64,6 +64,13 @@ export interface SpecNode {
   skillOptions?: Record<string, unknown> | null
   /** the node's family (fog | frontier | spec | policy) — derived from type, never stored */
   family?: NodeFamily
+  /** HOME: the sub-graph node this node lives in, or null for the project's top level */
+  graphId?: string | null
+  /** what the node opens into: its markdown, another project's node, or a graph of its own */
+  bodyKind?: BodyKind
+  /** read-only ghost of a node OUTSIDE the graph being read, present because a
+   *  connection crosses the boundary — set only on scoped graph reads */
+  portal?: boolean
   /** effective progress (manual, rolled up, or Done-flag-implied) — computed, never stored */
   progressComputed?: number
   /** names of the flag rules (settings) this node currently matches, in rule order — computed, never stored */
@@ -573,6 +580,22 @@ export type FogClass = 'unshaped' | 'unknown' | 'undecided' | 'unabsorbed'
 //   policy    what governs the work — beliefs, taste, method, kept
 
 export type NodeFamily = 'fog' | 'frontier' | 'spec' | 'policy'
+
+/** What a node's body is (orthogonal to its type): a markdown document, a
+ *  reference to a node in another project, or a whole sub-graph. */
+export type BodyKind = 'document' | 'reference' | 'graph'
+
+/**
+ * Which types may carry a sub-graph body. Owner ruling (2026-09-22): any
+ * non-fog type — findings about a spec (bug, flaw, threat, question, feedback)
+ * are never a place a spec lives. `action` is excluded too (desk
+ * recommendation): completing one removes it, which would orphan its folder.
+ * `idea` is fog by family but explicitly allowed by the ruling.
+ */
+export const SUBGRAPH_TYPES: NodeType[] = ['area', 'feature', 'component', 'instance', 'warp', 'pillar', 'principle', 'idea', 'skill']
+
+/** Read scope over the hierarchy: this graph only, or it and every sub-graph below it. */
+export type GraphScope = 'local' | 'down'
 
 export const NODE_FAMILIES: NodeFamily[] = ['fog', 'frontier', 'spec', 'policy']
 

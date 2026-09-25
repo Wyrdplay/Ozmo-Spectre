@@ -1035,6 +1035,56 @@ stale questions…), each "discusses" its target; adopt = synthesize/convert; wa
 feedback AND prune the target with the same rationale (the waive dialog offers this in one
 gesture whenever the feedback discusses a record).
 
+## Hierarchy — a node may be a whole graph
+
+A node's BODY is one of three kinds (\`bodyKind\` on every node): a markdown \`document\` (every
+node until told otherwise), a \`reference\` to a node in another project, or a \`graph\` of its
+own — a SUB-GRAPH that other nodes live inside. Body kind is orthogonal to type: type still
+answers the axis question; body kind answers what the node opens into.
+
+HOME. Every node lives in exactly ONE graph — \`graphId\`: the sub-graph node it lives in, or
+null for the project's top level. Home is a tree, and on disk it IS the folder tree: a sub-graph
+owns a sub-folder, and its residents' files live under it. MEMBERSHIP is separate and unchanged —
+\`member\` (a warp in time, an area in space) never moves a file. And LINKS never care about home:
+the database owns them, so a connection may join nodes at any depth.
+
+Which types may hold a sub-graph: area, feature, component, instance, warp, pillar, principle,
+idea, skill. NEVER bug, flaw, threat, question, feedback (findings about a spec are never a
+place a spec lives) and not action (it is removed when completed). A 400 says so.
+
+  POST /api/nodes/:id/promote              the node's body becomes a graph (it gets a folder).
+                                           NOTHING MOVES IN — choose what does, with move.
+  POST /api/nodes/:id/move                 {"graphId": "<sub-graph id>" | null} — change HOME.
+                                           Its file follows; a sub-graph brings its whole folder
+                                           and everything under it. null = the project top level.
+                                           400 into itself, into its own contents, into a node
+                                           that is not a sub-graph, or into another project.
+  POST /api/projects/:id/nodes/move        {"ids":[...], "graphId": ...} — several at once;
+                                           validated first, so a bad batch moves nothing
+  POST /api/nodes/:id/demote               back to a plain node: every resident moves up ONE
+                                           level (links untouched), the folder goes
+  POST /api/projects/:id/nodes             accepts "graphId" — create the node inside a sub-graph
+
+A sub-graph that still has residents cannot be archived (409 — move them out or demote it first).
+A restored node whose sub-graph was demoted meanwhile lands in the nearest graph above it.
+
+SCOPED READS — graph + scope on the graph, node list and fog:
+
+  GET /api/projects/:id/graph?graph=<sub-graph id>|root&scope=local|down
+  GET /api/projects/:id/nodes?graph=...&scope=...
+  GET /api/projects/:id/fog?graph=...&scope=...
+
+  graph=root is the project's top level. scope=local (default) is that graph only; scope=down is
+  it and every sub-graph beneath it. With NO graph parameter every read is the whole project,
+  exactly as before hierarchy — nothing existing changes. A scoped GRAPH read also carries the
+  far end of every connection that crosses the boundary as a PORTAL (\`portal: true\`, with its
+  own graphId): read-only, there so the edge has something to land on. Filter portals out before
+  you count.
+
+  curl -s "${base}/api/projects/PROJ/fog?graph=SUBGRAPH_ID&scope=down"   # uncertainty in a district, all depths
+  curl -s -X POST ${base}/api/nodes/NODE_ID/move -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"graphId":"SUBGRAPH_ID"}'
+
 ## The archive — nothing is hard-deleted
 
 Everything that leaves the live graph goes to the ARCHIVE, whole: resolved fog (answered,

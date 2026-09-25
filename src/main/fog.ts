@@ -27,7 +27,7 @@
  */
 
 import * as vault from './vault'
-import { ApiError, getNode, graphInternal, reviewHeldIds } from './services'
+import { ApiError, getNode, graphInternal, reviewHeldIds, scopedIds } from './services'
 import { FOG_TYPES } from '@shared/types'
 import type {
   FogArea, FogClass, FogItem, FogReport, FogSignal,
@@ -441,6 +441,8 @@ interface BuildOpts {
   scopeId?: string
   /** the container's own node, when scoped — it heads the `areas` list if it is one */
   scopeNode?: SpecNode
+  /** restrict to the nodes a hierarchy scope covers (graph + local|down) */
+  scopeIds?: Set<string> | null
 }
 
 function buildReport(projectId: string, opts: BuildOpts): FogReport {
@@ -458,6 +460,7 @@ function buildReport(projectId: string, opts: BuildOpts): FogReport {
     if (n.referencesNodeId) continue
     if (ix.resolved.has(n.id)) continue // THE shared predicate — see the header
     if (scope && !scope.has(n.id)) continue
+    if (opts.scopeIds && !opts.scopeIds.has(n.id)) continue
     const fogClass = classify(n, (ix.derivesOut.get(n.id) ?? []).length)
     if (!fogClass) continue
     items.push(buildItem(ix, loc, n, fogClass, at))
@@ -552,17 +555,19 @@ const optionalLimit = (v: unknown): number | undefined => {
  * agree with the items). `bodies=1` carries each returned item's markdown —
  * the reason to call this instead of listing nodes and fetching N of them.
  */
-export function getFog(p: { projectId: string; bodies?: boolean; areaId?: string; limit?: number }): FogReport {
+export function getFog(p: { projectId: string; bodies?: boolean; areaId?: string; limit?: number; graph?: unknown; scope?: unknown }): FogReport {
   if (typeof p?.projectId !== 'string' || !p.projectId) throw new ApiError('projectId is required', 400)
   const limit = optionalLimit(p.limit)
+  // hierarchy scope: this graph (local) or it and everything beneath (down)
+  const scopeIds = scopedIds(p.projectId, p.graph, p.scope)
   if (p.areaId) {
     const ix = indexGraph(p.projectId)
     const area = ix.byId.get(p.areaId)
     if (!area) throw new ApiError(`area "${p.areaId}" not found in project ${p.projectId}`, 404)
     if (area.type !== 'area') throw new ApiError(`"${area.title}" is a ${area.type}, not an area — use GET /api/nodes/${area.id}/fog for any container`, 400)
-    return buildReport(p.projectId, { bodies: !!p.bodies, limit, scopeId: area.id, scopeNode: area })
+    return buildReport(p.projectId, { bodies: !!p.bodies, limit, scopeId: area.id, scopeNode: area, scopeIds })
   }
-  return buildReport(p.projectId, { bodies: !!p.bodies, limit })
+  return buildReport(p.projectId, { bodies: !!p.bodies, limit, scopeIds })
 }
 
 /**

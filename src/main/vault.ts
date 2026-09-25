@@ -304,6 +304,32 @@ export function restoreFile(archivedRel: string, originalRel: string): string {
   return path.relative(vaultRoot, dest)
 }
 
+/** Move a sub-graph's folder (vault-relative) — every file under it travels. */
+export function moveFolder(fromRel: string, toRel: string): void {
+  const from = absPath(fromRel)
+  const to = absPath(toRel)
+  if (!fs.existsSync(from) || from === to) return
+  fs.mkdirSync(path.dirname(to), { recursive: true })
+  moveDir(from, to)
+  // tracked self-write hashes are keyed by absolute path — carry them along
+  for (const [abs, h] of [...selfWrites]) {
+    if (abs.startsWith(from + path.sep)) {
+      selfWrites.delete(abs)
+      selfWrites.set(to + abs.slice(from.length), h)
+    }
+  }
+}
+
+/** Remove a folder only if nothing but empty folders remain in it. */
+export function removeEmptyFolder(rel: string): void {
+  const abs = absPath(rel)
+  const empty = (dir: string): boolean =>
+    fs.readdirSync(dir, { withFileTypes: true }).every((e) => e.isDirectory() && empty(path.join(dir, e.name)))
+  try {
+    if (fs.existsSync(abs) && empty(abs)) fs.rmSync(abs, { recursive: true, force: true })
+  } catch { /* a folder we cannot remove is left, never an error */ }
+}
+
 /** Move a directory, falling back to copy+delete when a watcher holds the handle (Windows EPERM). */
 function moveDir(from: string, to: string): void {
   try {
