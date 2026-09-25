@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/store'
 import { rpc, RpcError } from '@/api'
 import {
@@ -26,8 +26,7 @@ async function rpcW<T>(method: string, payload?: unknown): Promise<T> {
   return rpc<T>(method, payload)
 }
 
-type Mode = 'nodes' | 'links' | 'projects'
-type ArchivedProject = { id: string; name: string; description: string; nodeCount?: number; archivedAt: number; archivedBy: string }
+type Mode = 'nodes' | 'links'
 type Item = ArchivedNode & { snippet?: string }
 
 const VERB_LABEL: Record<string, string> = {
@@ -44,7 +43,6 @@ const relLabel = (e: ArchivedEdge, fromId: string): string => {
 
 export function ArchiveView(): React.JSX.Element {
   const projectId = useStore((s) => s.projectId)
-  const projects = useStore((s) => s.projects)
   const focusId = useStore((s) => s.archiveFocusId)
   const detailVersion = useStore((s) => s.detailVersion)
   const lock = useStore((s) => s.session?.readOnly ?? null)
@@ -56,18 +54,15 @@ export function ArchiveView(): React.JSX.Element {
   const [mode, setMode] = useState<Mode>('nodes')
   const [q, setQ] = useState('')
   const [debounced, setDebounced] = useState('')
-  const [allProjects, setAllProjects] = useState(false)
   const [family, setFamily] = useState<NodeFamily | ''>('')
   const [items, setItems] = useState<Item[]>([])
   const [links, setLinks] = useState<ArchivedEdge[]>([])
-  const [archivedProjects, setArchivedProjects] = useState<ArchivedProject[]>([])
   const [total, setTotal] = useState(0)
   const [openId, setOpenId] = useState<string | null>(null)
   const [detail, setDetail] = useState<ArchivedNodeDetail | null>(null)
   const [busy, setBusy] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
 
-  const projectName = useMemo(() => new Map(projects.map((p) => [p.id, p.name])), [projects])
 
   // arriving from elsewhere (a link row, the activity feed) opens that node
   useEffect(() => {
@@ -88,17 +83,11 @@ export function ArchiveView(): React.JSX.Element {
   useEffect(() => {
     if (!projectId) return
     let live = true
-    const scope = allProjects ? {} : { projectId }
+    // the Archive is THIS project's — archived projects live on the picker's ⋯ menu
+    const scope = { projectId }
     const run = async (): Promise<void> => {
       try {
-        if (mode === 'projects') {
-          const r = await rpc<ArchivedProject[]>('archive.projects', {})
-          if (!live) return
-          const needle = debounced.toLowerCase()
-          const shown = needle ? r.filter((p) => (p.name + ' ' + p.description).toLowerCase().includes(needle)) : r
-          setArchivedProjects(shown)
-          setTotal(shown.length)
-        } else if (mode === 'nodes') {
+        if (mode === 'nodes') {
           const r = await rpc<{ total: number; items: Item[] }>('archive.list', {
             ...scope, ...(debounced ? { q: debounced } : {}), ...(family ? { family } : {}), limit: 200
           })
@@ -119,7 +108,7 @@ export function ArchiveView(): React.JSX.Element {
     }
     void run()
     return () => { live = false }
-  }, [projectId, mode, debounced, allProjects, family, detailVersion, toast])
+  }, [projectId, mode, debounced, family, detailVersion, toast])
 
   // the open node, whole
   useEffect(() => {
@@ -152,17 +141,6 @@ export function ArchiveView(): React.JSX.Element {
     }
   }
 
-  const restoreProject = async (p: ArchivedProject): Promise<void> => {
-    try {
-      await rpcW('archive.restoreProject', { id: p.id })
-      await useStore.getState().refreshProjects()
-      toast(`project "${p.name}" restored`, 'info')
-      useStore.setState((s) => ({ detailVersion: s.detailVersion + 1 }))
-    } catch (err) {
-      toast(err instanceof Error ? err.message : String(err))
-    }
-  }
-
   const restore = async (): Promise<void> => {
     if (!detail || busy) return
     setBusy(true)
@@ -189,7 +167,6 @@ export function ArchiveView(): React.JSX.Element {
         <div className="archive-modes">
           <button className={mode === 'nodes' ? 'on' : ''} onClick={() => setMode('nodes')}>Nodes</button>
           <button className={mode === 'links' ? 'on' : ''} onClick={() => setMode('links')}>Links</button>
-          <button className={mode === 'projects' ? 'on' : ''} onClick={() => setMode('projects')}>Projects</button>
         </div>
       </div>
       <div className="archive">
@@ -198,16 +175,12 @@ export function ArchiveView(): React.JSX.Element {
             <input
               ref={searchRef}
               className="input"
-              placeholder={mode === 'nodes' ? 'Search titles, text, notes, tags…' : mode === 'links' ? 'Search link labels and node titles…' : 'Search archived projects…'}
+              placeholder={mode === 'nodes' ? 'Search titles, text, notes, tags…' : 'Search link labels and node titles…'}
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') setQ('') }}
             />
             <div className="archive-filters">
-              {mode !== 'projects' && <label className="archive-check" title="Search every project's archive, not just this board">
-                <input type="checkbox" checked={allProjects} onChange={(e) => setAllProjects(e.target.checked)} />
-                all projects
-              </label>}
               {mode === 'nodes' && (
                 <div className="archive-families">
                   <button className={family === '' ? 'on' : ''} onClick={() => setFamily('')}>All</button>
@@ -219,7 +192,7 @@ export function ArchiveView(): React.JSX.Element {
                 </div>
               )}
             </div>
-            <div className="archive-count">{total} {mode === 'nodes' ? `archived node${total === 1 ? '' : 's'}` : mode === 'links' ? `archived link${total === 1 ? '' : 's'}` : `archived project${total === 1 ? '' : 's'}`}{debounced ? ` matching "${debounced}"` : ''}</div>
+            <div className="archive-count">{total} {mode === 'nodes' ? `archived node${total === 1 ? '' : 's'}` : `archived link${total === 1 ? '' : 's'}`}{debounced ? ` matching "${debounced}"` : ''}</div>
           </div>
 
           <div className="archive-rows">
@@ -230,7 +203,6 @@ export function ArchiveView(): React.JSX.Element {
                   <span className={`verb v-${i.verb}`}>{VERB_LABEL[i.verb] ?? i.verb}</span>
                   <span>{timeAgo(i.archivedAt)}</span>
                   <span>· {i.archivedBy}</span>
-                  {allProjects && <span>· {projectName.get(i.projectId) ?? i.projectId}</span>}
                 </div>
                 {i.snippet && <div className="s">{i.snippet}</div>}
                 {!i.snippet && i.note && <div className="s">{i.note}</div>}
@@ -252,25 +224,11 @@ export function ArchiveView(): React.JSX.Element {
                 )}
               </div>
             ))}
-            {mode === 'projects' && archivedProjects.map((p) => (
-              <div key={p.id} className="archive-row static">
-                <div className="t"><span>{p.name}</span></div>
-                <div className="m">
-                  <span className="verb">archived</span>
-                  <span>{timeAgo(p.archivedAt)}</span>
-                  <span>· {p.archivedBy}</span>
-                  <span>· {p.nodeCount ?? 0} nodes</span>
-                </div>
-                {p.description && <div className="s">{p.description}</div>}
-                <div><button className="btn sm" disabled={!!lock} onClick={() => void restoreProject(p)}
-                  title={lock ? lock.message : 'Back to the project list, exactly as it was'}>Restore project</button></div>
-              </div>
-            ))}
-            {((mode === 'nodes' && !items.length) || (mode === 'links' && !links.length) || (mode === 'projects' && !archivedProjects.length)) && (
+            {((mode === 'nodes' && !items.length) || (mode === 'links' && !links.length)) && (
               <div className="empty" style={{ padding: '40px 16px' }}>
                 <div className="big">▢</div>
                 <h3>{debounced ? 'Nothing matches' : 'The archive is empty'}</h3>
-                <div>{debounced ? 'Try fewer words, or search all projects.' : 'Resolved fog, completed actions and archived nodes land here — nothing is ever destroyed.'}</div>
+                <div>{debounced ? 'Try fewer words.' : 'Resolved fog, completed actions and archived nodes land here — nothing is ever destroyed.'}</div>
               </div>
             )}
           </div>
@@ -297,7 +255,6 @@ export function ArchiveView(): React.JSX.Element {
               <div className="archive-meta">
                 <span><ActorBadge name={detail.archivedBy} /> {VERB_LABEL[detail.verb] ?? detail.verb} {timeAgo(detail.archivedAt)}</span>
                 <span>created {timeAgo(detail.createdAt)} by {detail.createdBy || 'unknown'}</span>
-                {allProjects && <span>in {projectName.get(detail.projectId) ?? detail.projectId}</span>}
                 <span className="mono">{detail.id}</span>
               </div>
               {detail.note && <div className="archive-note">{detail.note}</div>}

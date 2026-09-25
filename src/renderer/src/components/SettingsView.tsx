@@ -34,7 +34,6 @@ export function SettingsView(): React.JSX.Element {
   const toast = useStore((s) => s.toast)
   const [form, setForm] = useState<SaveForm | null>(() => pickForm(settings))
   const [needsRelaunch, setNeedsRelaunch] = useState(false)
-  const [confirmDelProject, setConfirmDelProject] = useState(false)
   const [copied, setCopied] = useState(false)
 
   // re-sync only when the UPSTREAM values of THESE fields change — a
@@ -60,7 +59,6 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  const project = projects.find((p) => p.id === projectId)
   const apiBase = info?.apiBase ?? (info ? `http://127.0.0.1:${info.port}` : '')
 
   return (
@@ -183,43 +181,13 @@ export function SettingsView(): React.JSX.Element {
             <SkillTargetsCard settings={settings} projects={projects} />
           </FrozenWhenLocked>
 
-          {/* Closing the board sits next to deleting a project, because they are
-              the same kind of decision: reversible, but not casually. */}
+          {/* Closing the board is app-wide; archiving ONE project is not, so that
+              lives on the project picker's ⋯ menu instead of here. */}
           <BoardLockCard />
 
-          {project && (
-            <FrozenWhenLocked>
-              <div className="settings-card" style={{ borderColor: '#3d2430' }}>
-                <h2 style={{ color: 'var(--danger)' }}>Archive this project</h2>
-                <div className="hint">
-                  Archive <b>{project.name}</b> ({project.nodeCount ?? 0} nodes). It leaves the project list and the
-                  commons; every node, link, file and note stays exactly as it is, and the Archive can restore it.
-                  Nothing is deleted.
-                </div>
-                <div>
-                  <button className="btn danger" onClick={() => setConfirmDelProject(true)}>Archive project…</button>
-                </div>
-              </div>
-            </FrozenWhenLocked>
-          )}
         </div>
       </div>
 
-      {confirmDelProject && project && (
-        <Confirm
-          title={`Archive project "${project.name}"?`}
-          confirmLabel="Archive"
-          body="It leaves the project list; nothing inside it changes. Restore it any time from the Archive → Projects."
-          onConfirm={async () => {
-            try {
-              await rpc('projects.delete', { id: project.id })
-            } catch (e) {
-              toast(e instanceof Error ? e.message : String(e))
-            }
-          }}
-          onClose={() => setConfirmDelProject(false)}
-        />
-      )}
     </>
   )
 }

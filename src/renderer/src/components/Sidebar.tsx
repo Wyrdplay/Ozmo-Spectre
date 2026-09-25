@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useStore, type View } from '@/store'
 import { rpc } from '@/api'
-import { Modal, useCopyFlash } from './widgets'
+import { Confirm, Modal, useCopyFlash } from './widgets'
+import { timeAgo } from '@/lib/markdown'
 import { NODE_FAMILY, warpStageOpen, type Project } from '@shared/types'
 import '../sidebar.css'
 
@@ -94,6 +95,12 @@ export function Sidebar(): React.JSX.Element {
   const skills = useStore((s) => s.skills)
   const toast = useStore((s) => s.toast)
   const [creating, setCreating] = useState(false)
+  // the project's own actions — archive it, bring an archived one back — sit on
+  // the picker they act on, not in the app-wide Settings
+  const [projMenu, setProjMenu] = useState(false)
+  const [confirmArchive, setConfirmArchive] = useState(false)
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const currentProject = projects.find((p) => p.id === projectId) ?? null
   const [name, setName] = useState('')
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === '1')
 
@@ -253,6 +260,7 @@ Switch workspace`}
       </div>
 
       <div className="project-select">
+        <div className="project-row">
         <select
           value={projectId ?? ''}
           onChange={(e) => {
@@ -265,6 +273,34 @@ Switch workspace`}
           ))}
           {canWrite && <option value="__new__">＋ New project…</option>}
         </select>
+        <button
+          className="project-more"
+          title="Project actions — archive this project, restore an archived one"
+          aria-label="Project actions"
+          aria-expanded={projMenu}
+          onClick={() => setProjMenu((o) => !o)}
+        >
+          ⋯
+        </button>
+        </div>
+        {projMenu && (
+          <>
+            <div className="project-menu-scrim" onClick={() => setProjMenu(false)} />
+            <div className="project-menu" role="menu">
+              <button
+                role="menuitem"
+                disabled={!canWrite || !currentProject}
+                title={canWrite ? undefined : 'You can view this board but not change it'}
+                onClick={() => { setProjMenu(false); setConfirmArchive(true) }}
+              >
+                Archive this project…
+              </button>
+              <button role="menuitem" onClick={() => { setProjMenu(false); setArchivedOpen(true) }}>
+                Archived projects…
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {NAV.map(navButton)}
@@ -325,6 +361,24 @@ Switch workspace`}
         )}
       </div>
 
+      {confirmArchive && currentProject && (
+        <Confirm
+          title={`Archive project "${currentProject.name}"?`}
+          confirmLabel="Archive"
+          body={`It leaves the project list; nothing inside it changes — ${currentProject.nodeCount ?? 0} nodes, their links, files and history stay as they are. Restore it any time from ⋯ → Archived projects.`}
+          onConfirm={async () => {
+            try {
+              await rpc('projects.delete', { id: currentProject.id })
+              toast(`project "${currentProject.name}" archived`, 'info')
+            } catch (e) {
+              toast(e instanceof Error ? e.message : String(e))
+            }
+          }}
+          onClose={() => setConfirmArchive(false)}
+        />
+      )}
+      {archivedOpen && <ArchivedProjects canWrite={canWrite} onClose={() => setArchivedOpen(false)} />}
+
       <button
         className="sidebar-toggle"
         onClick={toggleCollapsed}
@@ -362,5 +416,60 @@ Switch workspace`}
         </Modal>
       )}
     </div>
+  )
+}
+
+/** Archived projects — the one list that is about no project in particular. */
+function ArchivedProjects({ canWrite, onClose }: { canWrite: boolean; onClose: () => void }): React.JSX.Element {
+  const toast = useStore((s) => s.toast)
+  const setProject = useStore((s) => s.setProject)
+  const [list, setList] = useState<(Project & { archivedAt: number; archivedBy: string })[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  useEffect(() => {
+    rpc<(Project & { archivedAt: number; archivedBy: string })[]>('archive.projects', {})
+      .then(setList)
+      .catch((e) => { toast(e instanceof Error ? e.message : String(e)); setList([]) })
+  }, [toast])
+  const restore = async (p: Project): Promise<void> => {
+    setBusy(p.id)
+    try {
+      await rpc('archive.restoreProject', { id: p.id })
+      await useStore.getState().refreshProjects()
+      await setProject(p.id)
+      toast(`project "${p.name}" restored`, 'info')
+      onClose()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+      setBusy(null)
+    }
+  }
+  return (
+    <Modal onClose={onClose} width={520}>
+      <h2>Archived projects</h2>
+      <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
+        Archived projects are off the project list, with everything inside them kept exactly as it was.
+        Restoring one puts it back and opens it.
+      </div>
+      {!list && <div style={{ color: 'var(--text-faint)' }}>Looking…</div>}
+      {list && list.length === 0 && <div style={{ color: 'var(--text-dim)' }}>No archived projects.</div>}
+      {list && list.length > 0 && (
+        <div className="archived-projects">
+          {list.map((p) => (
+            <div key={p.id} className="archived-project">
+              <div className="t">
+                <b>{p.name}</b>
+                <span>{p.nodeCount ?? 0} nodes · archived {timeAgo(p.archivedAt)}{p.archivedBy ? ` by ${p.archivedBy}` : ''}</span>
+              </div>
+              <button className="btn sm" disabled={!canWrite || busy !== null} onClick={() => void restore(p)}>
+                {busy === p.id ? 'Restoring…' : 'Restore'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="actions">
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </div>
+    </Modal>
   )
 }
