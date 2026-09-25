@@ -545,7 +545,11 @@ export const useStore = create<OzmoState>((set, get) => ({
       ])
       const savedProject = localStorage.getItem('ozmo.projectId')
       const projectId = projects.find((p) => p.id === savedProject)?.id ?? projects[0]?.id ?? null
-      set({ info, settings, projects, projectId, booted: true, collapsedContainerIds: loadCollapsed(projectId) })
+      // the address to SHOW and COPY is the one this client really uses: inside
+      // a container the core only knows the port it bound, not the one published
+      const reached = host().apiBase
+      const shown: AppInfo = reached ? { ...info, apiBase: reached } : info
+      set({ info: shown, settings, projects, projectId, booted: true, collapsedContainerIds: loadCollapsed(projectId) })
       if (projectId) {
         await Promise.all([get().refreshGraph(), get().refreshWarps()])
       }

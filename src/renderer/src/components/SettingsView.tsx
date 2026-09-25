@@ -61,7 +61,7 @@ export function SettingsView(): React.JSX.Element {
   }
 
   const project = projects.find((p) => p.id === projectId)
-  const apiBase = info ? `http://127.0.0.1:${info.port}` : ''
+  const apiBase = info?.apiBase ?? (info ? `http://127.0.0.1:${info.port}` : '')
 
   return (
     <>

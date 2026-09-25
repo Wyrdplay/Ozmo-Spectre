@@ -126,7 +126,10 @@ async function main(): Promise<void> {
     version: v,
     port: getPort(),
     // what a CLIENT should call, which is not necessarily what we bound to
-    apiBase: env('OZMO_PUBLIC_URL') ?? `http://${bindHost}:${getPort()}`,
+    // (a wildcard bind is not an address anyone can call — say loopback; a
+    // browser client replaces this with the address it really reached us on)
+    apiBase: env('OZMO_PUBLIC_URL') ??
+      `http://${bindHost === '0.0.0.0' || bindHost === '::' ? '127.0.0.1' : bindHost}:${getPort()}`,
     vaultPath: getSettings().vaultPath,
     humanName: getSettings().humanName,
     platform: process.platform

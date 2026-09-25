@@ -100,6 +100,7 @@ export function webHost(actor = 'web'): Host {
   return {
     kind: 'web',
     coreLabel: base,
+    apiBase: base,
     can: {
       pickFolder: false,
       saveToDisk: true, // a download, which is the browser's version of this

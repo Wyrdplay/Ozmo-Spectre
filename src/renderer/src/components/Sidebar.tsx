@@ -288,7 +288,7 @@ Switch workspace`}
             ) : (
               <>
                 <span>API</span>
-                <code>127.0.0.1:{info?.port ?? '—'}</code>
+                <code>{apiBase ? apiBase.replace(/^https?:\/\//, '') : '—'}</code>
               </>
             )}
           </span>

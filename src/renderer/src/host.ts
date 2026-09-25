@@ -67,6 +67,12 @@ export interface Host {
   readonly kind: 'electron' | 'web'
   /** A human-readable name for where the core is, for the UI to say out loud. */
   readonly coreLabel: string
+  /**
+   * The API base this client actually reaches the core on, when it knows better
+   * than the core does (a browser behind a published port, a proxy, a tailnet).
+   * Undefined on the desktop, where the core's own address is the truth.
+   */
+  readonly apiBase?: string
   readonly can: HostCapabilities
 
   call(method: string, payload?: unknown): Promise<RpcResult>

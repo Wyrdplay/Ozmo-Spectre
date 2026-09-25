@@ -180,7 +180,24 @@ export async function startServer(
   app.use(cors({ origin: true, credentials: false }))
   app.use(express.json({ limit: '10mb' }))
 
-  const base = (): string => `http://127.0.0.1:${actualPort}`
+  /**
+   * The address to hand a caller: the one THEY used to reach us. Inside a
+   * container the bound port (4820) is not the published one (4821), and behind
+   * Tailscale or a proxy neither is the host — so the text an agent copies from
+   * llms.txt has to be built from the request, not from what we bound to.
+   * OZMO_PUBLIC_URL, when set, wins over both. The Host header can only change
+   * the text sent back to the same caller, so trusting it here costs nothing.
+   */
+  const base = (req?: Request): string => {
+    const pub = process.env.OZMO_PUBLIC_URL?.trim()
+    if (pub) return pub.replace(/\/+$/, '')
+    const fwdHost = req?.get('x-forwarded-host')?.split(',')[0]?.trim()
+    const host = fwdHost || req?.get('host')
+    if (!host || !/^[A-Za-z0-9.\-:\[\]]+$/.test(host)) return `http://127.0.0.1:${actualPort}`
+    const fwdProto = req?.get('x-forwarded-proto')?.split(',')[0]?.trim()
+    const proto = fwdProto === 'https' || fwdProto === 'http' ? fwdProto : req?.protocol === 'https' ? 'https' : 'http'
+    return `${proto}://${host}`
+  }
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, app: 'ozmo-spectre', version, port: actualPort, at: Date.now() })
@@ -234,17 +251,17 @@ export async function startServer(
     }
   })
 
-  app.get(['/llms.txt', '/api/llms.txt'], (_req, res) => {
-    res.type('text/plain').send(llmsTxt(base()))
+  app.get(['/llms.txt', '/api/llms.txt'], (req, res) => {
+    res.type('text/plain').send(llmsTxt(base(req)))
   })
 
-  app.get('/api', (_req, res) => {
+  app.get('/api', (req, res) => {
     res.json({
       name: 'Ozmo Spectre API',
       version,
-      docs: `${base()}/llms.txt`,
+      docs: `${base(req)}/llms.txt`,
       hint: 'Send X-Actor: <your-name> on every request. Read /llms.txt first — it is the full guide.',
-      events: `${base()}/api/events`,
+      events: `${base(req)}/api/events`,
       resources: ['projects', 'nodes', 'edges', 'warps', 'reviews', 'activity', 'search']
     })
   })
