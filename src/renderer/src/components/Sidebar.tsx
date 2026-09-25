@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useStore, type View } from '@/store'
 import { rpc } from '@/api'
 import { Modal, useCopyFlash } from './widgets'
-import { warpStageOpen, type Project } from '@shared/types'
+import { NODE_FAMILY, warpStageOpen, type Project } from '@shared/types'
 import '../sidebar.css'
 
 const COLLAPSED_KEY = 'ozmo.sidebarCollapsed'
@@ -27,6 +27,15 @@ const ICONS: Record<View, React.JSX.Element> = {
       <path d="M4 18h7" strokeOpacity="0.3" />
     </svg>
   ),
+  // a card lifting out of haze: the fog, worked one at a time
+  refine: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M3 17c2.2 0 2.2-1.4 4.5-1.4S9.8 17 12 17s2.3-1.4 4.5-1.4S18.8 17 21 17" strokeOpacity="0.45" />
+      <path d="M3 21c2.2 0 2.2-1.4 4.5-1.4S9.8 21 12 21s2.3-1.4 4.5-1.4S18.8 21 21 21" strokeOpacity="0.25" />
+      <rect x="6.5" y="3" width="11" height="9.5" rx="1.8" />
+      <path d="M9.5 7.8l1.8 1.8 3.4-3.6" />
+    </svg>
+  ),
   warps: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="8.5" /><path d="M12 3.5a8.5 8.5 0 0 1 0 17" strokeOpacity="0.35" />
@@ -37,6 +46,14 @@ const ICONS: Record<View, React.JSX.Element> = {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M21 12a8 8 0 1 0-3.1 6.3L21 20l-.9-3.3A7.9 7.9 0 0 0 21 12Z" />
       <path d="M8.5 11h7M8.5 14.5h4.5" />
+    </svg>
+  ),
+  // a box with its lid lifted: kept, not thrown away
+  archive: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <rect x="3" y="4" width="18" height="4.5" rx="1" />
+      <path d="M5 8.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8.5" />
+      <path d="M10 12.5h4" />
     </svg>
   ),
   // the matrix itself: rows of skills against columns of targets, one cell lit
@@ -104,6 +121,37 @@ export function Sidebar(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // the Refine badge: open fog on this board. Resolved is whatever the user's
+  // own dim rules say (Done, Pruned) — the same vocabulary the fog lens uses
+  // — and the same exclusions the Refine queue makes: designated feedback is
+  // not fog (it derived its work), and review-held feedback belongs to the room
+  const settingsFlags = useStore((s) => s.settings?.flags)
+  const graphEdges = useStore((s) => s.graph.edges)
+  const openFogCount = useMemo(() => {
+    const dim = new Set((settingsFlags ?? []).filter((f) => f.treatment === 'dim').map((f) => f.name))
+    const derivesOut = new Set<string>()
+    const membersOf = new Map<string, string[]>()
+    for (const e of graphEdges) {
+      for (const r of e.relationships ?? []) {
+        if (r.type === 'derives') derivesOut.add(r.sourceId)
+        if (r.type === 'member') membersOf.set(r.targetId, [...(membersOf.get(r.targetId) ?? []), r.sourceId])
+      }
+    }
+    const held = new Set<string>()
+    const queue = graphNodes.filter((n) => n.type === 'warp' && n.stage === 'review').map((n) => n.id)
+    while (queue.length) {
+      for (const m of membersOf.get(queue.shift()!) ?? []) {
+        if (held.has(m)) continue
+        held.add(m)
+        queue.push(m)
+      }
+    }
+    return graphNodes.filter((n) =>
+      n.projectId === projectId && NODE_FAMILY[n.type] === 'fog' && !n.referencesNodeId &&
+      !(n.flags ?? []).some((f) => dim.has(f)) &&
+      !(n.type === 'feedback' && (derivesOut.has(n.id) || held.has(n.id)))
+    ).length
+  }, [graphNodes, graphEdges, projectId, settingsFlags])
   // the review lens badge: warps currently at the Review stage
   const openReviewCount = graphNodes.filter((n) => n.type === 'warp' && n.stage === 'review').length
   // the Agentic badge counts FILES OUT OF STEP — a target behind its node, or a
@@ -147,8 +195,10 @@ export function Sidebar(): React.JSX.Element {
     { key: 'graph', label: 'Graph' },
     { key: 'lists', label: 'Lists' },
     { key: 'backlog', label: 'Backlog' },
+    { key: 'refine', label: 'Refine', badge: openFogCount },
     { key: 'warps', label: 'Warps', badge: liveWarpCount },
     { key: 'reviews', label: 'Reviews', badge: openReviewCount },
+    { key: 'archive', label: 'Archive' },
     { key: 'agentic', label: 'Agentic', badge: driftedCount },
     { key: 'activity', label: 'Activity' },
     { key: 'settings', label: 'Settings' }

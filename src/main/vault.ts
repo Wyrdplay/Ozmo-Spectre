@@ -257,6 +257,53 @@ export function trashFile(relPath: string): void {
   selfWrites.delete(abs)
 }
 
+/**
+ * ARCHIVE a node file: move it into its project's `.archive/` folder, keeping
+ * its project-relative shape (`Spectre/Bugs/X.md` → `Spectre/.archive/Bugs/X.md`).
+ * A dot-folder on purpose — the watcher ignores dot segments, so an archived
+ * file can never be folded back in as a live node. Returns the new vault-relative
+ * path ('' when there was no file to move).
+ */
+export function archiveFile(relPath: string): string {
+  const abs = absPath(relPath)
+  if (!relPath || !fs.existsSync(abs)) return ''
+  const parts = relPath.split(/[\\/]/)
+  const project = parts.shift() ?? ''
+  const dir = path.join(vaultRoot, project, '.archive', ...parts.slice(0, -1))
+  fs.mkdirSync(dir, { recursive: true })
+  const base = path.basename(relPath, '.md')
+  let name = base
+  let i = 2
+  while (fs.existsSync(path.join(dir, name + '.md'))) name = `${base} ${i++}`
+  const dest = path.join(dir, name + '.md')
+  fs.renameSync(abs, dest)
+  selfWrites.delete(abs)
+  return path.relative(vaultRoot, dest)
+}
+
+/**
+ * RESTORE an archived file to where it lived (or beside it, when a live file
+ * has taken that name since). Tracked as our own write so the watcher does not
+ * read the move back as an external edit. Returns the live vault-relative path.
+ */
+export function restoreFile(archivedRel: string, originalRel: string): string {
+  const src = archivedRel ? absPath(archivedRel) : ''
+  const wanted = absPath(originalRel)
+  const dir = path.dirname(wanted)
+  fs.mkdirSync(dir, { recursive: true })
+  const base = path.basename(wanted, '.md')
+  let name = base
+  let i = 2
+  while (fs.existsSync(path.join(dir, name + '.md'))) name = `${base} ${i++}`
+  const dest = path.join(dir, name + '.md')
+  if (src && fs.existsSync(src)) {
+    const raw = fs.readFileSync(src, 'utf8')
+    selfWrites.set(dest, hash(raw))
+    fs.renameSync(src, dest)
+  }
+  return path.relative(vaultRoot, dest)
+}
+
 /** Move a directory, falling back to copy+delete when a watcher holds the handle (Windows EPERM). */
 function moveDir(from: string, to: string): void {
   try {

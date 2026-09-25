@@ -3,12 +3,13 @@ import fs from 'fs'
 import crypto from 'crypto'
 import {
   NODE_TYPES, EDGE_TYPES, RELATIONSHIP_TYPES, STAGE_PROGRESS, WARP_STAGES, warpStageOpen, warpAcceptsFeedback,
-  doneRule, prunedRule,
+  doneRule, prunedRule, NODE_FAMILY, isNodeFamily, familyOf,
   defaultEdgeFor, newId, slugify,
   type NodeType, type EdgeType, type RelationshipType, type EdgeRelationship, type WarpStage,
   type Project, type SpecNode, type SpecEdge, type Annotation,
   type NodeDetail, type EdgeWithTitles, type ActivityEntry, type GraphPayload, type WarpSummary,
-  type NodeDiff, type NodeDiffContent, type AddedEdgeInfo, type RemovedEdgeInfo, type FlagRule
+  type NodeDiff, type NodeDiffContent, type AddedEdgeInfo, type RemovedEdgeInfo, type FlagRule,
+  type ArchivedNode, type ArchivedEdge, type ArchivedNodeDetail
 } from '@shared/types'
 import { unifiedDiff } from '@shared/diff'
 import * as db from './db'
@@ -71,7 +72,7 @@ function mapNode(r: NodeRow, tags: string[] = []): SpecNode {
     ...(r.slug ? { slug: r.slug } : {}),
     ...(r.description ? { description: r.description } : {}),
     ...(skillOptions ? { skillOptions } : {}),
-    id: r.id, projectId: r.project_id, type: r.type as NodeType, title: r.title,
+    id: r.id, projectId: r.project_id, type: r.type as NodeType, family: familyOf(r.type as NodeType), title: r.title,
     stage: r.stage ?? null, progress: r.progress ?? null, rank: r.rank ?? null, tags,
     x: r.x, y: r.y, pinned: !!r.pinned, filePath: r.file_path,
     createdAt: r.created_at, updatedAt: r.updated_at, createdBy: r.created_by,
@@ -137,11 +138,16 @@ function tagsFor(nodeIds: string[]): Map<string, string[]> {
 
 function nodeRow(id: string): NodeRow {
   const r = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [id])
-  if (!r) notFound('node')
+  if (!r) {
+    // a node that left the graph is ARCHIVED, not gone — say where it went
+    const a = db.get<{ verb: string }>('SELECT verb FROM archived_nodes WHERE id = ?', [id])
+    if (a) throw new ApiError(`node "${id}" is archived (${a.verb}) — GET /api/archive/${id}, or POST /api/archive/${id}/restore`, 404, { archived: true })
+    notFound('node')
+  }
   return r!
 }
 
-function projectRow(id: string): { id: string; name: string; slug: string; folder: string; description: string; created_at: number; updated_at: number } {
+function projectRow(id: string): { id: string; name: string; slug: string; folder: string; description: string; created_at: number; updated_at: number; archived_at?: number | null } {
   const r = db.get<{ id: string; name: string; slug: string; folder: string; description: string; created_at: number; updated_at: number }>(
     'SELECT * FROM projects WHERE id = ?', [id]
   )
@@ -261,7 +267,7 @@ function neighborIds(nodeId: string): string[] {
 export function listProjects(): Project[] {
   const rows = db.all<{ id: string; name: string; slug: string; folder: string; description: string; created_at: number; updated_at: number; node_count: number }>(
     `SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count
-     FROM projects p ORDER BY p.created_at`
+     FROM projects p WHERE p.archived_at IS NULL ORDER BY p.created_at`
   )
   return rows.map((r) => ({
     id: r.id, name: r.name, slug: r.slug, description: r.description,
@@ -309,6 +315,13 @@ export async function updateProject(p: { id: string; name?: string; description?
         db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [path.join(folder, n.file_path.slice(prefix.length)), n.id])
       }
     }
+    for (const a of db.all<{ id: string; file_path: string; row: string }>('SELECT id, file_path, row FROM archived_nodes WHERE project_id = ?', [p.id])) {
+      const moved = (fp: string): string => (fp.startsWith(prefix) ? path.join(folder, fp.slice(prefix.length)) : fp)
+      let row: Record<string, unknown> = {}
+      try { row = JSON.parse(a.row) } catch { row = {} }
+      if (typeof row.file_path === 'string') row.file_path = moved(row.file_path)
+      db.run('UPDATE archived_nodes SET file_path = ?, row = ? WHERE id = ?', [moved(a.file_path), JSON.stringify(row), a.id])
+    }
     db.run('UPDATE projects SET folder = ? WHERE id = ?', [folder, p.id])
   }
   db.run('UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?',
@@ -319,7 +332,57 @@ export async function updateProject(p: { id: string; name?: string; description?
   return proj
 }
 
-export async function deleteProject(p: { id: string }, actor: string): Promise<{ ok: true }> {
+/** Has this board ever had a project — archived ones included? (seeding asks) */
+export function hasAnyProject(): boolean {
+  return !!db.get('SELECT 1 AS x FROM projects LIMIT 1')
+}
+
+/**
+ * DELETE A PROJECT = ARCHIVE IT. The project leaves the project list and the
+ * commons; its nodes, links, files and history all stay exactly where they are,
+ * untouched, and POST /api/archive/projects/:id/restore brings it back whole.
+ * The one true removal is purge (host-only, `?purge=1`).
+ */
+export async function deleteProject(p: { id: string; purge?: boolean }, actor: string): Promise<{ ok: true; archived?: true }> {
+  if (p.purge) return purgeProject(p, actor)
+  const r = projectRow(p.id)
+  need(!r.archived_at, `project "${r.name}" is already archived`, 409)
+  db.run('UPDATE projects SET archived_at = ?, archived_by = ?, updated_at = ? WHERE id = ?', [now(), actor, now(), p.id])
+  logActivity(p.id, actor, 'project.archived', 'project', p.id, `archived project "${r.name}"`)
+  emitEvent('project.deleted', p.id, { id: p.id, name: r.name, archived: true }, actor)
+  emitEvent('project.archived', p.id, { id: p.id, name: r.name }, actor)
+  return { ok: true, archived: true }
+}
+
+/** Archived projects, newest first — the Archive's Projects list. */
+export function listArchivedProjects(): (Project & { archivedAt: number; archivedBy: string })[] {
+  return db.all<{ id: string; name: string; slug: string; description: string; created_at: number; updated_at: number
+    archived_at: number; archived_by: string; node_count: number }>(
+    `SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count
+     FROM projects p WHERE p.archived_at IS NOT NULL ORDER BY p.archived_at DESC`
+  ).map((r) => ({
+    id: r.id, name: r.name, slug: r.slug, description: r.description, createdAt: r.created_at, updatedAt: r.updated_at,
+    nodeCount: r.node_count, archivedAt: r.archived_at, archivedBy: r.archived_by
+  }))
+}
+
+/** Bring an archived project back to the project list, whole. */
+export function restoreProject(p: { id: string }, actor: string): Project {
+  const r = projectRow(p.id)
+  need(r.archived_at, `project "${r.name}" is not archived`, 409)
+  db.run('UPDATE projects SET archived_at = NULL, archived_by = \'\', updated_at = ? WHERE id = ?', [now(), p.id])
+  const proj = getProject({ id: p.id })
+  logActivity(p.id, actor, 'project.restored', 'project', p.id, `restored project "${r.name}" from the archive`)
+  emitEvent('project.created', p.id, proj, actor)
+  emitEvent('project.restored', p.id, proj, actor)
+  return proj
+}
+
+/**
+ * PURGE — the one true removal on the board: every row of the project (live and
+ * archived), its folder to the vault trash. Host-only, and never what DELETE does.
+ */
+export async function purgeProject(p: { id: string }, actor: string): Promise<{ ok: true }> {
   const r = projectRow(p.id)
   // Every dependent row is deleted explicitly, children first, in one transaction.
   // ON DELETE CASCADE stays in the schema but must NOT be load-bearing here: the
@@ -351,6 +414,27 @@ export async function deleteProject(p: { id: string }, actor: string): Promise<{
           OR target_id IN (SELECT id FROM nodes WHERE project_id = ?)`,
       [p.id, p.id, p.id])
     db.run('DELETE FROM skill_installs WHERE node_id IN (SELECT id FROM nodes WHERE project_id = ?)', [p.id])
+    // the project's ARCHIVE goes with the project (its folder goes to the trash
+    // whole): archived nodes' history, archived links touching them, the rows
+    db.run(
+      `DELETE FROM annotations
+       WHERE (parent_kind = 'node' AND parent_id IN (SELECT id FROM archived_nodes WHERE project_id = ?))
+          OR (parent_kind = 'edge' AND parent_id IN (
+                SELECT id FROM archived_edges WHERE project_id = ?
+                   OR source_id IN (SELECT id FROM archived_nodes WHERE project_id = ?)
+                   OR target_id IN (SELECT id FROM archived_nodes WHERE project_id = ?)
+                   OR source_id IN (SELECT id FROM nodes WHERE project_id = ?)
+                   OR target_id IN (SELECT id FROM nodes WHERE project_id = ?)))`,
+      [p.id, p.id, p.id, p.id, p.id, p.id])
+    db.run('DELETE FROM node_revisions WHERE node_id IN (SELECT id FROM archived_nodes WHERE project_id = ?)', [p.id])
+    db.run(
+      `DELETE FROM archived_edges WHERE project_id = ?
+          OR source_id IN (SELECT id FROM archived_nodes WHERE project_id = ?)
+          OR target_id IN (SELECT id FROM archived_nodes WHERE project_id = ?)
+          OR source_id IN (SELECT id FROM nodes WHERE project_id = ?)
+          OR target_id IN (SELECT id FROM nodes WHERE project_id = ?)`,
+      [p.id, p.id, p.id, p.id, p.id])
+    db.run('DELETE FROM archived_nodes WHERE project_id = ?', [p.id])
     db.run('DELETE FROM nodes WHERE project_id = ?', [p.id])
     db.run('DELETE FROM activity WHERE project_id = ?', [p.id])
     db.run('DELETE FROM projects WHERE id = ?', [p.id])
@@ -589,12 +673,20 @@ function computeProgress(nodes: SpecNode[], edges: SpecEdge[], done: Set<string>
 // ---------------------------------------------------------------------------
 // Nodes
 
-export function listNodes(p: { projectId: string; type?: string; status?: string; tag?: string; q?: string; unassigned?: boolean }): SpecNode[] {
+export function listNodes(p: { projectId: string; type?: string; family?: string; status?: string; tag?: string; q?: string; unassigned?: boolean }): SpecNode[] {
   need(p.status === undefined, STATUS_GONE)
   projectRow(p.projectId)
   const where: string[] = ['n.project_id = ?']
   const params: unknown[] = [p.projectId]
   if (p.type) { where.push('n.type = ?'); params.push(p.type) }
+  if (p.family) {
+    need(isNodeFamily(p.family), `invalid family "${p.family}" (fog|frontier|spec|policy)`)
+    const types = typesOfFamily(p.family)
+    where.push(`n.type IN (${types.map(() => '?').join(',')})`)
+    params.push(...types)
+    // the frontier is work IN PROGRESS: a closed warp is history, not frontier
+    if (p.family === 'frontier') where.push("NOT (n.type = 'warp' AND n.stage IN ('done','not_needed'))")
+  }
   if (p.tag) { where.push('EXISTS (SELECT 1 FROM node_tags t WHERE t.node_id = n.id AND t.tag = ?)'); params.push(p.tag) }
   if (p.q) { where.push('LOWER(n.title) LIKE ?'); params.push(`%${p.q.toLowerCase()}%`) }
   const rows = db.all<NodeRow>(
@@ -794,13 +886,15 @@ export function createNode(
 
 export function getNode(p: { id: string }): NodeDetail {
   const r = nodeRow(p.id)
+  // links that went to the archive with a neighbour: preserved, shown apart, never live
+  const archivedEdges = listArchivedEdges({ nodeId: p.id, limit: 1000 }).items
   // pull the node out of the decorated graph so detail carries flags + progressComputed
   const node = graphInternal(r.project_id).nodes.find((n) => n.id === p.id) ?? mapNode(r, tagsFor([p.id]).get(p.id) ?? [])
   const annotations = db.all<{ id: string; parent_kind: 'node' | 'edge'; parent_id: string; author: string; body: string; created_at: number }>(
     'SELECT * FROM annotations WHERE parent_id = ? ORDER BY created_at', [p.id]
   ).map((a) => ({ id: a.id, parentKind: a.parent_kind, parentId: a.parent_id, author: a.author, body: a.body, createdAt: a.created_at } as Annotation))
   const edges = edgesWithTitles('e.source_id = ? OR e.target_id = ?', [p.id, p.id])
-  return { ...node, content: vault.readBody(r.file_path), annotations, edges }
+  return { ...node, content: vault.readBody(r.file_path), annotations, edges, archivedEdges }
 }
 
 export function getContent(p: { id: string }): { id: string; content: string } {
@@ -968,63 +1062,654 @@ export function updateNode(
 /** Remove a node's DB footprint: annotations (its own + its edges'), content
  *  revisions (no FK — explicit, like annotations), then the row — edges and
  *  tags cascade (foreign_keys is ON and kept on, see db.ts). */
-function deleteNodeRows(id: string): void {
+
+/**
+ * The rows a node leaves behind in the LIVE tables when it is archived: its
+ * links (and their relationships), tags, skill installs and the row itself.
+ * Annotations and revisions are NOT touched — they are keyed by id and stay,
+ * so the archived node keeps its whole history.
+ */
+function detachNodeRows(id: string): void {
   const edgeIds = db.all<{ id: string }>('SELECT id FROM edges WHERE source_id = ? OR target_id = ?', [id, id]).map((x) => x.id)
-  const parents = [id, ...edgeIds]
-  const ph = parents.map(() => '?').join(',')
   db.tx(() => {
-    db.run(`DELETE FROM annotations WHERE parent_id IN (${ph})`, parents)
     if (edgeIds.length) {
-      // would cascade via edges → edge_relationships, but explicit like the rest
-      db.run(`DELETE FROM edge_relationships WHERE edge_id IN (${edgeIds.map(() => '?').join(',')})`, edgeIds)
+      const ph = edgeIds.map(() => '?').join(',')
+      db.run(`DELETE FROM edge_relationships WHERE edge_id IN (${ph})`, edgeIds)
+      db.run(`DELETE FROM edges WHERE id IN (${ph})`, edgeIds)
     }
-    db.run('DELETE FROM node_revisions WHERE node_id = ?', [id])
-    // would cascade too, but cascades are NOT load-bearing here (sql.js export()
-    // resets the foreign_keys pragma — see db.ts persistNow); smoke's orphan-zero
-    // guard reads these rows directly
+    db.run('DELETE FROM node_tags WHERE node_id = ?', [id])
     db.run('DELETE FROM skill_installs WHERE node_id = ?', [id])
-    db.run('DELETE FROM nodes WHERE id = ?', [id]) // edges + tags cascade
+    db.run('DELETE FROM nodes WHERE id = ?', [id])
   })
 }
 
-export function deleteNode(p: { id: string }, actor: string): { ok: true } {
-  const r = nodeRow(p.id)
-  // BEFORE the rows and the file go: each reference copies the body out of the
-  // owner's file, which is only readable while it still exists. Deleting a shared
-  // node must never tear a hole in another project's graph.
-  severReferences(p.id, actor, `"${r.title}" was deleted by its owning project`)
-  const neighbors = neighborIds(p.id)
-  deleteNodeRows(p.id)
-  vault.trashFile(r.file_path)
-  for (const nid of neighbors) refreshNodeFile(nid)
-  logActivity(r.project_id, actor, 'node.deleted', 'node', p.id, `deleted ${r.type} "${r.title}"`)
-  emitEvent('node.deleted', r.project_id, { id: p.id, type: r.type, title: r.title }, actor)
-  return { ok: true }
+export type ArchiveVerb = 'archived' | 'deleted' | 'completed' | 'answered' | 'pruned' | 'waived' | 'actioned' | 'swept'
+
+/**
+ * ARCHIVE a node — the one way anything leaves the graph. Nothing is
+ * hard-deleted: the row moves to `archived_nodes` verbatim (with a body
+ * snapshot, its tags and installs), every link moves to `archived_edges` as a
+ * link (both ends, label, relationships, the far end's title and type), the
+ * file moves to the project's `.archive/` folder, and annotations/revisions
+ * stay where they are. References in other projects are severed exactly as a
+ * delete severs them — a restore does not re-point them.
+ *
+ * Returns the live neighbours, whose frontmatter the CALLER refreshes.
+ */
+function archiveNode(
+  r: NodeRow, actor: string, verb: ArchiveVerb, note: string, why: string, detail: Record<string, unknown> = {}
+): string[] {
+  let content = ''
+  try { content = vault.readBody(r.file_path) } catch { content = '' }
+  const tags = (tagsFor([r.id]).get(r.id) ?? [])
+  const installs = db.all<Record<string, unknown>>('SELECT * FROM skill_installs WHERE node_id = ?', [r.id])
+  const edgeRows = db.all<EdgeRow>(
+    `SELECT e.*, s.title AS source_title, t.title AS target_title, s.type AS source_type, t.type AS target_type
+     FROM edges e JOIN nodes s ON s.id = e.source_id JOIN nodes t ON t.id = e.target_id
+     WHERE e.source_id = ? OR e.target_id = ?`, [r.id, r.id]
+  )
+  const rels = relationshipsFor(edgeRows.map((e) => e.id))
+  severReferences(r.id, actor, why)
+  const neighbors = neighborIds(r.id)
+  const at = now()
+  // the row as it stands, minus computed columns — restore writes it back verbatim
+  const row = { ...db.get<Record<string, unknown>>('SELECT * FROM nodes WHERE id = ?', [r.id]) }
+  db.tx(() => {
+    for (const e of edgeRows) {
+      db.run(
+        `INSERT OR REPLACE INTO archived_edges (id, project_id, source_id, target_id, source_title, target_title,
+           source_type, target_type, label, relationships, created_at, created_by, archived_with, archived_at, archived_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [e.id, e.project_id, e.source_id, e.target_id, e.source_title ?? '', e.target_title ?? '',
+          e.source_type ?? '', e.target_type ?? '', e.label, JSON.stringify(rels.get(e.id) ?? []),
+          e.created_at, e.created_by, r.id, at, actor])
+    }
+    db.run(
+      `INSERT OR REPLACE INTO archived_nodes (id, project_id, type, title, tags, content, row, installs, file_path,
+         verb, note, detail, archived_at, archived_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [r.id, r.project_id, r.type, r.title, JSON.stringify(tags), content, JSON.stringify(row),
+        JSON.stringify(installs), '', verb, note, Object.keys(detail).length ? JSON.stringify(detail) : null, at, actor])
+  })
+  detachNodeRows(r.id)
+  const archivedPath = vault.archiveFile(r.file_path)
+  db.run('UPDATE archived_nodes SET file_path = ? WHERE id = ?', [archivedPath, r.id])
+  return neighbors
+}
+
+/** Refresh the files of neighbours that still exist after a removal. */
+function refreshSurvivors(ids: Iterable<string>): void {
+  for (const nid of new Set(ids)) {
+    if (db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [nid])) refreshNodeFile(nid)
+  }
 }
 
 /**
- * Complete an ACTION. Actions are instructions, not records: completion means
- * the spec/implementation absorbed the delta, so the node is REMOVED — file to
- * vault trash (never destroyed), rows deleted, neighbours' frontmatter loses
- * the wikilink. The activity entry keeps the note and the previously-linked
- * node ids; diff those targets to see what the action changed.
+ * DELETE is ARCHIVE. A node that should never have existed still leaves a
+ * record: it moves to the archive with verb `deleted`, restorable like any
+ * other. The response and events are unchanged, so callers need not know.
  */
-export function completeAction(p: { id: string; note?: string }, actor: string): { ok: true; id: string; linkedNodeIds: string[] } {
+export function deleteNode(p: { id: string; note?: string }, actor: string): { ok: true; archived: true } {
   const r = nodeRow(p.id)
-  need(r.type === 'action', `only actions can be completed — "${r.title}" is a ${r.type} (records are tagged done/fixed, or pruned)`, 400)
+  const note = typeof p.note === 'string' ? p.note.trim() : ''
+  const neighbors = archiveNode(r, actor, 'deleted', note, `"${r.title}" was deleted by its owning project`)
+  for (const nid of neighbors) refreshNodeFile(nid)
+  logActivity(r.project_id, actor, 'node.deleted', 'node', p.id, `deleted ${r.type} "${r.title}" (archived)`)
+  emitEvent('node.deleted', r.project_id, { id: p.id, type: r.type, title: r.title }, actor)
+  emitEvent('node.archived', r.project_id, { id: p.id, type: r.type, title: r.title, verb: 'deleted' }, actor)
+  return { ok: true, archived: true }
+}
+
+/**
+ * ARCHIVE — the explicit verb, for ANY node: out of the live graph, into the
+ * archive, with an optional note. Fog is archived often (every resolution does
+ * it); spec, policy and frontier nodes are archived when they stop being true
+ * and nobody wants them dimmed on the canvas any more.
+ */
+export function archiveNodeVerb(p: { id: string; note?: string }, actor: string): { ok: true; id: string; archived: true } {
+  const r = nodeRow(p.id)
   need(p.note === undefined || p.note === null || typeof p.note === 'string', 'note must be a string')
   const note = typeof p.note === 'string' ? p.note.trim() : ''
-  const linkedNodeIds = neighborIds(p.id)
-  deleteNodeRows(p.id)
-  vault.trashFile(r.file_path)
-  for (const nid of linkedNodeIds) refreshNodeFile(nid)
-  logActivity(r.project_id, actor, 'action.completed', 'node', p.id,
-    `completed action "${r.title}"${note ? ` — ${note}` : ''}`,
-    { note: note || undefined, linkedNodeIds })
+  need(!(r.type === 'feedback' && reviewHeldIds(r.project_id).has(r.id)),
+    `"${r.title}" is feedback in a warp that is IN REVIEW — the review room owns it until the review closes`, 409)
+  const neighbors = archiveNode(r, actor, 'archived', note, `"${r.title}" was archived by its owning project`)
+  refreshSurvivors(neighbors)
+  logActivity(r.project_id, actor, 'node.archived', 'node', r.id,
+    `archived ${r.type} "${r.title}"${note ? ` — ${note}` : ''}`, { verb: 'archived', note: note || undefined })
+  emitEvent('node.deleted', r.project_id, { id: r.id, type: r.type, title: r.title }, actor)
+  emitEvent('node.archived', r.project_id, { id: r.id, type: r.type, title: r.title, verb: 'archived' }, actor)
+  return { ok: true, id: r.id, archived: true }
+}
+
+interface ArchivedNodeRow {
+  id: string; project_id: string; type: string; title: string; tags: string; content: string; row: string
+  installs: string; file_path: string; verb: string; note: string; detail: string | null
+  archived_at: number; archived_by: string
+}
+interface ArchivedEdgeRow {
+  id: string; project_id: string; source_id: string; target_id: string; source_title: string; target_title: string
+  source_type: string; target_type: string; label: string; relationships: string; created_at: number; created_by: string
+  archived_with: string; archived_at: number; archived_by: string
+}
+
+const parseJson = <T>(raw: string | null | undefined, fallback: T): T => {
+  if (!raw) return fallback
+  try { return JSON.parse(raw) as T } catch { return fallback }
+}
+
+function mapArchivedNode(r: ArchivedNodeRow, withContent = false): ArchivedNode {
+  const row = parseJson<Record<string, unknown>>(r.row, {})
+  return {
+    id: r.id, projectId: r.project_id, type: r.type as NodeType, family: familyOf(r.type as NodeType), title: r.title,
+    tags: parseJson<string[]>(r.tags, []), verb: r.verb, note: r.note,
+    detail: parseJson<Record<string, unknown> | null>(r.detail, null),
+    archivedAt: r.archived_at, archivedBy: r.archived_by,
+    createdAt: Number(row.created_at ?? 0), createdBy: String(row.created_by ?? ''),
+    filePath: r.file_path,
+    ...(withContent ? { content: r.content } : {})
+  }
+}
+
+function mapArchivedEdge(r: ArchivedEdgeRow): ArchivedEdge {
+  const live = (id: string): 'live' | 'archived' | 'gone' =>
+    db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [id]) ? 'live'
+      : db.get('SELECT 1 AS x FROM archived_nodes WHERE id = ?', [id]) ? 'archived' : 'gone'
+  return {
+    id: r.id, projectId: r.project_id, sourceId: r.source_id, targetId: r.target_id,
+    sourceTitle: r.source_title, targetTitle: r.target_title,
+    sourceType: r.source_type as NodeType, targetType: r.target_type as NodeType,
+    sourceState: live(r.source_id), targetState: live(r.target_id),
+    label: r.label, relationships: parseJson<EdgeRelationship[]>(r.relationships, []),
+    createdAt: r.created_at, createdBy: r.created_by,
+    archivedWith: r.archived_with, archivedAt: r.archived_at, archivedBy: r.archived_by
+  }
+}
+
+const likeParam = (q: string): string => `%${q.toLowerCase().replace(/[%_\\]/g, (c) => '\\' + c)}%`
+
+/**
+ * SEARCH THE ARCHIVE — `GET /api/archive?projectId=&q=&type=&family=&verb=&limit=&offset=`.
+ * `q` matches title, body snapshot, note and tags (case-insensitive substring).
+ * Omit projectId to search every project. Newest first. No bodies in the list —
+ * GET /api/archive/:id for one node whole.
+ */
+export function listArchive(p: {
+  projectId?: string; q?: string; type?: string; family?: string; verb?: string; limit?: unknown; offset?: unknown
+}): { total: number; items: (ArchivedNode & { snippet?: string })[] } {
+  const where: string[] = []
+  const params: unknown[] = []
+  if (p.projectId) { projectRow(p.projectId); where.push('project_id = ?'); params.push(p.projectId) }
+  if (p.type) { where.push('type = ?'); params.push(p.type) }
+  if (p.family) {
+    need(isNodeFamily(p.family), `invalid family "${p.family}" (fog|frontier|spec|policy)`)
+    const types = typesOfFamily(p.family)
+    where.push(`type IN (${types.map(() => '?').join(',')})`)
+    params.push(...types)
+  }
+  if (p.verb) { where.push('verb = ?'); params.push(p.verb) }
+  const q = typeof p.q === 'string' ? p.q.trim() : ''
+  if (q) {
+    where.push("(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(content) LIKE ? ESCAPE '\\' OR LOWER(note) LIKE ? ESCAPE '\\' OR LOWER(tags) LIKE ? ESCAPE '\\')")
+    const lp = likeParam(q)
+    params.push(lp, lp, lp, lp)
+  }
+  const limit = p.limit === undefined || p.limit === '' ? 100 : Number(p.limit)
+  const offset = p.offset === undefined || p.offset === '' ? 0 : Number(p.offset)
+  need(Number.isInteger(limit) && limit >= 1 && limit <= 500, 'limit must be an integer 1–500')
+  need(Number.isInteger(offset) && offset >= 0, 'offset must be a non-negative integer')
+  const w = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const total = db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM archived_nodes ${w}`, params)?.c ?? 0
+  const rows = db.all<ArchivedNodeRow>(
+    `SELECT * FROM archived_nodes ${w} ORDER BY archived_at DESC, id LIMIT ? OFFSET ?`, [...params, limit, offset])
+  const items = rows.map((r) => {
+    const item: ArchivedNode & { snippet?: string } = mapArchivedNode(r)
+    if (q) {
+      const i = r.content.toLowerCase().indexOf(q.toLowerCase())
+      if (i >= 0) {
+        const from = Math.max(0, i - 60)
+        item.snippet = (from > 0 ? '…' : '') + r.content.slice(from, i + q.length + 80).replace(/\s+/g, ' ').trim() + '…'
+      }
+    }
+    return item
+  })
+  return { total, items }
+}
+
+/** One archived node, whole: body snapshot, tags, notes, and every archived link. */
+export function getArchived(p: { id: string }): ArchivedNodeDetail {
+  const r = db.get<ArchivedNodeRow>('SELECT * FROM archived_nodes WHERE id = ?', [p.id])
+  if (!r) {
+    const live = db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [p.id])
+    throw new ApiError(live ? `"${p.id}" is live, not archived — GET /api/nodes/${p.id}` : `archived node "${p.id}" not found`, 404)
+  }
+  const annotations = db.all<{ id: string; parent_kind: string; parent_id: string; author: string; body: string; created_at: number }>(
+    "SELECT * FROM annotations WHERE parent_kind = 'node' AND parent_id = ? ORDER BY created_at", [p.id]
+  ).map((a) => ({ id: a.id, parentKind: 'node' as const, parentId: a.parent_id, author: a.author, body: a.body, createdAt: a.created_at }))
+  const edges = db.all<ArchivedEdgeRow>(
+    'SELECT * FROM archived_edges WHERE source_id = ? OR target_id = ? ORDER BY archived_at DESC', [p.id, p.id]
+  ).map(mapArchivedEdge)
+  const revisions = db.get<{ c: number }>('SELECT COUNT(*) AS c FROM node_revisions WHERE node_id = ?', [p.id])?.c ?? 0
+  return { ...mapArchivedNode(r, true), annotations, edges, revisions } as ArchivedNodeDetail
+}
+
+/**
+ * SEARCH ARCHIVED LINKS — `GET /api/archive/edges?projectId=&nodeId=&q=&type=&limit=`.
+ * Links are preserved when their node is archived, but they are not live: they
+ * draw nothing and hold nothing. `nodeId` = every archived link touching that
+ * node (live or archived); `q` matches the label and both end titles; `type`
+ * keeps links that carried that relationship.
+ */
+export function listArchivedEdges(p: {
+  projectId?: string; nodeId?: string; q?: string; type?: string; limit?: unknown
+}): { total: number; items: ArchivedEdge[] } {
+  const where: string[] = []
+  const params: unknown[] = []
+  if (p.projectId) { projectRow(p.projectId); where.push('project_id = ?'); params.push(p.projectId) }
+  if (p.nodeId) { where.push('(source_id = ? OR target_id = ?)'); params.push(p.nodeId, p.nodeId) }
+  if (p.type) {
+    need(isRelationshipType(p.type), `invalid relationship type "${p.type}" (${RELATIONSHIP_TYPES.join('|')})`)
+    where.push('relationships LIKE ?')
+    params.push(`%"type":"${p.type}"%`)
+  }
+  const q = typeof p.q === 'string' ? p.q.trim() : ''
+  if (q) {
+    where.push("(LOWER(label) LIKE ? ESCAPE '\\' OR LOWER(source_title) LIKE ? ESCAPE '\\' OR LOWER(target_title) LIKE ? ESCAPE '\\')")
+    const lp = likeParam(q)
+    params.push(lp, lp, lp)
+  }
+  const limit = p.limit === undefined || p.limit === '' ? 200 : Number(p.limit)
+  need(Number.isInteger(limit) && limit >= 1 && limit <= 1000, 'limit must be an integer 1–1000')
+  const w = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const total = db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM archived_edges ${w}`, params)?.c ?? 0
+  const items = db.all<ArchivedEdgeRow>(
+    `SELECT * FROM archived_edges ${w} ORDER BY archived_at DESC, id LIMIT ?`, [...params, limit]).map(mapArchivedEdge)
+  return { total, items }
+}
+
+/** RESTORE ONE LINK — both ends must be live, and the pair must not have been re-linked since. */
+export function restoreEdge(p: { id: string }, actor: string): EdgeWithTitles {
+  const e = db.get<ArchivedEdgeRow>('SELECT * FROM archived_edges WHERE id = ?', [p.id])
+  need(e, `archived link "${p.id}" not found`, 404)
+  const a = e!
+  const live = (id: string): boolean => !!db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [id])
+  need(live(a.source_id) && live(a.target_id),
+    `both ends must be live to restore a link — restore "${live(a.source_id) ? a.target_title : a.source_title}" first`, 409)
+  need(!connectionForPair(a.source_id, a.target_id), 'these two nodes are connected again already — edit that connection instead', 409)
+  db.tx(() => {
+    db.run('INSERT INTO edges (id, project_id, source_id, target_id, label, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [a.id, a.project_id, a.source_id, a.target_id, a.label, a.created_at, a.created_by])
+    for (const rel of parseJson<EdgeRelationship[]>(a.relationships, [])) {
+      db.run('INSERT OR IGNORE INTO edge_relationships (edge_id, type, source_id, target_id, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+        [a.id, rel.type, rel.sourceId, rel.targetId, rel.createdAt, rel.createdBy])
+    }
+    db.run('DELETE FROM archived_edges WHERE id = ?', [a.id])
+  })
+  refreshNodeFile(a.source_id)
+  refreshNodeFile(a.target_id)
+  logActivity(a.project_id, actor, 'edge.restored', 'edge', a.id,
+    `restored the "${a.source_title}" ↔ "${a.target_title}" connection from the archive`)
+  const out = getEdge({ id: a.id })
+  emitEvent('edge.created', a.project_id, out, actor)
+  return out
+}
+
+/**
+ * RESTORE — the way back out of the archive. The row, tags and installs go back
+ * verbatim, the file returns to its folder (beside it if the name was taken
+ * since), and every archived link whose far end is LIVE comes back with its
+ * label and relationships. Links whose far end is still archived stay archived
+ * and return when that node is restored.
+ */
+export function restoreNode(p: { id: string }, actor: string): NodeDetail & { restoredEdges: number } {
+  const r = db.get<ArchivedNodeRow>('SELECT * FROM archived_nodes WHERE id = ?', [p.id])
+  need(r, `archived node "${p.id}" not found`, 404)
+  const a = r!
+  need(!db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [a.id]), `"${a.id}" is already live`, 409)
+  const proj = db.get<{ id: string }>('SELECT id FROM projects WHERE id = ?', [a.project_id])
+  need(proj, `its project "${a.project_id}" no longer exists`, 409)
+  const row = parseJson<Record<string, unknown>>(a.row, {})
+  need(row.id === a.id, `the archived row for "${a.id}" is unreadable`, 500)
+  // skills keep a unique slug per project — a live skill may have claimed it since
+  if (a.type === 'skill' && row.slug) {
+    need(!db.get("SELECT 1 AS x FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ?", [a.project_id, row.slug]),
+      `a live skill already uses the slug "${row.slug}" — rename that one first`, 409)
+  }
+  const cols = Object.keys(row)
+  const livePath = vault.restoreFile(a.file_path, String(row.file_path ?? ''))
+  row.file_path = livePath
+  row.updated_at = now()
+  const edges = db.all<ArchivedEdgeRow>('SELECT * FROM archived_edges WHERE source_id = ? OR target_id = ?', [a.id, a.id])
+  const isLive = (id: string): boolean => id === a.id || !!db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [id])
+  // a link removed BY HAND (archived_with '') was a decision about the link, not
+  // collateral of an archive — it comes back only by its own restore
+  const back = edges.filter((e) => e.archived_with !== '' && isLive(e.source_id) && isLive(e.target_id) &&
+    !connectionForPair(e.source_id, e.target_id))
+  db.tx(() => {
+    db.run(`INSERT INTO nodes (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, cols.map((c) => row[c]))
+    for (const t of parseJson<string[]>(a.tags, [])) db.run('INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?)', [a.id, t])
+    for (const ins of parseJson<Record<string, unknown>[]>(a.installs, [])) {
+      const ic = Object.keys(ins)
+      db.run(`INSERT OR IGNORE INTO skill_installs (${ic.join(', ')}) VALUES (${ic.map(() => '?').join(', ')})`, ic.map((c) => ins[c]))
+    }
+    for (const e of back) {
+      db.run('INSERT INTO edges (id, project_id, source_id, target_id, label, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [e.id, e.project_id, e.source_id, e.target_id, e.label, e.created_at, e.created_by])
+      for (const rel of parseJson<EdgeRelationship[]>(e.relationships, [])) {
+        db.run('INSERT OR IGNORE INTO edge_relationships (edge_id, type, source_id, target_id, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+          [e.id, rel.type, rel.sourceId, rel.targetId, rel.createdAt, rel.createdBy])
+      }
+      db.run('DELETE FROM archived_edges WHERE id = ?', [e.id])
+    }
+    db.run('DELETE FROM archived_nodes WHERE id = ?', [a.id])
+  })
+  const nr = nodeRow(a.id)
+  if (!livePath || !fs.existsSync(vault.absPath(livePath))) {
+    // no file survived to move back — rebuild it from the snapshot
+    vault.writeBody(nr.file_path, a.content, frontmatterFor(nr))
+  }
+  refreshNodeFile(a.id)
+  refreshSurvivors(back.flatMap((e) => [e.source_id, e.target_id]).filter((x) => x !== a.id))
+  logActivity(a.project_id, actor, 'node.restored', 'node', a.id,
+    `restored ${a.type} "${a.title}" from the archive (${back.length} link${back.length === 1 ? '' : 's'} back)`,
+    { restoredEdges: back.map((e) => e.id), archivedVerb: a.verb })
+  const node = loadNode(a.id)
+  emitEvent('node.created', a.project_id, node, actor)
+  emitEvent('node.restored', a.project_id, { id: a.id, title: a.title, restoredEdges: back.length }, actor)
+  return { ...getNode({ id: a.id }), restoredEdges: back.length }
+}
+
+
+// ---------------------------------------------------------------------------
+// Clearing the fog
+//
+// The fog tracks UNKNOWNS. Once one is acted on it is a known, and a known has
+// no reason to stay on the graph: resolving a fog node REMOVES it — file to the
+// vault trash, rows gone, the resolution (who, how, the text) in the activity
+// log. That is the same removal completing an action has always been.
+//
+// ONE EXCEPTION: feedback held by a warp that is IN REVIEW. The review gate's
+// coverage and designation rules read that feedback until the review closes,
+// so it keeps the review's own vocabulary (waive stamps `pruned`, unwaive
+// undoes it) and the completion cascade never touches it.
+
+export const isFogType = (t: string): boolean => NODE_FAMILY[t as NodeType] === 'fog'
+
+const typesOfFamily = (f: string): NodeType[] =>
+  (Object.keys(NODE_FAMILY) as NodeType[]).filter((t) => NODE_FAMILY[t] === f)
+
+/**
+ * Every node inside a warp that is IN REVIEW, following `member` through any
+ * depth (feedback members the node under review, which members the warp).
+ * The single definition of "the review room owns this" — the fog report's
+ * `inReview` reads it too.
+ */
+export function reviewHeldIds(projectId: string): Set<string> {
+  const roots = db.all<{ id: string }>(
+    "SELECT id FROM nodes WHERE project_id = ? AND type = 'warp' AND stage = 'review'", [projectId]
+  ).map((x) => x.id)
+  const out = new Set<string>()
+  const seen = new Set<string>(roots)
+  const queue = [...roots]
+  while (queue.length) {
+    const cur = queue.shift()!
+    for (const m of db.all<{ source_id: string }>(
+      "SELECT source_id FROM edge_relationships WHERE type = 'member' AND target_id = ?", [cur]
+    )) {
+      out.add(m.source_id)
+      if (!seen.has(m.source_id)) {
+        seen.add(m.source_id)
+        queue.push(m.source_id)
+      }
+    }
+  }
+  return out
+}
+
+/** Would clearing this node pull it out from under an open review? */
+const heldByReview = (r: NodeRow): boolean =>
+  r.type === 'feedback' && reviewHeldIds(r.project_id).has(r.id)
+
+type ClearVerb = 'completed' | 'answered' | 'pruned' | 'waived' | 'actioned' | 'swept'
+
+/**
+ * Remove one fog node as RESOLVED. Logs `fog.cleared` (verb + note + detail) on
+ * the node's own id, so its history outlives it, and emits node.deleted then
+ * fog.cleared. Returns the neighbours to refresh.
+ */
+function clearFogNode(r: NodeRow, actor: string, verb: ClearVerb, note: string, detail: Record<string, unknown> = {}): string[] {
+  const neighbors = archiveNode(r, actor, verb, note, `"${r.title}" was resolved and cleared from the fog`, detail)
+  logActivity(r.project_id, actor, 'fog.cleared', 'node', r.id,
+    `cleared ${r.type} "${r.title}" (${verb})${note ? ` — ${note}` : ''}`,
+    { verb, note: note || undefined, type: r.type, title: r.title, ...detail })
+  emitEvent('node.deleted', r.project_id, { id: r.id, type: r.type, title: r.title }, actor)
+  emitEvent('fog.cleared', r.project_id, { id: r.id, type: r.type, title: r.title, verb, note: note || undefined, ...detail }, actor)
+  emitEvent('node.archived', r.project_id, { id: r.id, type: r.type, title: r.title, verb }, actor)
+  return neighbors
+}
+
+/** The refusals shared by every verb that clears a fog node directly. */
+function assertClearable(r: NodeRow, verb: string): void {
+  need(!r.references_node_id,
+    `"${r.title}" is a reference to another project's node — it is resolved where it lives, not here`, 400)
+  need(!heldByReview(r),
+    `"${r.title}" is feedback in a warp that is IN REVIEW — the review room owns it until the review ` +
+    `closes: waive it or designate it there (${verb} would pull it out from under the gate)`, 409)
+}
+
+export interface CompleteResult {
+  ok: true
+  id: string
+  linkedNodeIds: string[]
+  /** fog cleared along with the action (or the fog node itself, completed directly) */
+  cleared: string[]
+  /** fog that derived the action but stays: asked to (`keep`), held by a review, or still feeding another live action */
+  kept: string[]
+}
+
+/**
+ * COMPLETE — the node was acted on.
+ *
+ * On an ACTION: the instruction was executed, so the node is REMOVED — file to
+ * vault trash, rows deleted, neighbours' frontmatter loses the wikilink. The
+ * fog it came from goes with it: every fog node that `derives` this action is
+ * cleared, unless it is in `keep` (not finished — it loses the link and stays
+ * in the fog), held by an open review, or still feeds ANOTHER live action (it
+ * clears when the last of them completes). The activity entry keeps the note,
+ * the linked ids and what was cleared.
+ *
+ * On a FOG node (question, threat, flaw, bug, feedback, idea): resolved
+ * directly — the note is the resolution, and the node is cleared.
+ */
+export function completeAction(p: { id: string; note?: string; keep?: unknown }, actor: string): CompleteResult {
+  const r = nodeRow(p.id)
+  need(p.note === undefined || p.note === null || typeof p.note === 'string', 'note must be a string')
+  const note = typeof p.note === 'string' ? p.note.trim() : ''
+  if (isFogType(r.type)) {
+    need(p.keep === undefined || p.keep === null, 'keep applies to completing an ACTION — it names the fog that action came from')
+    assertClearable(r, 'completing it')
+    const neighbors = clearFogNode(r, actor, 'completed', note)
+    refreshSurvivors(neighbors)
+    return { ok: true, id: r.id, linkedNodeIds: neighbors, cleared: [r.id], kept: [] }
+  }
+  need(r.type === 'action',
+    `only actions and fog (question|threat|flaw|bug|feedback|idea) complete — "${r.title}" is a ${r.type}` +
+    (r.type === 'warp' ? ' (a warp finishes by stage: done or not_needed)' : ' (spec and policy are edited, not completed)'), 400)
+  need(p.keep === undefined || p.keep === null || (Array.isArray(p.keep) && p.keep.every((k) => typeof k === 'string')),
+    'keep must be an array of node ids')
+  const keep = new Set((p.keep as string[] | undefined) ?? [])
+
+  // the fog this action came from: fog nodes that DERIVE it
+  const sources = db.all<NodeRow>(
+    `SELECT DISTINCT n.* FROM edge_relationships er JOIN nodes n ON n.id = er.source_id
+     WHERE er.type = 'derives' AND er.target_id = ?`, [r.id]
+  ).filter((f) => isFogType(f.type))
+  const sourceIds = new Set(sources.map((f) => f.id))
+  const stray = [...keep].filter((k) => !sourceIds.has(k))
+  need(!stray.length,
+    `keep names nodes that are not fog deriving this action: ${stray.join(', ')} — only the fog it came from can be kept`, 400)
+  const held = reviewHeldIds(r.project_id)
+  const toClear: NodeRow[] = []
+  const kept: string[] = []
+  for (const f of sources) {
+    const feedsAnother = !!db.get(
+      `SELECT 1 AS x FROM edge_relationships er JOIN nodes n ON n.id = er.target_id
+       WHERE er.type = 'derives' AND er.source_id = ? AND er.target_id <> ? AND n.type = 'action'`, [f.id, r.id]
+    )
+    if (keep.has(f.id) || (f.type === 'feedback' && held.has(f.id)) || f.references_node_id || feedsAnother) kept.push(f.id)
+    else toClear.push(f)
+  }
+
+  const linkedNodeIds = archiveNode(r, actor, 'completed', note, `"${r.title}" was completed`, {})
+  const touched: string[] = [...linkedNodeIds]
+  for (const f of toClear) {
+    touched.push(...clearFogNode(f, actor, 'actioned', note, { by: r.id, byTitle: r.title }))
+  }
+  refreshSurvivors(touched)
+  const cleared = toClear.map((f) => f.id)
+  logActivity(r.project_id, actor, 'action.completed', 'node', r.id,
+    `completed action "${r.title}"${note ? ` — ${note}` : ''}` +
+    (cleared.length ? ` · cleared ${cleared.length} fog item${cleared.length === 1 ? '' : 's'}` : ''),
+    { note: note || undefined, linkedNodeIds, cleared: toClear.map((f) => ({ id: f.id, type: f.type, title: f.title })), kept })
   // node.deleted first so every UI prunes the node, then the semantic event
-  emitEvent('node.deleted', r.project_id, { id: p.id, type: r.type, title: r.title }, actor)
-  emitEvent('action.completed', r.project_id, { id: p.id, title: r.title, note: note || undefined, linkedNodeIds }, actor)
-  return { ok: true, id: p.id, linkedNodeIds }
+  emitEvent('node.deleted', r.project_id, { id: r.id, type: r.type, title: r.title }, actor)
+  emitEvent('node.archived', r.project_id, { id: r.id, type: r.type, title: r.title, verb: 'completed' }, actor)
+  emitEvent('action.completed', r.project_id, { id: r.id, title: r.title, note: note || undefined, linkedNodeIds, cleared, kept }, actor)
+  return { ok: true, id: r.id, linkedNodeIds, cleared, kept }
+}
+
+/**
+ * CLEAR RESOLVED FOG — the one-off sweep for fog resolved under the old
+ * keep-the-record rule (answered, fixed, done, pruned…): still on the graph,
+ * dimmed, though nothing unknown is left in it. `apply: false` (the default)
+ * only LISTS; `apply: true` clears exactly that list. Feedback held by an open
+ * review and references are never swept.
+ */
+export function clearResolvedFog(p: { projectId: string; apply?: boolean }, actor: string): {
+  apply: boolean
+  candidates: { id: string; type: NodeType; title: string; tags: string[] }[]
+  cleared: number
+} {
+  need(typeof p?.projectId === 'string' && p.projectId, 'projectId is required')
+  const { nodes, resolved } = graphInternal(p.projectId)
+  const held = reviewHeldIds(p.projectId)
+  const candidates = nodes
+    .filter((n) => isFogType(n.type) && resolved.has(n.id) && !n.referencesNodeId && !(n.type === 'feedback' && held.has(n.id)))
+    .map((n) => ({ id: n.id, type: n.type, title: n.title, tags: n.tags }))
+  if (!p.apply) return { apply: false, candidates, cleared: 0 }
+  const touched: string[] = []
+  for (const c of candidates) {
+    touched.push(...clearFogNode(nodeRow(c.id), actor, 'swept', 'resolved before the fog cleared itself', { tags: c.tags }))
+  }
+  refreshSurvivors(touched)
+  logActivity(p.projectId, actor, 'fog.swept', 'project', p.projectId,
+    `cleared ${candidates.length} resolved fog item${candidates.length === 1 ? '' : 's'}`,
+    { cleared: candidates.map((c) => ({ id: c.id, type: c.type, title: c.title })) })
+  return { apply: true, candidates, cleared: candidates.length }
+}
+
+// ---------------------------------------------------------------------------
+// Refine — a pass over the fog that turns responses into ONE action
+
+export const REFINE_TAG = 'refine'
+export const REFINE_LABEL = 'refine'
+
+export interface RefineEntry { nodeId: string; response: string }
+
+/**
+ * REFINE SUBMIT — the end of a Refine pass.
+ *
+ * Creates ONE action (tagged `refine`) whose body is the transcript: each
+ * responded fog item with its response, then the skipped ones listed so the
+ * reader knows what the pass did not cover. Every responded item `derives` the
+ * action (connection labelled `refine`), so completing the action clears them
+ * (see completeAction). Everything is validated BEFORE anything is written.
+ */
+export function refineSubmit(
+  p: { projectId: string; entries?: unknown; skipped?: unknown; title?: unknown },
+  actor: string
+): { ok: true; id: string; action: SpecNode; responded: number; skipped: number } {
+  need(typeof p?.projectId === 'string' && p.projectId, 'projectId is required')
+  projectRow(p.projectId)
+  need(Array.isArray(p.entries) && p.entries.length > 0,
+    'entries is required — [{nodeId, response}], at least one (a pass with no responses creates nothing)')
+  const entries = (p.entries as unknown[]).map((e, i) => {
+    const o = (e ?? {}) as Record<string, unknown>
+    need(typeof o.nodeId === 'string' && o.nodeId, `entries[${i}].nodeId is required`)
+    need(typeof o.response === 'string' && o.response.trim(), `entries[${i}].response is required — non-empty text`)
+    return { nodeId: o.nodeId as string, response: (o.response as string).trim() }
+  })
+  const ids = entries.map((e) => e.nodeId)
+  need(new Set(ids).size === ids.length, 'entries name the same node twice — one response per fog item')
+  need(p.skipped === undefined || p.skipped === null || (Array.isArray(p.skipped) && p.skipped.every((x) => typeof x === 'string')),
+    'skipped must be an array of node ids')
+  need(p.title === undefined || p.title === null || (typeof p.title === 'string' && p.title.trim()), 'title must be non-empty text')
+
+  const { nodes, resolved } = graphInternal(p.projectId)
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const held = reviewHeldIds(p.projectId)
+  const rows = entries.map((e) => {
+    const n = byId.get(e.nodeId)
+    need(n, `"${e.nodeId}" is not a node in this project`, 404)
+    need(isFogType(n!.type), `"${n!.title}" is a ${n!.type} — Refine works the fog (question|threat|flaw|bug|feedback|idea)`)
+    need(!resolved.has(n!.id), `"${n!.title}" is already resolved — it is not fog any more`)
+    need(!n!.referencesNodeId, `"${n!.title}" is a reference — refine it in the project that owns it`)
+    need(!(n!.type === 'feedback' && held.has(n!.id)), `"${n!.title}" is feedback in an open review — the review room owns it`, 409)
+    return { node: n!, response: e.response }
+  })
+  const skipped = ((p.skipped as string[] | undefined) ?? [])
+    .filter((id) => !ids.includes(id))
+    .map((id) => byId.get(id))
+    .filter((n): n is SpecNode => !!n)
+
+  const date = new Date().toISOString().slice(0, 10)
+  const total = rows.length + skipped.length
+  const title = typeof p.title === 'string' && p.title.trim()
+    ? p.title.trim()
+    : `Refine ${date}: ${rows.length} of ${total} fog item${total === 1 ? '' : 's'}`
+  const quote = (text: string): string => text.split('\n').map((l) => `> ${l}`).join('\n')
+  const lead = (n: SpecNode): string => {
+    let body = ''
+    try { body = vault.readBody(n.filePath) } catch { body = '' }
+    const first = body.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? ''
+    return first.length > 240 ? first.slice(0, 239).trimEnd() + '…' : first
+  }
+  const parts = [
+    `Directions from a Refine pass over the fog by ${actor}, ${date}: ${total} item${total === 1 ? '' : 's'} shown, ` +
+    `${rows.length} responded.`,
+    '',
+    'Act on each response. Completing this action clears every item below from the fog — pass ' +
+    '`keep: [ids]` for any you could not finish, and they stay.',
+    ''
+  ]
+  for (const { node, response } of rows) {
+    parts.push(`## [${node.type}] ${node.title} · ${node.id}`, '')
+    const l = lead(node)
+    if (l) parts.push(quote(l), '')
+    parts.push(response, '')
+  }
+  if (skipped.length) {
+    parts.push('## Skipped', '')
+    for (const n of skipped) parts.push(`- [${n.type}] ${n.title} · ${n.id}`)
+    parts.push('')
+  }
+
+  const action = createNode({
+    projectId: p.projectId,
+    type: 'action',
+    title,
+    tags: [REFINE_TAG],
+    content: parts.join('\n'),
+    linkTo: rows.map(({ node }) => ({ nodeId: node.id, type: 'derives' as EdgeType, outgoing: false }))
+  }, actor)
+  for (const { node } of rows) {
+    const conn = connectionForPair(node.id, action.id)
+    if (conn && conn.label !== REFINE_LABEL) updateEdge({ id: conn.id, label: REFINE_LABEL }, actor)
+  }
+  logActivity(p.projectId, actor, 'refine.submitted', 'node', action.id,
+    `refined ${rows.length} of ${total} fog item${total === 1 ? '' : 's'} into action "${title}"`,
+    { responded: rows.map(({ node }) => node.id), skipped: skipped.map((n) => n.id) })
+  emitEvent('refine.submitted', p.projectId, { id: action.id, title, responded: rows.length, skipped: skipped.length }, actor)
+  return { ok: true, id: action.id, action: loadNode(action.id), responded: rows.length, skipped: skipped.length }
 }
 
 export const REFERENCE_BROKEN_TAG = 'reference-broken'
@@ -1196,7 +1881,7 @@ export function listCommons(p: { q?: string; excludeProjectId?: string } = {}): 
   const rows = db.all<NodeRow & { project_name: string }>(
     `SELECT n.*, pr.name AS project_name FROM nodes n
      JOIN projects pr ON pr.id = n.project_id
-     WHERE ${clauses.join(' AND ')} ORDER BY pr.name, n.title`, args)
+     WHERE ${clauses.join(' AND ')} AND pr.archived_at IS NULL ORDER BY pr.name, n.title`, args)
   const tags = tagsFor(rows.map((r) => r.id))
   return rows.map((r) => ({ ...mapNode(r, tags.get(r.id) ?? []), projectName: r.project_name }))
 }
@@ -1270,7 +1955,7 @@ export function referNode(
  * Reversible by removing the tag; the annotation trail stays. Warps are not
  * pruned — their stage has `not_needed` for that.
  */
-export function pruneNode(p: { id: string; note?: string; supersededBy?: string | null }, actor: string): SpecNode {
+export function pruneNode(p: { id: string; note?: string; supersededBy?: string | null }, actor: string): SpecNode & { cleared?: boolean } {
   const r = nodeRow(p.id)
   need(r.type !== 'warp', 'warps are not pruned — set their stage to not_needed instead', 400)
   need(typeof p.note === 'string' && p.note.trim(), 'note is required — record what happened and why', 400)
@@ -1282,6 +1967,15 @@ export function pruneNode(p: { id: string; note?: string; supersededBy?: string 
     sup = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [p.supersededBy]) ?? null
     need(sup, `supersededBy node "${p.supersededBy}" not found`)
     need(sup!.project_id === r.project_id, 'supersededBy node belongs to a different project')
+  }
+  // FOG is not kept once resolved: a pruned unknown is cleared, the why (and
+  // what superseded it) in the activity log. Review-held feedback keeps the
+  // review's own vocabulary below.
+  if (isFogType(r.type) && !heldByReview(r) && !r.references_node_id) {
+    const snapshot = loadNode(r.id)
+    refreshSurvivors(clearFogNode(r, actor, 'pruned', note, { supersededBy: sup?.id, supersededByTitle: sup?.title }))
+    emitEvent('node.pruned', r.project_id, { id: r.id, note, supersededBy: sup?.id, cleared: true }, actor)
+    return { ...snapshot, cleared: true }
   }
   db.run('INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?)', [p.id, 'pruned'])
   db.run('UPDATE nodes SET updated_at = ? WHERE id = ?', [now(), p.id])
@@ -1434,7 +2128,7 @@ export async function designateNode(
   return getNode({ id: workId })
 }
 
-export function waiveNode(p: { id: string; note?: string; into?: string | null }, actor: string): SpecNode {
+export function waiveNode(p: { id: string; note?: string; into?: string | null }, actor: string): SpecNode & { cleared?: boolean } {
   const r = nodeRow(p.id)
   need(WAIVABLE.has(r.type as NodeType),
     `only the record family waives (${[...WAIVABLE].join('|')}) — "${r.title}" is a ${r.type}`, 400)
@@ -1447,6 +2141,15 @@ export function waiveNode(p: { id: string; note?: string; into?: string | null }
     into = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [p.into]) ?? null
     need(into, `into node "${p.into}" not found`)
     need(into!.project_id === r.project_id, 'into node belongs to a different project')
+  }
+  // Outside an open review a waive is a resolution like any other: the fog
+  // clears, and what covered it is in the activity log. INSIDE a review it is a
+  // designation the gate reads and unwaive must be able to undo — kept below.
+  if (!heldByReview(r) && !r.references_node_id) {
+    const snapshot = loadNode(r.id)
+    refreshSurvivors(clearFogNode(r, actor, 'waived', note, { into: into?.id, intoTitle: into?.title }))
+    emitEvent('node.waived', r.project_id, { id: r.id, note, into: into?.id, cleared: true }, actor)
+    return { ...snapshot, cleared: true }
   }
   db.run('INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, ?)', [p.id, 'pruned'])
   db.run('UPDATE nodes SET updated_at = ? WHERE id = ?', [now(), p.id])
@@ -1589,10 +2292,11 @@ export function passNode(
  * anything this question was blocking. Later: graduate the answer into durable
  * spec (create+linkTo, then prune supersededBy — see llms.txt), or prune.
  */
-export function answerQuestion(p: { id: string; answer?: string }, actor: string): NodeDetail {
+export function answerQuestion(p: { id: string; answer?: string }, actor: string): { ok: true; id: string; cleared: true; answer: string } {
   const r = nodeRow(p.id)
   need(r.type === 'question', `only questions can be answered — "${r.title}" is a ${r.type}`, 400)
   need(typeof p.answer === 'string' && p.answer.trim(), 'answer is required — non-empty markdown', 400)
+  assertClearable(r, 'answering it')
   const answer = p.answer!.trim()
   const date = new Date().toISOString().slice(0, 10)
 
@@ -1626,11 +2330,13 @@ export function answerQuestion(p: { id: string; answer?: string }, actor: string
   logActivity(r.project_id, actor, 'question.answered', 'node', p.id,
     `${refinement ? 're-answered' : 'answered'} question "${r.title}" — ${excerpt}`,
     { answer, refinement })
-  const node = loadNode(p.id)
-  emitEvent('node.updated', r.project_id, node, actor)
-  emitEvent('node.content.updated', r.project_id, { id: p.id }, actor)
   emitEvent('question.answered', r.project_id, { id: p.id, title: r.title, answer, refinement }, actor)
-  return getNode({ id: p.id })
+  // An answered question is a KNOWN: it leaves the fog. The answer was written
+  // into the body first, so the trashed file carries it, and the activity log
+  // holds it verbatim. If it changes the spec, edit the living spec — the
+  // question was never the record.
+  refreshSurvivors(clearFogNode(nodeRow(p.id), actor, 'answered', excerpt, { answer }))
+  return { ok: true, id: p.id, cleared: true, answer }
 }
 
 /**
@@ -2068,14 +2774,26 @@ export function deleteEdge(p: { id: string }, actor: string): { ok: true } {
   const sTitle = db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [r!.source_id])?.title
   const tTitle = db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [r!.target_id])?.title
   const rels = (relationshipsFor([p.id]).get(p.id) ?? []).map((x) => ({ type: x.type, sourceId: x.sourceId, targetId: x.targetId }))
-  db.run('DELETE FROM annotations WHERE parent_id = ?', [p.id])
-  db.run('DELETE FROM edge_relationships WHERE edge_id = ?', [p.id]) // cascade would catch it; explicit like the rest
-  db.run('DELETE FROM edges WHERE id = ?', [p.id])
+  // a link removed by hand is ARCHIVED, not destroyed: kept whole (its notes
+  // stay keyed to its id), searchable, restorable. archived_with '' = by hand.
+  const types = db.get<{ s: string; t: string }>(
+    'SELECT (SELECT type FROM nodes WHERE id = ?) AS s, (SELECT type FROM nodes WHERE id = ?) AS t', [r!.source_id, r!.target_id])
+  const fullRels = relationshipsFor([p.id]).get(p.id) ?? []
+  db.tx(() => {
+    db.run(
+      `INSERT OR REPLACE INTO archived_edges (id, project_id, source_id, target_id, source_title, target_title,
+         source_type, target_type, label, relationships, created_at, created_by, archived_with, archived_at, archived_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+      [p.id, r!.project_id, r!.source_id, r!.target_id, sTitle ?? '', tTitle ?? '', types?.s ?? '', types?.t ?? '',
+        r!.label, JSON.stringify(fullRels), r!.created_at, r!.created_by, now(), actor])
+    db.run('DELETE FROM edge_relationships WHERE edge_id = ?', [p.id])
+    db.run('DELETE FROM edges WHERE id = ?', [p.id])
+  })
   refreshNodeFile(r!.source_id)
   refreshNodeFile(r!.target_id)
   const verbs = rels.map((x) => relVerb(x.type as RelationshipType)).join(', ')
   logActivity(r!.project_id, actor, 'edge.deleted', 'edge', p.id,
-    `removed the "${sTitle ?? r!.source_id}" ↔ "${tTitle ?? r!.target_id}" connection${verbs ? ` (${verbs})` : ''}`,
+    `removed the "${sTitle ?? r!.source_id}" ↔ "${tTitle ?? r!.target_id}" connection${verbs ? ` (${verbs})` : ''} — archived`,
     { sourceId: r!.source_id, targetId: r!.target_id, relationships: rels, label: r!.label })
   emitEvent('edge.deleted', r!.project_id, { id: p.id, sourceId: r!.source_id, targetId: r!.target_id }, actor)
   return { ok: true }

@@ -50,7 +50,7 @@ export const LENSES: LensMeta[] = [
     id: 'certainty',
     label: 'certainty',
     glyph: '◎',
-    hint: 'Certainty lens — radius is certainty: settled in the core, the frontier at the rim. Every node keeps its bearing; nothing is written.',
+    hint: 'Certainty lens — radius is certainty: settled in the core, the edge of the spec at the rim. Every node keeps its bearing; nothing is written.',
     displaces: true
   }
 ]
@@ -78,9 +78,9 @@ export const lensDisplaces = (id: LensId | null): boolean => lensMeta(id)?.displ
  * how much of the mass sits INSIDE the frontier. So it gets its own band, and
  * the boundary between it and the fog is the frontier the lens is named for.
  */
-export type CertaintyBand = 'settled' | 'open' | 'unabsorbed' | 'undecided' | 'unknown' | 'hazy'
+export type CertaintyBand = 'settled' | 'open' | 'unabsorbed' | 'undecided' | 'unknown' | 'unshaped' | 'hazy'
 
-export const CERTAINTY_BANDS: CertaintyBand[] = ['settled', 'open', 'unabsorbed', 'undecided', 'unknown', 'hazy']
+export const CERTAINTY_BANDS: CertaintyBand[] = ['settled', 'open', 'unabsorbed', 'undecided', 'unknown', 'unshaped', 'hazy']
 
 export interface BandMeta {
   label: string
@@ -116,6 +116,11 @@ export const BAND_META: Record<CertaintyBand, BandMeta> = {
     label: 'unknown',
     color: FOG_CLASS_META.unknown.color,
     hint: 'Nobody knows the answer — go and find out.'
+  },
+  unshaped: {
+    label: 'unshaped',
+    color: FOG_CLASS_META.unshaped.color,
+    hint: 'Not yet a thing at all — give it shape, or throw it away.'
   },
   hazy: {
     label: 'hazy',

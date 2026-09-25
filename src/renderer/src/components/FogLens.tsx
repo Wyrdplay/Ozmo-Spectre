@@ -15,14 +15,14 @@ import '../lens.css'
  * bold arcs with two equal gaps, exactly as the draw loop paints them.
  */
 function RingSwatch({ form, color }: { form: FogForm; color: string }): React.JSX.Element {
-  const dash = form === 'dotted' ? '1 2.2' : form === 'split' ? '8.5 5.3' : undefined
-  const width = form === 'dotted' ? 1 : form === 'split' ? 2 : 2.6
+  const dash = form === 'wisp' ? '0.8 4' : form === 'dotted' ? '1 2.2' : form === 'split' ? '8.5 5.3' : undefined
+  const width = form === 'wisp' ? 0.9 : form === 'dotted' ? 1 : form === 'split' ? 2 : 2.6
   return (
     <svg className="fog-swatch" width="12" height="12" viewBox="0 0 12 12" aria-hidden>
       <circle
         cx="6" cy="6" r="4.4" fill="none"
         stroke={color} strokeWidth={width}
-        strokeDasharray={dash} strokeLinecap={form === 'dotted' ? 'round' : 'butt'}
+        strokeDasharray={dash} strokeLinecap={form === 'dotted' || form === 'wisp' ? 'round' : 'butt'}
       />
     </svg>
   )
@@ -93,7 +93,7 @@ export function FogParams({ stats, source }: { stats: FogStats; source: FogSourc
           {source === 'report' && (
             <>
               <span title="nothing unresolved is holding these down — takeable right now">
-                <span className="n">{stats.frontier}</span> takeable
+                <span className="n">{stats.takeable}</span> takeable
               </span>
               <span className="sep">·</span>
               <span title="something unresolved is holding these down"><span className="n">{stats.blocked}</span> held down</span>
@@ -184,7 +184,7 @@ export function CertaintyParams({ rings, source }: { rings: CertaintyRing[] | nu
             {/* the one boundary worth naming — inside it the spec answers */}
             {ring.band === FRONTIER_BAND && (
               <div className="lens-legend-frontier" title="Beyond this line the spec does not say. It is the whole point of the lens.">
-                the frontier
+                the edge of the spec
               </div>
             )}
           </React.Fragment>
@@ -238,7 +238,7 @@ export function LensSection({ stats, source, rings }: {
         <div className="fog-note">
           No lens. Switch one on in the canvas controls, bottom right — <span className="em">fog</span> lifts what
           the spec has not absorbed; <span className="em">certainty</span> arranges by it, settled in the core and
-          the frontier at the rim.
+          the edge of the spec at the rim.
         </div>
       )}
       {lens === 'fog' && <FogParams stats={stats} source={source} />}

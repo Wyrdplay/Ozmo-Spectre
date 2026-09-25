@@ -38,7 +38,9 @@ served exactly as before, on loopback. Nothing you already do changes.
 ## The ontology
 
 Node types and what they mean:
-- idea       — non-binding sparks; explorable, never enforcing
+- idea       — a spark that has not taken shape yet. It is FOG (class \`unshaped\`) and it carries a
+               pressure: give it shape (POST /convert into what it is) or throw it away (prune) —
+               both clear it from the fog
 - pillar     — load-bearing commitments that shape direction
 - principle  — rules of taste applied across work
 - feature    — buildable capability with a design spec; has progress 0-100
@@ -85,6 +87,22 @@ Node types and what they mean:
 
 There is NO review node type — REVIEW is a STAGE of a warp. A warp entering the Review stage IS
 the open review; its feedback members are the room; the forward-restage is the gated close.
+
+THE FAMILIES — every type belongs to exactly ONE, derived from the type (never stored, never
+tagged; every node payload carries it as \`family\`, and GET /nodes?family= filters by it):
+
+  family     types                                          what it is
+  fog        question, threat, flaw, bug, feedback, idea    not yet shaped or not yet known. TRANSIENT:
+                                                            once acted on it is CLEARED from the graph
+  frontier   action, warp                                   grounded decisions being acted on NOW
+                                                            (?family=frontier lists open work only —
+                                                            a done/not_needed warp is history)
+  spec       feature, instance, component, area             what the product IS — the living truth, kept
+  policy     pillar, principle, skill                       what governs the work — kept
+
+The fog is where Refine works (POST /api/projects/:id/refine), the frontier is where Review works.
+The families answer "what KIND of truth is this"; the axes below answer "what question does this
+type answer". Both are true at once.
 
 The AXES — every type answers one question; a new type must claim an empty axis
 or extend an occupied one (this table is the test):
@@ -144,8 +162,9 @@ FOG is deliberately NOT a row in that table. There is no \`fog\` node type and a
 be refused by the axes rule: HEALTH already carries "what is wrong or unknown" and JUDGMENT
 already carries "observations about built reality", so \`fog\` would claim no empty axis — it
 would put a fifth name on things those two axes already hold, and every item would then have to
-be filed twice or filed wrong. Fog is a LENS over the types above: an UNRESOLVED question,
-threat, flaw or bug, or an UNDESIGNATED feedback, IS fog the moment it exists. Nothing to tag,
+be filed twice or filed wrong. Fog is a LENS over the types above — the fog FAMILY: an
+UNRESOLVED question, threat, flaw, bug or idea, or an UNDESIGNATED feedback, IS fog the moment it
+exists. Nothing to tag,
 nothing to remember, nothing to keep in sync — file the thing precisely by the table and the fog
 report finds it. (The one hand-applied part is the \`fog\` TAG, which marks an item as not yet
 sharply phrasable — see § Fog, and do NOT apply it yourself.)
@@ -162,21 +181,44 @@ Conventions (recognized, NEVER enforced — keep the graph honest, not policed):
   explicit legacy node (title it for what it is, e.g. "Legacy X") and leave the living spec
   describing what the thing does NOW.
 
-Instructions vs records — and the terminal verbs. Bugs, flaws, threats, questions, feedback,
-ideas, features are RECORDS: they are kept after resolution because history informs; resolve them
-positively with tags (done|fixed|answered|adopted) or negatively by PRUNING (below). Actions are
-INSTRUCTIONS: meaningless once executed, so completing one REMOVES it (file to vault trash, never
-oblivion — the activity log keeps the note and the linked node ids, and the diff API on its former
-neighbours shows what it changed). Choose the verb:
-- complete  (POST /api/nodes/:id/complete, actions only) — the instruction was executed; node removed
-- answer    (POST /api/nodes/:id/answer, questions only) — positive resolution: the answer is written
-                                                           into the spec body + \`answered\` tag; node kept, dimmed
-- waive     (POST /api/nodes/:id/waive, record family:   — feedback's terminal verb, a flavored prune:
-             feedback|bug|question|threat|flaw|idea)       {into?, note} — covered (into = what absorbed
-                                                           it, edge labelled "waived into") or flat
-                                                           (note only). Distinct node.waived activity.
+Instructions, records and fog — and the terminal verbs. FOG IS NOT KEPT. The fog family
+(question, threat, flaw, bug, feedback, idea) tracks UNKNOWNS; once one is resolved it is a known,
+and a known has no reason to stay on the graph — resolving a fog node ARCHIVES it: it leaves the
+live graph and moves to the ARCHIVE whole (text, tags, notes, history, every link), searchable and
+restorable; the activity log keeps who, how and the text as a \`fog.cleared\` entry on its id.
+NOTHING ON THE BOARD IS HARD-DELETED — see § The archive. If the resolution changes what the product is, EDIT THE LIVING SPEC first —
+the fog node was never the record. Spec and policy nodes (features, components, principles…) are
+RECORDS: kept, resolved with tags (done|adopted…) or pruned. Actions are INSTRUCTIONS: meaningless
+once executed, so completing one REMOVES it — and the fog it came from with it.
+
+THE CASCADE: completing an ACTION also clears every fog node that \`derives\` it — unless you name
+it in \`keep\` (you could not finish it: it loses the link and stays in the fog), it is feedback in
+a warp that is IN REVIEW (the review room owns that until it closes), or it still derives ANOTHER
+live action (it clears when the last of them completes). The completion's activity lists what it
+cleared. This is how a Refine pass closes: its action is completed and the fog it answered goes.
+
+THE ONE EXCEPTION, everywhere below: feedback in a warp that is IN REVIEW keeps the review's own
+vocabulary (waive stamps \`pruned\` and unwaive undoes it) because the review gate reads it.
+
+Tags still dim: tagging a bug \`fixed\` by PATCH works as it always did (dimmed, out of the fog
+report) — but nothing deletes on a tag edit, so prefer the verb: \`complete\` the bug. The one-off
+POST /api/projects/:id/fog/clear-resolved sweeps fog resolved the old way (see § Fog).
+
+Choose the verb:
+- complete  (POST /api/nodes/:id/complete)               — ACTION: the instruction was executed; node removed,
+                                                           plus the cascade above. {note?, keep?:[ids]}
+                                                           FOG node: resolved directly — {note?} is the
+                                                           resolution; node removed. Returns {cleared, kept}
+- answer    (POST /api/nodes/:id/answer, questions only) — the question is answered: the answer is written
+                                                           into the body (then trashed with it) and kept
+                                                           verbatim in the activity log; node REMOVED
+- waive     (POST /api/nodes/:id/waive, fog family:      — a flavored prune: {into?, note} — covered
+             feedback|bug|question|threat|flaw|idea)       (into = what absorbed it) or flat (note only).
+                                                           Outside an open review: node REMOVED, into + note
+                                                           in the activity. Review-held feedback: tagged
+                                                           \`pruned\`, edge labelled "waived into", undoable.
                                                            ALIAS: /fold + nodes.fold still route here
-- unwaive   (POST /api/nodes/:id/unwaive, same family)   — the way back: drops the \`pruned\` tag and the
+- unwaive   (POST /api/nodes/:id/unwaive, review-held)   — the way back: drops the \`pruned\` tag and the
                                                            "waived into" trail, keeps every annotation.
                                                            A waive is a review DESIGNATION, so it has to
                                                            undo. Activity: node.unwaived. ALIAS: /unfold
@@ -185,8 +227,16 @@ neighbours shows what it changed). Choose the verb:
                                                            node (body = your text), members it on the warp
                                                            under review, labels the pair "discusses" and
                                                            waives it. {warpId?, body?, title?}
-- prune     (POST /api/nodes/:id/prune, any non-warp)    — the record is dead; node kept, dimmed, with the why
-- delete    (DELETE /api/nodes/:id)                      — it should never have existed (mistakes, noise)
+- prune     (POST /api/nodes/:id/prune, any non-warp)    — dead. FOG: removed, the why (+ supersededBy) in the
+                                                           activity. Spec/policy: kept, dimmed, with the why
+- archive   (POST /api/nodes/:id/archive, ANY node)      — out of the live graph, into the archive. {note?}
+                                                           Fog is archived constantly (every verb above
+                                                           does it); spec/policy/frontier when they stop
+                                                           being true and should not stay dimmed on canvas
+- delete    (DELETE /api/nodes/:id)                      — a mistake, noise. It is ALSO an archive (verb
+                                                           "deleted"): recorded, restorable, never destroyed
+- restore   (POST /api/archive/:id/restore)              — back to the live graph, links whose far end is
+                                                           live come back with it
 Skills are NEITHER instruction nor record: a standing instruction has no terminal verb at all.
 It is edited and re-installed while the practice lives, and UNINSTALLED from the repos when it
 stops (then pruned like anything else if the practice is retired outright). Do not "complete" one.
@@ -361,16 +411,19 @@ Designate       POST /api/nodes/:id/designate       {"type":"bug|flaw|threat|que
                                                      close; the gate holds on undesignated notes,
                                                      fix-now items, open actions, blockers and
                                                      unfinished members.
-Point at the UI  POST /api/ui/focus                  {"view":"graph|lists|backlog|warps|reviews|activity|settings","projectId":..,"nodeId":..,"edgeId":..,"warpId":..,"reviewId":..,"tab":"spec|notes|links","modal":"answer|graduate|convert"}
+Point at the UI  POST /api/ui/focus                  {"view":"graph|lists|backlog|refine|warps|reviews|activity|settings","projectId":..,"nodeId":..,"edgeId":..,"warpId":..,"reviewId":..,"tab":"spec|notes|links","modal":"answer|graduate|convert"}
                                                      edgeId selects that connection — its relationship editor opens;
                                                      warpId opens the Warps stage board with that warp selected in the inspector;
                                                      tab (with nodeId) opens that inspector tab — point at a node's links or notes;
                                                      modal (with a nodeId) opens a dialog for the human — propose, they confirm
-                                                     (answer: unanswered questions; graduate: answered questions; convert: any node)
+                                                     (answer / graduate: questions; convert: any node)
 See the screen   GET  /api/debug/screenshot          — PNG of the live window
 
 Projects         GET|POST /api/projects              POST {"name","description?"}
-                 GET|PATCH|DELETE /api/projects/:id  PATCH {"name?","description?"}
+                 GET|PATCH|DELETE /api/projects/:id  PATCH {"name?","description?"}. DELETE ARCHIVES the
+                                                     project (off the list and the commons, nothing inside
+                                                     touched; restore from the archive). ?purge=1 is the
+                                                     host-only true removal — never use it to tidy up
 Whole graph      GET  /api/projects/:id/graph        — {nodes:[],edges:[]}; nodes carry progressComputed
                                                        and flags (computed highlight-rule names)
                                                      NOT ONLY THIS PROJECT'S NODES. The payload also
@@ -434,7 +487,8 @@ Nodes            GET  /api/projects/:id/nodes?type=&tag=&q=&unassigned=1
                                                      NEVER moves the slug — the installs would orphan — so rename the
                                                      directory deliberately by PATCHing slug, and reinstall.
                                                      stage: warps only — concept|design|implement|test|review|ship|done|not_needed
-                 DELETE /api/nodes/:id               — file goes to vault trash, never destroyed
+                 DELETE /api/nodes/:id               — ARCHIVES it (verb "deleted"): nothing is destroyed
+                 POST /api/nodes/:id/archive         {"note?"} — archive ANY node, links and all
 Spec content     PUT  /api/nodes/:id/content         {"content":"markdown"}   (GET also available)
 What changed     GET  /api/nodes/:id/diff?since=<epoch ms>  — one call, everything since T:
                    { nodeId, since, now,
@@ -451,10 +505,11 @@ What changed     GET  /api/nodes/:id/diff?since=<epoch ms>  — one call, everyt
                    \`unified\` is a standard unified diff of the markdown body. \`baselineApproximate: true\`
                    means T predates revision tracking, so the diff runs from the oldest snapshot we have.
                    Store the returned \`now\` as your next \`since\`.
-Complete action  POST /api/nodes/:id/complete        {"note?"}  — ACTIONS ONLY (400 otherwise).
-                                                     Removes the node (file → vault trash, edges cleaned,
-                                                     neighbours' frontmatter refreshed); logs
-                                                     action.completed with your note + the linked node ids.
+Complete         POST /api/nodes/:id/complete        {"note?","keep?":[ids]} — ACTIONS and FOG.
+                                                     Archives the node (links kept in the archive,
+                                                     neighbours' frontmatter refreshed) plus, for an
+                                                     action, the fog that derives it (the cascade);
+                                                     logs action.completed / fog.cleared.
 Waive record     POST /api/nodes/:id/waive           {"note","into?"} — the record family only
                                                      (feedback|bug|question|threat|flaw|idea); note
                                                      REQUIRED. A flavored prune: tag \`pruned\` lands
@@ -495,16 +550,26 @@ Request sweep    POST /api/nodes/:id/request-sweep   — WARPS only. Emits revie
                                                      {warpId,title,stage} on /api/events — subscribe
                                                      and sweep (file feedback) when it fires.
 Answer question  POST /api/nodes/:id/answer          {"answer"} — QUESTIONS ONLY (400 otherwise); answer
-                                                     markdown REQUIRED. Writes an \`## Answer\` section
-                                                     with attribution (you + date) into the file body —
-                                                     the answer is part of the spec, diffable, visible in
-                                                     Obsidian. Re-POSTing appends a refinement under the
-                                                     SAME heading. Adds the \`answered\` tag, and the
-                                                     machinery composes: \`answered\` is in the Done rule,
-                                                     so the question dims and leaves the backlog, and
-                                                     anything it was blocking un-rings automatically.
-                                                     Activity: question.answered (full answer in detail).
-                                                     Returns the updated node detail.
+                                                     markdown REQUIRED. An answered question is a KNOWN,
+                                                     so it leaves the fog: the \`## Answer\` section (you +
+                                                     date) is written into the body, then the node is
+                                                     ARCHIVED with the answer in it; anything it was
+                                                     blocking un-rings. Activity:
+                                                     question.answered (full answer in detail) then
+                                                     fog.cleared. Returns {ok, id, cleared:true, answer}.
+Refine           POST /api/projects/:id/refine        {"entries":[{"nodeId","response"}], "skipped?":[ids],
+                                                      "title?"} — the end of a Refine pass over the fog:
+                                                     creates ONE action tagged \`refine\` whose body is the
+                                                     transcript (each item + its response, skipped ones
+                                                     listed); every entry's node \`derives\` it (connection
+                                                     labelled \`refine\`). Every entry must be open fog of
+                                                     this project, not review-held feedback. Returns
+                                                     {id, action, responded, skipped}. Completing that
+                                                     action clears the fog it came from (the cascade).
+Clear resolved   POST /api/projects/:id/fog/clear-resolved  {"apply?":false} — fog resolved the OLD way
+                                                     (answered/fixed/done/pruned, still on the graph).
+                                                     apply:false LISTS {candidates}; apply:true clears
+                                                     exactly that list (fog.cleared, verb "swept").
 Prune            POST /api/nodes/:id/prune           {"note","supersededBy?"} — any non-warp node.
                                                      note REQUIRED (the why; kept as your annotation);
                                                      adds the \`pruned\` tag (Pruned rule dims it, backlog
@@ -591,8 +656,9 @@ Connections      POST /api/projects/:id/edges        {"sourceId","targetId","typ
                  GET /api/edges/:id                  — the connection (shape above) + annotations
                  PATCH /api/edges/:id                {"label"} — label ONLY; sending "type" is a 400
                                                      (types live on relationships now)
-                 DELETE /api/edges/:id               — removes the WHOLE connection (all relationships
-                                                     + annotations)
+                 DELETE /api/edges/:id               — removes the WHOLE connection from the live graph and
+                                                     ARCHIVES it (relationships + notes kept, searchable,
+                                                     POST /api/archive/edges/:id/restore puts it back)
 Relationships    POST /api/edges/:id/relationships   {"type","sourceId?"} — add a typed relationship;
                                                      sourceId picks the direction and must be one of the
                                                      pair (defaults to the connection's stored source);
@@ -670,10 +736,10 @@ Impact           GET  /api/nodes/:id/impact          — BLAST RADIUS: what brea
                                                        empty payload means the change is contained.
 Fog              GET  /api/projects/:id/fog?bodies=1&area=&limit=
                  GET  /api/nodes/:id/fog             — WHAT THE SPEC DOES NOT YET ABSORB, in one
-                                                       report: unresolved question|threat|flaw|bug
+                                                       report: unresolved question|threat|flaw|bug|idea
                                                        plus undesignated feedback, each classified
-                                                       unknown|undecided|unabsorbed, split into the
-                                                       FRONTIER (takeable now) and BLOCKED. A LENS,
+                                                       unshaped|unknown|undecided|unabsorbed, split into
+                                                       TAKEABLE (now) and BLOCKED. A LENS,
                                                        not a node type. \`bodies=1\` carries the spec
                                                        prose inline — one call instead of N+1.
                                                        Full shapes, the classes and the signals: § Fog.
@@ -969,10 +1035,67 @@ stale questions…), each "discusses" its target; adopt = synthesize/convert; wa
 feedback AND prune the target with the same rationale (the waive dialog offers this in one
 gesture whenever the feedback discusses a record).
 
+## The archive — nothing is hard-deleted
+
+Everything that leaves the live graph goes to the ARCHIVE, whole: resolved fog (answered,
+completed, pruned, waived, actioned by a completed action), completed actions, and any node
+archived or deleted by hand. An archived node is not in the graph, the backlog, the fog report,
+the ship gate or any node list — it cannot leak into live work — but its text (a snapshot), tags,
+annotations, revision history and EVERY LINK are kept, and it can be restored.
+
+Links are archived WITH their node and kept as links: both ends, the label, every typed
+relationship, and the titles/types of both ends as they were. They are never drawn and never
+count (an archived \`blocks\` blocks nothing), but they are searchable — "what was this connected
+to?" has an answer. A live node's detail (GET /api/nodes/:id) carries \`archivedEdges\`: the links
+it had to things that are now archived.
+
+  GET  /api/archive?projectId=&q=&type=&family=&verb=&limit=&offset=
+                                           search archived NODES. q = case-insensitive substring
+                                           over title, body snapshot, note and tags. Omit projectId
+                                           to search EVERY project. Newest first; {total, items[]},
+                                           items carry a \`snippet\` of the body around a q hit.
+                                           verb = archived|deleted|completed|answered|pruned|waived|
+                                           actioned|swept (how it left)
+  GET  /api/projects/:id/archive?...       the same, one project
+  GET  /api/archive/:id                    one archived node WHOLE: content, tags, annotations,
+                                           \`edges\` (its archived links, each end marked live |
+                                           archived | gone), revisions count
+  GET  /api/archive/edges?projectId=&nodeId=&q=&type=&limit=
+                                           search archived LINKS: nodeId = every archived link
+                                           touching that node (live or archived); q = substring of
+                                           the label or either end's title; type = links that
+                                           carried that relationship (derives, blocks, member…)
+  POST /api/archive/:id/restore            back to the live graph: row, tags, installs and file
+                                           restored; every archived link whose far end is LIVE
+                                           comes back; the rest wait for their far end. 409 if a
+                                           live skill took its slug, or its project is gone.
+
+GET /api/nodes/:id on an archived id is a 404 whose message (and \`archived: true\`) points here.
+A link removed BY HAND (DELETE /api/edges/:id) is archived too — \`archivedWith: ""\` marks it —
+and it comes back only by its own restore, never as collateral of restoring a node:
+
+  POST /api/archive/edges/:id/restore      one archived link back; both ends must be live (409
+                                           otherwise, naming which to restore first), and the pair
+                                           must not have been re-linked since
+
+PROJECTS ARE ARCHIVED, NOT DELETED. DELETE /api/projects/:id takes a project off the project list
+and out of the commons; everything inside stays exactly as it was.
+
+  GET  /api/archive/projects               archived projects, newest first
+  POST /api/archive/projects/:id/restore   back on the list, whole
+
+The one true removal on the board is DELETE /api/projects/:id?purge=1 — host-only, every row and
+the folder to the vault trash, the project's archive with it.
+
+  curl -s "${base}/api/archive?q=cache&projectId=PROJ"          # what did we decide about caching?
+  curl -s "${base}/api/archive/edges?nodeId=FEATURE_ID"         # what used to point at this feature?
+  curl -s -X POST ${base}/api/archive/NODE_ID/restore -H "X-Actor: claude-code"
+
 ## Fog — what the spec does not yet absorb
 
-Fog is everything the spec has not yet taken in: the open question, the live threat, the unfixed
-flaw, the standing bug, the feedback nobody designated. One call gives you the whole pile,
+Fog is everything the spec has not yet taken in: the unshaped idea, the open question, the live
+threat, the unfixed flaw, the standing bug, the feedback nobody designated. It is TRANSIENT — once
+acted on, a fog node is cleared from the graph (see the terminal verbs in § The ontology). One call gives you the whole pile,
 classified and ordered, so you can pick up uncertainty deliberately instead of tripping over it
 halfway through a build.
 
@@ -984,7 +1107,7 @@ rule refuses it (see § The ontology). Fog is computed on read from types that a
 
   question   unresolved                            threat   unresolved
   flaw       unresolved                            bug      unresolved
-  feedback   UNDESIGNATED — derives nothing and is not waived
+  idea       unresolved                            feedback UNDESIGNATED — derives nothing, not waived
 
 "Unresolved" is exactly the resolved-set the flag rules and the ship gate use: NOT matching the
 Done rule (tags done|fixed|answered|adopted|wontfix, or a done/not_needed warp stage) and NOT
@@ -994,8 +1117,10 @@ leaves the fog; waive a feedback and it leaves the fog, the same instant each st
 gate. FOG AND THE SHIP GATE NEVER DISAGREE ABOUT WHAT IS SETTLED. If you find a case where they
 do, that is a bug worth filing, not a nuance to work around.
 
-THE THREE CLASSES (\`fogClass\`) — not severity, three different NEXT MOVES:
+THE FOUR CLASSES (\`fogClass\`) — not severity, four different NEXT MOVES:
 
+  unshaped     not yet a thing at all                     → give it shape (convert it into what it
+                                                             is) or throw it away (prune). Ideas.
   unknown      nobody knows the answer                    → go and find out (research, a spike,
                                                              a measurement). An agent can do this.
   undecided    the options are known, nobody has chosen   → a HUMAN decides. Researching harder
@@ -1005,6 +1130,7 @@ THE THREE CLASSES (\`fogClass\`) — not severity, three different NEXT MOVES:
 
 The class is DERIVED from what the item is, so it cannot rot by someone forgetting to tag:
 
+  idea                    → unshaped      a spark nobody has shaped yet
   question                → unknown       the default: an unknown needing an answer
   question + \`undecided\`  → undecided     the ONE hand-applied input, because it is genuinely
                                           invisible from the type: "which cache do we use" and
@@ -1036,29 +1162,34 @@ is sharpen a hazy item: read its body, propose a precise phrasing as an annotati
 POST /api/ui/focus, and let the human drop the tag when it is sharp. \`hazy\` is a to-be-sharpened
 marker, not a severity.
 
-THE FRONTIER is fog that nothing unresolved is blocking — takeable RIGHT NOW. Every item lands
-in exactly one of \`frontier\` or \`blocked\`, so \`counts.frontier + counts.blocked === counts.total\`
+TAKEABLE is fog that nothing unresolved is blocking — workable RIGHT NOW. (This list was called
+\`frontier\` until "frontier" became the family of actions and warps; \`frontier\` and
+\`counts.frontier\` are still sent as a DEPRECATED alias for one release — without bodies — so move
+to \`takeable\`.) Every item lands in exactly one of \`takeable\` or \`blocked\`, so
+\`counts.takeable + counts.blocked === counts.total\`
 and \`byClass\` sums to \`total\`; if your arithmetic disagrees you are reading a filtered payload
 (\`limit\`/\`area\` cap the LISTS; the counts stay honest about the whole scope). Blocking uses the
 same resolution suppression as the flag rules: a blocker that is done or pruned stops holding its
-target down, and the item returns to the frontier by itself with nobody editing an edge.
+target down, and the item becomes takeable again by itself with nobody editing an edge.
+Every item also carries \`inReview\`: true when a warp IN REVIEW owns it — leave those to the room.
 
-  Start here: frontier + fogClass unknown   → the research an agent can just do
-              frontier + fogClass undecided → what to ASK THE HUMAN (batch these; do not guess)
-              frontier + fogClass unabsorbed → spec work waiting to be written
+  Start here: takeable + fogClass unknown    → the research an agent can just do
+              takeable + fogClass undecided  → what to ASK THE HUMAN (batch these; do not guess)
+              takeable + fogClass unshaped   → ideas: propose a shape, a human keeps or drops it
+              takeable + fogClass unabsorbed → spec work waiting to be written
               blocked                        → read \`blockedBy\` before touching any of it
 
-THE FRONTIER IS SORTED AS A QUEUE — work it down from the top and you are working in a defensible
+TAKEABLE IS SORTED AS A QUEUE — work it down from the top and you are working in a defensible
 order without thinking about it: (1) \`blocks.length\` DESCENDING — leverage, the only measure of
 worth comparable across projects: clearing something that holds four nodes down releases four
-nodes. (2) sharp before hazy — a hazy item STAYS in the frontier (it is genuinely unblocked, and
+nodes. (2) sharp before hazy — a hazy item STAYS takeable (it is genuinely unblocked, and
 its count is the honest measure of how much of the pile is unspeakable) but it does not sit above
-work that can start now. (3) class unabsorbed → unknown → undecided: cheapest-to-clear first, and
+work that can start now. (3) class unabsorbed → unknown → unshaped → undecided: cheapest-to-clear first, and
 descending by who can clear it — undecided sits last because it is the class an agent cannot move
 at all, which is about YOUR queue, not about its importance. (4) age descending. (5) id, so two
 identical calls diff cleanly. \`blocked\` is a SEPARATE list, never merged — merging would let a
 blocked item outrank a takeable one — sorted by \`blockedBy.length\` ASCENDING first: nearest to
-becoming frontier at the top.
+becoming takeable at the top.
 
 THE SIGNALS (\`signals[]\`) are meta-observations about the SHAPE of the pile, not about any one
 item. Four kinds:
@@ -1082,9 +1213,9 @@ item. Four kinds:
                          the ship gate's \`undesignated\` offender list holds, seen before the 409.
 
 READ \`no-decision-order\` HONESTLY. It fires when open questions carry no recorded prerequisite
-order between them, and its usual companion is a frontier holding nearly everything. The
+order between them, and its usual companion is a takeable list holding nearly everything. The
 tempting reading is "this work is all parallel". THAT IS ALMOST NEVER TRUE. The real reading is
-"nobody ever recorded prerequisite order between the decisions", and the frontier is therefore
+"nobody ever recorded prerequisite order between the decisions", and the takeable list is therefore
 overstating what is genuinely takeable. Measured on a live project the day this shipped: 43 open
 questions, 19 \`blocks\` relationships starting at a question, and EVERY ONE OF THEM pointing at
 work rather than at another question. That graph correctly says the questions gate the building.
@@ -1101,8 +1232,8 @@ ANOTHER, RECORD IT.
 Do this while the reasoning is in front of you — noticing that Q2 only makes sense after Q1 is
 a discovery, and the graph is where discoveries go. Two cautions: \`blocks\` between questions
 means PREREQUISITE, not "related" (a bare connection says related); and the blocks graph is the
-frontier, so a wrong arrow parks real work. When you are unsure whether one gates the other,
-leave it — an overstated frontier is a smaller lie than a fabricated dependency.
+takeable list, so a wrong arrow parks real work. When you are unsure whether one gates the other,
+leave it — an overstated takeable list is a smaller lie than a fabricated dependency.
 
 \`bodies=1\` — WHY IT EXISTS. \`fogClass\` tells you what KIND of fog an item is; only the prose
 tells you what it actually ASKS. Without bodies you would read the report and then GET each item
@@ -1112,7 +1243,7 @@ pass. Bodies are BIG, so budget: take them when you intend to triage, leave them
 only want counts, and narrow with \`area=\` or \`limit=\` before reaching for the whole project's
 prose. \`body\` is present ONLY when you ask — absent otherwise, not empty-string.
 
-THE PROSE BUDGET IS 256KB PER REPORT (~60k tokens), spent in output order so the frontier's prose
+THE PROSE BUDGET IS 256KB PER REPORT (~60k tokens), spent in output order so the takeable list's prose
 is the prose that survives a tight budget. NOTHING IS DROPPED SILENTLY: the one item that straddles
 the budget keeps a truncated body with a marker naming the byte counts, and every item past it gets
 a body that SAYS it was omitted and where to fetch it —
@@ -1124,7 +1255,7 @@ So a \`body\` that starts with "[body omitted" is a POINTER, not the spec. If yo
 you asked for too much at once: narrow with \`area=\`/\`limit=\` and call again rather than reasoning
 from a half-read district.
 
-\`limit=<n>\` (positive integer; anything else is a 400) trims the \`frontier\` and \`blocked\` ARRAYS
+\`limit=<n>\` (positive integer; anything else is a 400) trims the \`takeable\` and \`blocked\` ARRAYS
 — each to n, independently. It NEVER touches \`counts\`, which stay true about the whole scope. That
 is the intended way to read a big project: exact numbers, a bounded queue.
 
@@ -1135,9 +1266,10 @@ RESPONSE — GET /api/projects/:id/fog?bodies=1
     "at": 1787681174524,
     "counts": {
       "total": 31,
-      "byClass": { "unknown": 18, "undecided": 6, "unabsorbed": 7 },
+      "byClass": { "unshaped": 0, "unknown": 18, "undecided": 6, "unabsorbed": 7 },
       "byType":  { "question": 24, "threat": 2, "flaw": 1, "bug": 3, "feedback": 1 },
-      "frontier": 27, "blocked": 4,     // TRUE totals — \`limit\` trims the arrays, never these
+      "takeable": 27, "blocked": 4,     // TRUE totals — \`limit\` trims the arrays, never these
+      "frontier": 27,          // DEPRECATED alias of takeable
       "unlocated": 5,          // in no AREA (a warp does not count)
       "hazy": 3                // carrying the \`hazy\` tag
     },
@@ -1146,14 +1278,16 @@ RESPONSE — GET /api/projects/:id/fog?bodies=1
                                // is information too. \`members\` is the district's whole membership
                                // (the closure, following nested containers), \`total\` its fog.
       { "id": "nd_1a2b3c4d5e", "title": "Storage & Sync", "members": 24, "total": 9,
-        "byClass": { "unknown": 6, "undecided": 2, "unabsorbed": 1 }, "density": 0.375 }
+        "byClass": { "unshaped": 0, "unknown": 6, "undecided": 2, "unabsorbed": 1 }, "density": 0.375 }
     ],
-    "frontier": [              // takeable now — nothing unresolved holds these down
+    "takeable": [              // workable now — nothing unresolved holds these down
+                               // ("frontier": the same list, DEPRECATED, never with bodies)
       { "id": "nd_9f8e7d6c5b", "type": "question", "title": "Which cache backend?",
         "fogClass": "undecided", "hazy": false,
         "areaId": "nd_1a2b3c4d5e", "areaTitle": "Storage & Sync",
         "warpId": null, "warpTitle": null,
         "blockedBy": [], "blocks": [ { "id": "nd_44aa55bb66", "title": "Session Tokens", "type": "feature" } ],
+        "inReview": false,
         "tags": ["undecided","storage"], "createdAt": 1786000000000, "age": 1681174524,
         "body": "## Options\\n\\nRedis, or the embedded store...\\n" }
     ],
@@ -1162,11 +1296,11 @@ RESPONSE — GET /api/projects/:id/fog?bodies=1
         "fogClass": "unabsorbed", "hazy": true,
         "areaId": null, "areaTitle": null, "warpId": "nd_2233445566", "warpTitle": "Warp 7",
         "blockedBy": [ { "id": "nd_9f8e7d6c5b", "title": "Which cache backend?", "type": "question" } ],
-        "blocks": [], "tags": ["hazy"], "createdAt": 1786500000000, "age": 1181174524 }
+        "blocks": [], "inReview": false, "tags": ["hazy"], "createdAt": 1786500000000, "age": 1181174524 }
     ],
     "signals": [                        // absent entirely when a signal does not fire
       { "kind": "no-decision-order", "count": 24,
-        "detail": "24 of 24 open questions have no recorded prerequisite order (0 question→question \`blocks\` relationships in scope). Not one question is recorded as needing another answered first, so every one of them reads as takeable — which is almost never true. Draw \`blocks\` between the questions that actually gate each other before treating this frontier as a work queue." },
+        "detail": "24 of 24 open questions have no recorded prerequisite order (0 question→question \`blocks\` relationships in scope). Not one question is recorded as needing another answered first, so every one of them reads as takeable — which is almost never true. Draw \`blocks\` between the questions that actually gate each other before treating this takeable list as a work queue." },
       { "kind": "unlocated-fog", "count": 5, "detail": "5 fog items belong to no area. ..." },
       { "kind": "stale-fog", "count": 2, "detail": "2 items open longer than 14 days (oldest: \\"Which cache backend?\\" nd_9f8e7d6c5b, 47 days). ..." },
       { "kind": "undesignated-feedback", "count": 1, "detail": "1 feedback item with no designation: ..." }
@@ -1417,7 +1551,7 @@ Work a review end to end (open → cover → designate → dispose → complete 
   curl -s -X POST ${base}/api/nodes/FB1/waive -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"note":"covered — spec realigned","into":"X"}'
   # 6. COMPLETE every completable member (feature/instance/component/bug/question/idea/action/
-  #    threat/flaw/warp): tag it done/fixed/answered, complete() it if it's an action, or drop it
+  #    threat/flaw/warp): tag spec members done, complete() actions and fog, or drop it
   #    from the warp — an unresolved completable member holds the gate via error.offenders.incomplete
   curl -s -X PATCH ${base}/api/nodes/MEMBER_ID -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"tags":["done"]}'
@@ -1429,15 +1563,15 @@ Prune a dead record (kept, dimmed, with the why — never silently deleted):
   curl -s -X POST ${base}/api/nodes/IDEA_ID/prune -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"note":"superseded by the leads-to pipeline model","supersededBy":"FEATURE_ID"}'
 
-Answer a question (the record stays, dimmed, its answer in the spec body):
+Answer a question (it leaves the fog: removed, the answer kept in the activity log):
 
   curl -s -X POST ${base}/api/nodes/QUESTION_ID/answer -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"answer":"Stage drives the columns — one board, all warps.\\n\\nSee the stage board spec."}'
-  # composition, for free: \`answered\` is in the Done rule → the question dims and leaves the
-  # backlog; if it was —blocks→ anything, those targets un-ring. Re-POST to refine: the new text
-  # appends under the same ## Answer heading with fresh attribution.
+  # composition, for free: the question is cleared, so anything it —blocks→ un-rings. The body
+  # gains an ## Answer section before it goes to the archive. If the answer changes what the
+  # product is, GRADUATE instead (below) or edit the living spec — the question is not the record.
 
-Graduate an answered question into durable spec (two calls — no dedicated endpoint):
+Graduate a question's answer into durable spec (two calls — no dedicated endpoint):
 
   # 1. create the durable node (principle is the usual landing type), seeded from the answer,
   #    linked question —derives→ new (outgoing:false = the QUESTION is the edge source):
@@ -1445,11 +1579,11 @@ Graduate an answered question into durable spec (two calls — no dedicated endp
     -d '{"type":"principle","title":"Stage drives the board","content":"<answer text>\\n\\n— *graduated from the question \\"...?\\"*",
          "linkTo":[{"nodeId":"QUESTION_ID","type":"derives","outgoing":false}]}'
   #    (was the question in a warp? carry the membership: add {"nodeId":"WARP_ID"} to linkTo)
-  # 2. optionally retire the question, pointing at what its answer became:
+  # 2. retire the question, pointing at what its answer became (pruning fog CLEARS it):
   curl -s -X POST ${base}/api/nodes/QUESTION_ID/prune -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"note":"Graduated to \\"Stage drives the board\\"","supersededBy":"NEW_ID"}'
-  # activity trail: question.answered → node.created + edge.created → node.pruned; the question
-  # keeps its history and points forward via the "superseded by" label.
+  # activity trail: node.created + edge.created → fog.cleared (verb pruned, supersededBy NEW_ID);
+  # the question's history lives on in the activity log, pointing forward at the graduate.
 
 Convert vs graduate vs create-linked — three ways forward; choose by where the identity lives:
 
@@ -1499,13 +1633,25 @@ Working a district (assigned to one area/warp/class? load THAT, not the project)
   # 4. per changed node, precise catch-up: GET /api/nodes/NODE_ID/diff?since=T
   # 5. store the scope's \`now\` as your next \`since\` — the loop never re-reads the district.
 
+Acting on a REFINE hand-off (a human worked the fog in the Refine panel and gave you an action id):
+
+  curl -s ${base}/api/nodes/ACTION_ID                          # the transcript: one ## section per item,
+                                                               # "[type] title · node-id", then the response
+  # act on each response — edit specs, fix code, create nodes. Then complete the action ONCE:
+  curl -s -X POST ${base}/api/nodes/ACTION_ID/complete -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"note":"applied 6 of 7 — the cache question needs a benchmark first","keep":["Q_CACHE_ID"]}'
+  # → the action and every item it came from are cleared, EXCEPT those in keep: they stay in the
+  #   fog, unlinked, for the next pass. The response lists {cleared, kept}.
+
 Taking on a district's UNCERTAINTY (the fog loop — read § Fog first; do NOT set the \`hazy\` tag):
 
   # 1. ONE call: what this district has not absorbed, class + location + blocking + PROSE.
   #    Without bodies=1 this is 1 + N calls; with it you triage 30 questions in one read.
   curl -s "${base}/api/nodes/AREA_ID/fog?bodies=1&limit=20"
-  # 2. TRIAGE the frontier top-down — it is already sorted by leverage (blocks.length):
-  #      fogClass unabsorbed → do the work: edit the spec, then tag the item done/fixed
+  # 2. TRIAGE the takeable list top-down — it is already sorted by leverage (blocks.length):
+  #      fogClass unabsorbed → do the work: edit the spec, then COMPLETE the item (it clears):
+  curl -s -X POST ${base}/api/nodes/BUG_ID/complete -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
+    -d '{"note":"fixed in the retry path; spec updated"}'
   #      fogClass unknown    → go and find out, then answer it:
   curl -s -X POST ${base}/api/nodes/Q_ID/answer -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"answer":"Redis. Measured 4ms p99 against the embedded store's 31ms — see the benchmark node."}'
@@ -1516,18 +1662,18 @@ Taking on a district's UNCERTAINTY (the fog loop — read § Fog first; do NOT s
   #                            the human drop the \`hazy\` tag if they agree it is now sayable:
   curl -s -X POST ${base}/api/nodes/Q_ID/annotations -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"body":"Trying to sharpen this: is the question \\"which store\\", or \\"what p99 must we hit\\"?"}'
-  # 3. RECORD THE ORDER YOU DISCOVERED. If \`signals\` carries no-decision-order, the frontier is
+  # 3. RECORD THE ORDER YOU DISCOVERED. If \`signals\` carries no-decision-order, the takeable list is
   #    overstating what is takeable — and you have just read every body, so you are the one who
   #    knows which decision gates which. Draw it (prerequisite, NOT "related"):
   curl -s -X POST ${base}/api/projects/PROJ/edges -H "X-Actor: claude-code" -H "Content-Type: application/json" \\
     -d '{"sourceId":"Q_STORAGE_ENGINE","targetId":"Q_INDEX_STRATEGY","type":"blocks"}'
-  #    → Q_INDEX_STRATEGY leaves the frontier and returns by itself when the storage question is
-  #      answered (\`answered\` is a Done tag, and a resolved blocker stops blocking). Unsure which
-  #      gates which? Leave it: an overstated frontier is a smaller lie than a fabricated dependency.
+  #    → Q_INDEX_STRATEGY leaves the takeable list and returns by itself when the storage question
+  #      is answered (answering clears it, and a cleared blocker blocks nothing). Unsure which
+  #      gates which? Leave it: an overstated list is a smaller lie than a fabricated dependency.
   # 4. re-read and check your work — counts are TRUE totals, \`limit\` only trims the arrays:
   curl -s "${base}/api/nodes/AREA_ID/fog" | python3 -c "
   import json,sys; r=json.load(sys.stdin); c=r['counts']
-  assert c['frontier']+c['blocked']==c['total']
+  assert c['takeable']+c['blocked']==c['total']
   print(c['total'],'fog ·',c['byClass'],'· hazy',c['hazy'],'· unlocated',c['unlocated'])
   print([s['kind'] for s in r['signals']])"
   # Ship-readiness question? Read the fog, cite it, and DO NOT treat it as permission: fog is

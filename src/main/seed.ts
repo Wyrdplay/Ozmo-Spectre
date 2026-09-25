@@ -8,7 +8,7 @@ import * as svc from './services'
  * the Blocked flag's incoming-edge condition out of the box.
  */
 export function seedIfEmpty(): void {
-  if (svc.listProjects().length > 0) return
+  if (svc.hasAnyProject()) return
   const actor = 'seed'
   const proj = svc.createProject({
     name: 'Spectre',

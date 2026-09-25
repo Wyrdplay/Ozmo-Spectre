@@ -11,7 +11,7 @@ import { LENSES, type LensId } from './lib/lens'
 import { RpcError, rpc } from './api'
 import { host, type LinkStatus } from './host'
 
-export type View = 'graph' | 'lists' | 'backlog' | 'warps' | 'reviews' | 'agentic' | 'activity' | 'settings'
+export type View = 'graph' | 'lists' | 'backlog' | 'refine' | 'warps' | 'reviews' | 'archive' | 'agentic' | 'activity' | 'settings'
 
 /** THE selection — one model for single, multi and edge selection.
  *  Nodes: `ids` in selection order, `anchor` = the reference row for range
@@ -288,6 +288,8 @@ interface OzmoState {
   exportScope: 'project' | 'selection' | 'container' | 'filter' | null
   toasts: Toast[]
   focusNodeId: string | null
+  /** the archived node the Archive view should open on (set by openArchive) */
+  archiveFocusId: string | null
   /** inspector tab requested by ui.focus (agents pointing at a node's links/notes) — consumed once */
   focusTab: 'spec' | 'notes' | 'links' | null
   /** node flow requested by ui.focus (agents opening the answer/graduate/convert dialog for the human) — consumed once */
@@ -379,6 +381,8 @@ interface OzmoState {
   toast: (msg: string, kind?: 'error' | 'info', action?: { label: string; run: () => void }) => void
   dismissToast: (id: number) => void
   setFocusNode: (id: string | null) => void
+  /** go to the Archive, opened on this archived node */
+  openArchive: (id: string | null) => void
   setFindQuery: (q: string | null) => void
   /** collapse/expand one container (class or area) on the canvas */
   toggleContainerCollapse: (id: string) => void
@@ -472,6 +476,7 @@ export const useStore = create<OzmoState>((set, get) => ({
   exportScope: null,
   toasts: [],
   focusNodeId: null,
+  archiveFocusId: null,
   focusTab: null,
   focusModal: null,
   findQuery: null,
@@ -958,6 +963,7 @@ export const useStore = create<OzmoState>((set, get) => ({
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
   setFocusNode: (id) => set({ focusNodeId: id }),
+  openArchive: (id) => set({ view: 'archive', archiveFocusId: id }),
 
   setFindQuery: (q) => set({ findQuery: q }),
 

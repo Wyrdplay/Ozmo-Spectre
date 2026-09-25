@@ -27,7 +27,7 @@
  */
 
 import * as vault from './vault'
-import { ApiError, getNode, graphInternal } from './services'
+import { ApiError, getNode, graphInternal, reviewHeldIds } from './services'
 import { FOG_TYPES } from '@shared/types'
 import type {
   FogArea, FogClass, FogItem, FogReport, FogSignal,
@@ -68,8 +68,8 @@ const STALE_FOG_MS = 14 * 24 * 60 * 60 * 1000
  */
 const DECISION_ORDER_MIN_QUESTIONS = 6
 
-/** Sort rank for the fog classes — see `compareFrontier` for the reasoning. */
-const CLASS_RANK: Record<FogClass, number> = { unabsorbed: 0, unknown: 1, undecided: 2 }
+/** Sort rank for the fog classes — see `compareTakeable` for the reasoning. */
+const CLASS_RANK: Record<FogClass, number> = { unabsorbed: 0, unknown: 1, unshaped: 2, undecided: 3 }
 
 const TRUNCATED = (id: string, kept: number, total: number): string =>
   `\n\n[…body truncated by the fog endpoint: ${kept} of ${total} bytes — ` +
@@ -93,6 +93,7 @@ const OMITTED = (id: string): string =>
  *   flaw / bug → `unabsorbed`. Both say "we already know something is wrong" —
  *                the flaw says the spec is wrong, the bug says the code is —
  *                and in both cases the work, not the knowledge, is missing.
+ *   idea       → `unshaped`: not yet a thing at all — shape it or throw it away.
  *   feedback   → `unabsorbed`, but ONLY while it is undesignated: no outgoing
  *                `derives` and not waived. Designated feedback has already
  *                been absorbed into the work it spawned; counting it again
@@ -115,6 +116,11 @@ function classify(n: SpecNode, derivesOutCount: number): FogClass | null {
       return 'unabsorbed'
     case 'feedback':
       return derivesOutCount === 0 ? 'unabsorbed' : null
+    case 'idea':
+      // an idea has not taken shape yet: the next move is to GIVE it shape
+      // (convert it into what it is) or throw it away — neither finding out
+      // nor deciding between known options, so it is its own class
+      return 'unshaped'
     default:
       return null
   }
@@ -135,6 +141,8 @@ interface FogIndex {
   derivesOut: Map<string, string[]>
   /** container id → the member node ids pointing at it (one hop) */
   directMembers: Map<string, string[]>
+  /** everything an open review owns — services' single definition */
+  reviewHeld: Set<string>
 }
 
 const push = (m: Map<string, string[]>, k: string, v: string): void => {
@@ -162,7 +170,7 @@ function indexGraph(projectId: string): FogIndex {
       }
     }
   }
-  return { nodes, byId, resolved, blocksIn, blocksOut, derivesOut, directMembers }
+  return { nodes, byId, resolved, blocksIn, blocksOut, derivesOut, directMembers, reviewHeld: reviewHeldIds(projectId) }
 }
 
 const isContainer = (n: SpecNode | undefined): boolean => n?.type === 'area' || n?.type === 'warp'
@@ -252,6 +260,7 @@ function buildItem(ix: FogIndex, loc: Located, n: SpecNode, fogClass: FogClass, 
     warpTitle: warp?.title ?? null,
     blockedBy,
     blocks,
+    inReview: ix.reviewHeld.has(n.id),
     tags: n.tags,
     createdAt: n.createdAt,
     age: Math.max(0, at - n.createdAt)
@@ -261,7 +270,7 @@ function buildItem(ix: FogIndex, loc: Located, n: SpecNode, fogClass: FogClass, 
 // ---------------------------------------------------------------------------
 // Ordering
 //
-// The frontier is a QUEUE an agent works down, so it is sorted by how much
+// The takeable list is a QUEUE an agent works down, so it is sorted by how much
 // clearing an item is worth and how takeable it actually is:
 //
 //  1. blocks.length DESC — leverage. The only objective measure of worth in the
@@ -269,7 +278,7 @@ function buildItem(ix: FogIndex, loc: Located, n: SpecNode, fogClass: FogClass, 
 //     nodes. Nothing else on an item is comparable across projects.
 //  2. sharp before hazy — an item the human has flagged `fog` cannot be phrased
 //     precisely yet, so nobody (agent or human) can take it until it is
-//     sharpened. It stays IN the frontier (it is genuinely unblocked, and its
+//     sharpened. It stays takeable (it is genuinely unblocked, and its
 //     count is the honest measure of how much of the pile is unspeakable) but
 //     it does not sit above work that can start now.
 //  3. class: unabsorbed → unknown → undecided. Cheapest-to-clear first, and
@@ -286,7 +295,7 @@ function buildItem(ix: FogIndex, loc: Located, n: SpecNode, fogClass: FogClass, 
 // `blocked` is returned SEPARATELY and never merged, because merging them would
 // let a blocked item outrank a takeable one and quietly send an agent at work
 // it cannot start. It is sorted by blockedBy.length ASC first — fewest things
-// in the way, i.e. nearest to becoming frontier — then by the same tail.
+// in the way, i.e. nearest to becoming takeable — then by the same tail.
 
 const tail = (a: FogItem, b: FogItem): number =>
   (a.hazy ? 1 : 0) - (b.hazy ? 1 : 0) ||
@@ -294,7 +303,7 @@ const tail = (a: FogItem, b: FogItem): number =>
   b.age - a.age ||
   a.id.localeCompare(b.id)
 
-const compareFrontier = (a: FogItem, b: FogItem): number =>
+const compareTakeable = (a: FogItem, b: FogItem): number =>
   b.blocks.length - a.blocks.length || tail(a, b)
 
 const compareBlocked = (a: FogItem, b: FogItem): number =>
@@ -305,7 +314,7 @@ const compareBlocked = (a: FogItem, b: FogItem): number =>
 
 /**
  * Attach markdown bodies to the items that will actually be returned, in output
- * order (frontier first, so the most useful prose is the prose that survives a
+ * order (takeable first, so the most useful prose is the prose that survives a
  * tight budget). NOTHING is dropped silently: the item that straddles the
  * budget keeps a truncated body plus a marker naming the byte counts, and every
  * item past it gets a body that says it was omitted and where to fetch it.
@@ -351,7 +360,7 @@ function signalsFor(items: FogItem[], ix: FogIndex, scope: Set<string> | null): 
   // record "answer that one first". Count them over the scope regardless of
   // resolution (an order that was recorded stays recorded once its prerequisite
   // is answered), then count how many OPEN questions have no such relationship
-  // at either end. When most of them have none, the flat frontier below is an
+  // at either end. When most of them have none, the flat takeable list below is an
   // artefact of nobody writing the order down, not a genuinely parallel pile.
   const openQuestions = items.filter((i) => i.type === 'question')
   if (openQuestions.length >= DECISION_ORDER_MIN_QUESTIONS) {
@@ -378,8 +387,8 @@ function signalsFor(items: FogItem[], ix: FogIndex, scope: Set<string> | null): 
           (qq === 0
             ? 'Not one question is recorded as needing another answered first, so every one of them reads ' +
               'as takeable — which is almost never true. Draw `blocks` between the questions that actually ' +
-              'gate each other before treating this frontier as a work queue.'
-            : 'The ordered ones are a small minority — the frontier below overstates how much is genuinely takeable.')
+              'gate each other before treating this takeable list as a work queue.'
+            : 'The ordered ones are a small minority — the takeable list below overstates how much is genuinely takeable.')
       })
     }
   }
@@ -454,7 +463,7 @@ function buildReport(projectId: string, opts: BuildOpts): FogReport {
     items.push(buildItem(ix, loc, n, fogClass, at))
   }
 
-  const zeroByClass = (): Record<FogClass, number> => ({ unknown: 0, undecided: 0, unabsorbed: 0 })
+  const zeroByClass = (): Record<FogClass, number> => ({ unshaped: 0, unknown: 0, undecided: 0, unabsorbed: 0 })
   const byClass = zeroByClass()
   const byType: Record<string, number> = {}
   for (const i of items) {
@@ -489,30 +498,35 @@ function buildReport(projectId: string, opts: BuildOpts): FogReport {
     })
     .sort((x, y) => y.density - x.density || y.total - x.total || x.title.localeCompare(y.title))
 
-  const frontierAll = items.filter((i) => i.blockedBy.length === 0).sort(compareFrontier)
+  const takeableAll = items.filter((i) => i.blockedBy.length === 0).sort(compareTakeable)
   const blockedAll = items.filter((i) => i.blockedBy.length > 0).sort(compareBlocked)
   const counts = {
     total: items.length,
     byClass,
     byType,
     // the TRUE totals — `limit` trims the arrays below, never these
-    frontier: frontierAll.length,
+    takeable: takeableAll.length,
+    frontier: takeableAll.length,
     blocked: blockedAll.length,
     unlocated: items.filter((i) => i.areaId === null).length,
     hazy: items.filter((i) => i.hazy).length
   }
 
   const limit = opts.limit
-  const frontier = limit === undefined ? frontierAll : frontierAll.slice(0, limit)
+  const takeable = limit === undefined ? takeableAll : takeableAll.slice(0, limit)
   const blocked = limit === undefined ? blockedAll : blockedAll.slice(0, limit)
-  if (opts.bodies) attachBodies([...frontier, ...blocked], ix.byId)
+  if (opts.bodies) attachBodies([...takeable, ...blocked], ix.byId)
 
   return {
     projectId,
     at,
     counts,
     areas,
-    frontier,
+    takeable,
+    // DEPRECATED alias, one release: "frontier" now names the node family. It
+    // never carries prose — duplicating the bodies would double a read that is
+    // budgeted at 256KB precisely to stay affordable.
+    frontier: opts.bodies ? takeable.map(({ body: _body, ...rest }) => rest) : takeable,
     blocked,
     signals: signalsFor(items, ix, scope)
   }

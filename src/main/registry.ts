@@ -75,6 +75,11 @@ const CAPABILITY: Record<string, Capability> = {
   'projects.get': 'read',
   'graph.get': 'read',
   'nodes.list': 'read',
+  // the archive: everything that left the graph, searchable, links included
+  'archive.list': 'read',
+  'archive.get': 'read',
+  'archive.edges': 'read',
+  'archive.projects': 'read',
   'nodes.get': 'read',
   'nodes.getContent': 'read',
   'nodes.diff': 'read',
@@ -149,6 +154,17 @@ const CAPABILITY: Record<string, Capability> = {
   'nodes.convert': 'write',
   'nodes.designate': 'write',
   'nodes.requestSweep': 'write',
+  // Refine turns a pass over the fog into one action; the sweep clears fog that
+  // was resolved under the old keep-the-record rule. Both only write the board.
+  'refine.submit': 'write',
+  'nodes.archive': 'write',
+  'archive.restore': 'write',
+  'archive.restoreEdge': 'write',
+  'archive.restoreProject': 'write',
+  // PURGE is the one true removal on a board that otherwise deletes nothing —
+  // it belongs to whoever hosts the board, not to anyone who may edit it
+  'projects.purge': 'host',
+  'fog.clearResolved': 'write',
   'annotations.delete': 'write',
   'edges.create': 'write',
   'edges.update': 'write',
@@ -421,6 +437,15 @@ export const registry: Record<string, Handler> = {
   'graph.get': (p) => svc.getGraph(p),
 
   'nodes.list': (p) => svc.listNodes(p),
+  'nodes.archive': (p, c) => svc.archiveNodeVerb(p, c.actor),
+  'archive.list': (p) => svc.listArchive(p),
+  'archive.get': (p) => svc.getArchived(p),
+  'archive.edges': (p) => svc.listArchivedEdges(p),
+  'archive.restore': (p, c) => svc.restoreNode(p, c.actor),
+  'archive.restoreEdge': (p, c) => svc.restoreEdge(p, c.actor),
+  'archive.projects': () => svc.listArchivedProjects(),
+  'archive.restoreProject': (p, c) => svc.restoreProject(p, c.actor),
+  'projects.purge': (p, c) => svc.purgeProject(p, c.actor),
   'nodes.create': (p, c) => svc.createNode(p, c.actor),
   'nodes.get': (p) => svc.getNode(p),
   'nodes.update': (p, c) => svc.updateNode(p, c.actor),
@@ -482,6 +507,8 @@ export const registry: Record<string, Handler> = {
   // ship gate, so fog and the gate can never disagree about "settled".
   'fog.get': (p) => fog.getFog(p),
   'fog.node': (p) => fog.getNodeFog(p),
+  'fog.clearResolved': (p, c) => svc.clearResolvedFog(p, c.actor),
+  'refine.submit': (p, c) => svc.refineSubmit(p, c.actor),
 
   // reviews are NODES now — nodes.create type review, nodes.waive, nodes.pass,
   // nodes.requestSweep; the review-table methods retired with the review-nodes

@@ -1817,7 +1817,7 @@ function CompleteModal({ node, onClose }: { node: SpecNode; onClose: () => void 
     <Modal onClose={onClose}>
       <h2>✓ Complete “{node.title}”</h2>
       <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
-        The spec absorbed this instruction — the node is removed (file to vault trash, note in the
+        The spec absorbed this instruction — the node moves to the Archive (text and links kept, note in the
         activity log). Waive the feedback it covered afterwards; the meter and the gate follow.
       </div>
       <textarea className="input" placeholder="Completion note (optional)" value={note} autoFocus onChange={(e) => setNote(e.target.value)} />

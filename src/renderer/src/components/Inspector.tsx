@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  NODE_TYPES, EDGE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships,
+  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships,
   type NodeDetail, type EdgeWithTitles, type Annotation, type EdgeType, type NodeType, type RelationshipType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
@@ -13,8 +13,10 @@ import { MarkdownEditor } from './MarkdownEditor'
 import { lockedProps, useBoardLock } from './BoardLock'
 import { timeAgo } from '@/lib/markdown'
 
-/** Confirm dialog for the action terminal verb: optional note, then the node is removed. */
-function CompleteActionModal({ id, title, onClose }: { id: string; title: string; onClose: () => void }): React.JSX.Element {
+/** Confirm dialog for the complete verb: optional note, then the node is removed.
+ *  An ACTION takes the fog it came from with it; a FOG node is resolved directly. */
+function CompleteActionModal({ id, title, type, onClose }: { id: string; title: string; type: NodeType; onClose: () => void }): React.JSX.Element {
+  const isAction = type === 'action'
   const select = useStore((s) => s.select)
   const toast = useStore((s) => s.toast)
   const [note, setNote] = useState('')
@@ -23,10 +25,13 @@ function CompleteActionModal({ id, title, onClose }: { id: string; title: string
     if (busy) return
     setBusy(true)
     try {
-      await rpc('nodes.complete', { id, ...(note.trim() ? { note: note.trim() } : {}) })
+      const r = await rpc<{ cleared: string[] }>('nodes.complete', { id, ...(note.trim() ? { note: note.trim() } : {}) })
       onClose()
       select(null)
-      toast(`action "${title}" completed`, 'info')
+      const fog = isAction ? r.cleared.length : 0
+      toast(isAction
+        ? `action "${title}" completed${fog ? ` — cleared ${fog} fog item${fog === 1 ? '' : 's'}` : ''}`
+        : `"${title}" resolved — archived`, 'info')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -34,22 +39,75 @@ function CompleteActionModal({ id, title, onClose }: { id: string; title: string
   }
   return (
     <Modal onClose={onClose}>
-      <h2>✓ Action it</h2>
+      <h2>{isAction ? '✓ Action it' : '✓ Resolve it'}</h2>
       <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
-        Completing means the spec and implementation absorbed this instruction. The node is removed —
-        its file goes to the vault trash, links are cleaned up, and your note lands in the activity log
-        alongside the nodes it touched.
+        {isAction ? (
+          <>
+            Completing means the spec and implementation absorbed this instruction. It moves to the
+            Archive — text, links and your note kept — and the fog it came from is archived with it.
+          </>
+        ) : (
+          <>
+            A known has no reason to stay in the fog. Resolving moves this {type} to the Archive, with
+            your note as its resolution — searchable and restorable, never destroyed.
+          </>
+        )}
       </div>
       <textarea
         className="input"
-        placeholder="Completion note (optional) — what did actioning this change?"
+        placeholder={isAction ? 'Completion note (optional) — what did actioning this change?' : 'Resolution (optional) — what settled it?'}
         value={note}
         autoFocus
         onChange={(e) => setNote(e.target.value)}
       />
       <div className="actions">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn primary" onClick={complete} disabled={busy}>✓ Complete action</button>
+        <button className="btn primary" onClick={complete} disabled={busy}>{isAction ? '✓ Complete action' : '✓ Resolve'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+/** Archive dialog: ANY node, an optional note. Out of the live graph, into the
+ *  Archive — text, notes, history and every link kept, restorable. */
+function ArchiveModal({ id, type, title, onClose }: { id: string; type: NodeType; title: string; onClose: () => void }): React.JSX.Element {
+  const toast = useStore((s) => s.toast)
+  const select = useStore((s) => s.select)
+  const openArchive = useStore((s) => s.openArchive)
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const archive = async (): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await rpc('nodes.archive', { id, ...(note.trim() ? { note: note.trim() } : {}) })
+      onClose()
+      select(null)
+      toast(`${type} "${title}" archived — find it in the Archive`, 'info')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal onClose={onClose}>
+      <h2>Archive this {type}</h2>
+      <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
+        It leaves the live graph but nothing is lost: its text, notes, history and every link are kept in
+        the Archive, searchable, and it can be restored — links whose other end is still live come back
+        with it.{' '}
+        <a href="#" onClick={(e) => { e.preventDefault(); onClose(); openArchive(null) }}>Open the Archive</a>
+      </div>
+      <textarea
+        className="input"
+        placeholder="Why is it being archived? (optional, kept with it)"
+        value={note}
+        autoFocus
+        onChange={(e) => setNote(e.target.value)}
+      />
+      <div className="actions">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn primary" onClick={archive} disabled={busy}>Archive</button>
       </div>
     </Modal>
   )
@@ -59,6 +117,8 @@ function CompleteActionModal({ id, title, onClose }: { id: string; title: string
  *  The node stays — tagged `pruned`, dimmed by the Pruned rule, out of the backlog. */
 function PruneModal({ id, type, onClose }: { id: string; type: NodeType; onClose: () => void }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
+  const select = useStore((s) => s.select)
+  const fog = NODE_FAMILY[type] === 'fog'
   const [note, setNote] = useState('')
   const [supersededBy, setSupersededBy] = useState<SpecNode | null>(null)
   const [busy, setBusy] = useState(false)
@@ -68,7 +128,8 @@ function PruneModal({ id, type, onClose }: { id: string; type: NodeType; onClose
     try {
       await rpc('nodes.prune', { id, note: note.trim(), ...(supersededBy ? { supersededBy: supersededBy.id } : {}) })
       onClose()
-      toast(`${type} pruned — the note is on its annotation trail`, 'info')
+      if (fog) select(null)
+      toast(fog ? `${type} pruned — archived with the why` : `${type} pruned — the note is on its annotation trail`, 'info')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -78,9 +139,18 @@ function PruneModal({ id, type, onClose }: { id: string; type: NodeType; onClose
     <Modal onClose={onClose}>
       <h2>Prune this {type}</h2>
       <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
-        Pruning archives without deleting: the node keeps its history, gets the <code>pruned</code> tag
-        (dimmed, out of the backlog), and your note records what happened and why. Removing the tag
-        un-prunes it later.
+        {fog ? (
+          <>
+            This {type} is fog, and fog does not stay on the graph once it is settled: pruning moves it
+            to the Archive with your note (and what superseded it).
+          </>
+        ) : (
+          <>
+            Pruning archives without deleting: the node keeps its history, gets the <code>pruned</code> tag
+            (dimmed, out of the backlog), and your note records what happened and why. Removing the tag
+            un-prunes it later.
+          </>
+        )}
       </div>
       <textarea
         className="input"
@@ -116,6 +186,7 @@ function PruneModal({ id, type, onClose }: { id: string; type: NodeType; onClose
  *  Done rule — the question dims, leaves the backlog, and stops blocking. */
 function AnswerModal({ id, title, onClose }: { id: string; title: string; onClose: () => void }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
+  const select = useStore((s) => s.select)
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async (): Promise<void> => {
@@ -124,7 +195,8 @@ function AnswerModal({ id, title, onClose }: { id: string; title: string; onClos
     try {
       await rpc('nodes.answer', { id, answer: answer.trim() })
       onClose()
-      toast(`question answered — the answer lives in its spec body`, 'info')
+      select(null)
+      toast('question answered — archived with its answer', 'info')
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -137,10 +209,9 @@ function AnswerModal({ id, title, onClose }: { id: string; title: string; onClos
       <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
         <b style={{ color: 'var(--text)' }}>{title}</b>
         <div style={{ marginTop: 6 }}>
-          The answer is written into the spec body as an <code>## Answer</code> section, attributed to
-          you — diffable, Obsidian-visible. The question stays as a record: tagged <code>answered</code>,
-          dimmed, out of the backlog, and anything it was blocking un-rings. Graduate it later to turn
-          the answer into durable spec.
+          An answered question is a known, so it leaves the fog: it moves to the Archive with the answer
+          written into it (attributed), and anything it was blocking un-rings.
+          If the answer changes what the product is, <b>graduate</b> it instead — or edit the living spec.
         </div>
       </div>
       <textarea
@@ -535,6 +606,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
   const [note, setNote] = useState('')
   const [confirmDel, setConfirmDel] = useState(false)
   const [completeOpen, setCompleteOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
   const [pruneOpen, setPruneOpen] = useState(false)
   const [answerOpen, setAnswerOpen] = useState(false)
   const [graduateOpen, setGraduateOpen] = useState(false)
@@ -610,7 +682,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
     }
     if (detail.type !== 'question') return
     if (focusModal === 'answer' && !detail.tags.includes('answered')) setAnswerOpen(true)
-    if (focusModal === 'graduate' && detail.tags.includes('answered')) setGraduateOpen(true)
+    if (focusModal === 'graduate') setGraduateOpen(true)
   }, [focusModal, detail, id])
 
   // Read once for every control below. Text stays `readOnly` rather than
@@ -716,14 +788,25 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
             <button
               className="btn sm"
               style={{ background: meta.color, borderColor: meta.color, color: '#2a1403', fontWeight: 700 }}
-              title={lock ? `This board is read-only — ${lock.message}` : 'Answer this question — the answer lands in the spec body, the record stays (dimmed)'}
+              title={lock ? `This board is read-only — ${lock.message}` : 'Answer this question — it is known now, so it leaves the fog'}
               disabled={!!lock}
               onClick={() => setAnswerOpen(true)}
             >
               ✎ answer…
             </button>
           )}
-          {detail.type === 'question' && detail.tags.includes('answered') && (
+          {['bug', 'threat', 'flaw', 'idea'].includes(detail.type) && (
+            <button
+              className="btn sm"
+              style={{ color: meta.color }}
+              title={lock ? `This board is read-only — ${lock.message}` : 'Resolve — this is known now; it is cleared from the fog'}
+              disabled={!!lock}
+              onClick={() => setCompleteOpen(true)}
+            >
+              ✓ resolve…
+            </button>
+          )}
+          {detail.type === 'question' && (
             <button
               className="btn sm"
               style={{ color: meta.color }}
@@ -861,6 +944,33 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
                 </div>
               )
             })}
+            {(detail.archivedEdges?.length ?? 0) > 0 && (
+              <details className="archived-links">
+                <summary>{detail.archivedEdges!.length} archived link{detail.archivedEdges!.length === 1 ? '' : 's'} — kept, not live</summary>
+                {detail.archivedEdges!.map((e) => {
+                  const out = e.sourceId === id
+                  const otherId = out ? e.targetId : e.sourceId
+                  const state = out ? e.targetState : e.sourceState
+                  const verbs = e.relationships.length
+                    ? e.relationships.map((r) => (r.sourceId === id ? relOf(r.type).label : relOf(r.type).inverseLabel)).join(' · ')
+                    : relOf('relates').label
+                  return (
+                    <div key={e.id} className="archive-link in-card">
+                      <span className="rel">{verbs}{e.label ? ` · “${e.label}”` : ''}</span>
+                      <button
+                        className={`end s-${state}`}
+                        title={state === 'archived' ? 'archived — open it in the Archive' : state === 'live' ? 'live — the link went to the archive with a node that has since been restored elsewhere' : 'gone with its project'}
+                        onClick={() => { if (state === 'archived') useStore.getState().openArchive(otherId) }}
+                      >
+                        <span className="type-dot" style={{ background: styleOf(out ? e.targetType : e.sourceType).color }} />
+                        {out ? e.targetTitle : e.sourceTitle}
+                        <span className="state">{state}</span>
+                      </button>
+                    </div>
+                  )
+                })}
+              </details>
+            )}
             {addingLink === null ? (
               <button className="btn sm" onClick={() => setAddingLink('relates')}>+ add link</button>
             ) : (
@@ -910,14 +1020,22 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
                   prune…
                 </button>
               )}
-              <button className="btn sm danger" {...lockedProps(lock)} onClick={() => setConfirmDel(true)}>Delete {detail.type}…</button>
+              <button
+                className="btn sm"
+                title={lock ? `This board is read-only — ${lock.message}` : 'Archive — out of the live graph, kept whole in the Archive, restorable'}
+                disabled={!!lock}
+                onClick={() => setArchiveOpen(true)}
+              >
+                ▢ archive…
+              </button>
             </div>
           </div>
         )}
       </div>
 
-      {completeOpen && <CompleteActionModal id={id} title={detail.title} onClose={() => setCompleteOpen(false)} />}
+      {completeOpen && <CompleteActionModal id={id} title={detail.title} type={detail.type} onClose={() => setCompleteOpen(false)} />}
       {pruneOpen && <PruneModal id={id} type={detail.type} onClose={() => setPruneOpen(false)} />}
+      {archiveOpen && <ArchiveModal id={id} type={detail.type} title={detail.title} onClose={() => setArchiveOpen(false)} />}
       {answerOpen && <AnswerModal id={id} title={detail.title} onClose={() => setAnswerOpen(false)} />}
       {graduateOpen && <GraduateModal detail={detail} onClose={() => setGraduateOpen(false)} />}
       {convertOpen && <ConvertModal detail={detail} onClose={() => setConvertOpen(false)} />}
@@ -925,7 +1043,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
       {confirmDel && (
         <Confirm
           title={`Delete "${detail.title}"?`}
-          body="Its links and annotations go with it. The markdown file is moved to the vault trash, not destroyed."
+          body="It moves to the Archive with its links, notes and history — searchable, and restorable from there."
           onConfirm={async () => {
             try {
               await rpc('nodes.delete', { id })
@@ -1158,15 +1276,16 @@ function EdgeInspector({ id }: { id: string }): React.JSX.Element | null {
             }}
           />
           <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10 }}>
-            <button className="btn sm danger" onClick={() => setConfirmDel(true)}>Delete connection…</button>
+            <button className="btn sm danger" onClick={() => setConfirmDel(true)}>Remove connection…</button>
           </div>
         </div>
       </div>
 
       {confirmDel && (
         <Confirm
-          title="Delete this connection?"
-          body="The connection, all its relationships and its annotations will be removed."
+          title="Remove this connection?"
+          confirmLabel="Remove"
+          body="It moves to the Archive with its relationships and notes — searchable, and restorable while both ends are live."
           onConfirm={async () => {
             try {
               await rpc('edges.delete', { id })

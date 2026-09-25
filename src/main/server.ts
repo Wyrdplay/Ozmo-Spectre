@@ -353,7 +353,11 @@ export async function startServer(
   app.post('/api/projects', h('projects.create', (r) => r.body))
   app.get('/api/projects/:id', h('projects.get', (r) => ({ id: r.params.id })))
   app.patch('/api/projects/:id', h('projects.update', (r) => ({ ...r.body, id: r.params.id })))
-  app.delete('/api/projects/:id', h('projects.delete', (r) => ({ id: r.params.id })))
+  // DELETE archives the project; ?purge=1 is the host-only true removal
+  app.delete('/api/projects/:id', (req, res, next) =>
+    (req.query.purge === '1' || req.query.purge === 'true'
+      ? h('projects.purge', (r) => ({ id: r.params.id }))
+      : h('projects.delete', (r) => ({ id: r.params.id })))(req, res, next))
 
   // ---- taking a project somewhere else ------------------------------------
   //
@@ -417,6 +421,8 @@ export async function startServer(
   app.get('/api/projects/:id/nodes', h('nodes.list', (r) => ({
     projectId: r.params.id,
     type: r.query.type as string | undefined,
+    // family=fog|frontier|spec|policy — derived from type (frontier = open work only)
+    family: r.query.family as string | undefined,
     status: r.query.status as string | undefined,
     tag: r.query.tag as string | undefined,
     q: r.query.q as string | undefined,
@@ -427,7 +433,35 @@ export async function startServer(
   app.post('/api/projects/:id/nodes', h('nodes.create', (r) => ({ ...r.body, projectId: r.params.id })))
   app.get('/api/nodes/:id', h('nodes.get', (r) => ({ id: r.params.id })))
   app.patch('/api/nodes/:id', h('nodes.update', (r) => ({ ...r.body, id: r.params.id })))
-  app.delete('/api/nodes/:id', h('nodes.delete', (r) => ({ id: r.params.id })))
+  // DELETE is ARCHIVE — nothing on the board is hard-deleted (see /api/archive)
+  app.delete('/api/nodes/:id', h('nodes.delete', (r) => ({ id: r.params.id, note: r.body?.note })))
+  app.post('/api/nodes/:id/archive', h('nodes.archive', (r) => ({ id: r.params.id, note: r.body?.note })))
+  // THE ARCHIVE — search it (every project, or one), read one node whole, search
+  // its preserved links, restore. /edges is registered before /:id on purpose.
+  const archiveQuery = (r: Request): Record<string, unknown> => ({
+    q: typeof r.query.q === 'string' ? r.query.q : undefined,
+    type: typeof r.query.type === 'string' && r.query.type ? r.query.type : undefined,
+    family: typeof r.query.family === 'string' && r.query.family ? r.query.family : undefined,
+    verb: typeof r.query.verb === 'string' && r.query.verb ? r.query.verb : undefined,
+    limit: typeof r.query.limit === 'string' ? r.query.limit : undefined,
+    offset: typeof r.query.offset === 'string' ? r.query.offset : undefined
+  })
+  app.get('/api/archive', h('archive.list', (r) => ({
+    ...archiveQuery(r), projectId: typeof r.query.projectId === 'string' && r.query.projectId ? r.query.projectId : undefined
+  })))
+  app.get('/api/projects/:id/archive', h('archive.list', (r) => ({ ...archiveQuery(r), projectId: r.params.id })))
+  app.get('/api/archive/edges', h('archive.edges', (r) => ({
+    projectId: typeof r.query.projectId === 'string' && r.query.projectId ? r.query.projectId : undefined,
+    nodeId: typeof r.query.nodeId === 'string' && r.query.nodeId ? r.query.nodeId : undefined,
+    q: typeof r.query.q === 'string' ? r.query.q : undefined,
+    type: typeof r.query.type === 'string' && r.query.type ? r.query.type : undefined,
+    limit: typeof r.query.limit === 'string' ? r.query.limit : undefined
+  })))
+  app.get('/api/archive/projects', h('archive.projects', () => ({})))
+  app.post('/api/archive/projects/:id/restore', h('archive.restoreProject', (r) => ({ id: r.params.id })))
+  app.post('/api/archive/edges/:id/restore', h('archive.restoreEdge', (r) => ({ id: r.params.id })))
+  app.get('/api/archive/:id', h('archive.get', (r) => ({ id: r.params.id })))
+  app.post('/api/archive/:id/restore', h('archive.restore', (r) => ({ id: r.params.id })))
   app.get('/api/nodes/:id/content', h('nodes.getContent', (r) => ({ id: r.params.id })))
   app.put('/api/nodes/:id/content', h('nodes.setContent', (r) => ({ id: r.params.id, content: r.body?.content })))
   // since missing/non-numeric arrives as NaN, which the service rejects with a 400
@@ -447,7 +481,7 @@ export async function startServer(
   app.get('/api/nodes/:id/impact', h('impact.get', (r) => ({ id: r.params.id })))
   // fog: the same district question asked about UNCERTAINTY — every open
   // question/threat/flaw/bug/undesignated-feedback, classified, located, split
-  // into frontier vs blocked, with signals about the shape of the pile.
+  // into takeable vs blocked, with signals about the shape of the pile.
   // ?bodies=1 carries each item's markdown so one call replaces N+1 fetches.
   const fogFlags = (r: Request): { bodies: boolean; limit?: number } => ({
     bodies: r.query.bodies === '1' || r.query.bodies === 'true',
@@ -460,6 +494,15 @@ export async function startServer(
   })))
   // :id is a CONTAINER — an area or a warp (400 otherwise, with the pointer)
   app.get('/api/nodes/:id/fog', h('fog.node', (r) => ({ id: r.params.id, ...fogFlags(r) })))
+  // the one-off sweep of fog resolved under the old keep-the-record rule:
+  // {apply:false} (default) lists, {apply:true} clears exactly that list
+  app.post('/api/projects/:id/fog/clear-resolved', h('fog.clearResolved', (r) => ({
+    projectId: r.params.id, apply: r.body?.apply === true
+  })))
+  // the end of a Refine pass: responses → ONE action the fog items derive
+  app.post('/api/projects/:id/refine', h('refine.submit', (r) => ({
+    projectId: r.params.id, entries: r.body?.entries, skipped: r.body?.skipped, title: r.body?.title
+  })))
 
   // THE DOCUMENT EXPORT — a graph, a container, a selection or a query, flattened
   // into one markdown document. `?format=md` (the default) sends the text itself so
@@ -513,8 +556,9 @@ export async function startServer(
     }))
   app.post('/api/nodes/:id/annotations', h('nodes.annotate', (r) => ({ id: r.params.id, body: r.body?.body })))
   app.delete('/api/annotations/:id', h('annotations.delete', (r) => ({ id: r.params.id })))
-  // terminal verbs: complete removes an action (instructions), prune archives a record with the why
-  app.post('/api/nodes/:id/complete', h('nodes.complete', (r) => ({ id: r.params.id, note: r.body?.note })))
+  // terminal verbs: complete removes an action (and the fog it came from, minus
+  // keep) or resolves a fog node; prune archives a record with the why (fog: clears it)
+  app.post('/api/nodes/:id/complete', h('nodes.complete', (r) => ({ id: r.params.id, note: r.body?.note, keep: r.body?.keep })))
   app.post('/api/nodes/:id/prune', h('nodes.prune', (r) => ({ id: r.params.id, note: r.body?.note, supersededBy: r.body?.supersededBy })))
   // refer: hand a node to another project's graph (copy + provenance, lands unapproved)
   // the commons: every shared node across every project — a query, not a place

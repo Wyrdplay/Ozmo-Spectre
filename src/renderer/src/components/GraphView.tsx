@@ -1110,7 +1110,7 @@ export function GraphView(): React.JSX.Element {
         if (fr > 30 && t.k > 0.18) {
           const fx = gx + Math.cos(-Math.PI / 4) * fr
           const fy = gy + Math.sin(-Math.PI / 4) * fr
-          const text = 'the frontier'
+          const text = 'the edge of the spec'
           const tw = ctx.measureText(text).width
           ctx.globalAlpha = lensPhase * 0.85
           ctx.fillStyle = 'rgba(11,14,20,0.92)'
@@ -1509,6 +1509,7 @@ export function GraphView(): React.JSX.Element {
         // FOG HALO — the class mark, stacked OUTSIDE any flag ring (ringIdx is
         // shared with the loop above) so the two vocabularies never collide.
         // Told apart by FORM and WEIGHT, never by colour alone:
+        //   unshaped    faint sparse wisps             an idea not yet shaped
         //   unknown     thin dotted ring, mostly gaps  nobody knows the answer
         //   undecided   two bold arcs, two gaps        a split: nobody has chosen
         //   unabsorbed  one heavy continuous ring      closed: known, just not written down
@@ -1529,8 +1530,10 @@ export function GraphView(): React.JSX.Element {
             ctx.shadowColor = cm.color
             ctx.shadowBlur = 7 * Math.min(t.k, 1.4)
           }
-          if (cm.form === 'dotted') {
-            ctx.setLineDash([1.4 * kk, 3.2 * kk])
+          if (cm.form === 'dotted' || cm.form === 'wisp') {
+            // wisp: sparser and fainter than dotted — less ink than "unknown",
+            // because an unshaped idea is further out than a sharp question
+            ctx.setLineDash(cm.form === 'wisp' ? [0.9 * kk, 5.5 * kk] : [1.4 * kk, 3.2 * kk])
             ctx.lineCap = 'round'
             ctx.beginPath()
             ctx.arc(cx, cy, hr, 0, Math.PI * 2)
@@ -2750,8 +2753,8 @@ export function GraphView(): React.JSX.Element {
           title={confirmDel.kind === 'node' ? `Delete "${confirmDel.title}"?` : 'Delete this connection?'}
           body={
             confirmDel.kind === 'node'
-              ? 'Its links and annotations go with it. The markdown file is moved to the vault trash, not destroyed.'
-              : 'The connection, all its relationships and its annotations will be removed.'
+              ? 'It moves to the Archive with its links, notes and history — searchable and restorable.'
+              : 'It moves to the Archive with its relationships and notes — restorable while both ends are live.'
           }
           onConfirm={async () => {
             try {
@@ -2768,7 +2771,7 @@ export function GraphView(): React.JSX.Element {
       {confirmDelMany && (
         <Confirm
           title={`Delete ${confirmDelMany.length} nodes?`}
-          body="Their links and annotations go with them. Each markdown file is moved to the vault trash, not destroyed."
+          body="They move to the Archive with their links, notes and history — searchable and restorable."
           onConfirm={async () => {
             let failed = 0
             for (const id of confirmDelMany) {

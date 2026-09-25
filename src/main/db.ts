@@ -77,8 +77,9 @@ function cleanupOrphans(): void {
     ['nodes', 'FROM nodes WHERE project_id NOT IN (SELECT id FROM projects)'],
     ['edges', 'FROM edges WHERE project_id NOT IN (SELECT id FROM projects) OR source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)'],
     ['node_tags', 'FROM node_tags WHERE node_id NOT IN (SELECT id FROM nodes)'],
-    ['annotations', "FROM annotations WHERE (parent_kind = 'node' AND parent_id NOT IN (SELECT id FROM nodes)) OR (parent_kind = 'edge' AND parent_id NOT IN (SELECT id FROM edges))"],
-    ['node_revisions', 'FROM node_revisions WHERE node_id NOT IN (SELECT id FROM nodes)']
+    // an ARCHIVED node's (and link's) history is not an orphan — it is the archive
+    ['annotations', "FROM annotations WHERE (parent_kind = 'node' AND parent_id NOT IN (SELECT id FROM nodes) AND parent_id NOT IN (SELECT id FROM archived_nodes)) OR (parent_kind = 'edge' AND parent_id NOT IN (SELECT id FROM edges) AND parent_id NOT IN (SELECT id FROM archived_edges))"],
+    ['node_revisions', 'FROM node_revisions WHERE node_id NOT IN (SELECT id FROM nodes) AND node_id NOT IN (SELECT id FROM archived_nodes)']
   ]
   const removed: Record<string, number> = {}
   driver.exec('PRAGMA foreign_keys = OFF') // no cascades mid-sweep — counts stay exact
@@ -221,6 +222,59 @@ function migrate(): void {
       client       TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
+
+    -- THE ARCHIVE. Nothing on the board is hard-deleted: a node that leaves the
+    -- graph (resolved fog, a completed action, an explicit delete or archive)
+    -- MOVES here, whole — its row verbatim (\`row\`, JSON, so restore is exact),
+    -- a body snapshot (\`content\`, so the archive is searchable without the
+    -- vault), its tags and skill installs. Annotations and revisions stay in
+    -- their own tables, keyed by the same id: they need no copy.
+    --
+    -- Separate tables rather than an \`archived\` flag on \`nodes\`, deliberately:
+    -- every live query in the app reads \`nodes\`/\`edges\` and none of them has to
+    -- learn to skip archived rows — an archived node cannot leak into the graph,
+    -- the backlog, the fog or the ship gate because it is simply not there.
+    CREATE TABLE IF NOT EXISTS archived_nodes (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL,
+      type        TEXT NOT NULL,
+      title       TEXT NOT NULL,
+      tags        TEXT NOT NULL DEFAULT '[]',
+      content     TEXT NOT NULL DEFAULT '',
+      row         TEXT NOT NULL,
+      installs    TEXT NOT NULL DEFAULT '[]',
+      file_path   TEXT NOT NULL DEFAULT '',
+      verb        TEXT NOT NULL,
+      note        TEXT NOT NULL DEFAULT '',
+      detail      TEXT,
+      archived_at INTEGER NOT NULL,
+      archived_by TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_archived_nodes_project ON archived_nodes(project_id, archived_at);
+    -- Links go with their node, and are kept as LINKS: both endpoints, the
+    -- label, every typed relationship, and the titles/types of both ends at the
+    -- moment of archiving (the far end may be archived, or renamed, later).
+    -- \`archived_with\` names the node whose archiving took the link along.
+    CREATE TABLE IF NOT EXISTS archived_edges (
+      id            TEXT PRIMARY KEY,
+      project_id    TEXT NOT NULL,
+      source_id     TEXT NOT NULL,
+      target_id     TEXT NOT NULL,
+      source_title  TEXT NOT NULL DEFAULT '',
+      target_title  TEXT NOT NULL DEFAULT '',
+      source_type   TEXT NOT NULL DEFAULT '',
+      target_type   TEXT NOT NULL DEFAULT '',
+      label         TEXT NOT NULL DEFAULT '',
+      relationships TEXT NOT NULL DEFAULT '[]',
+      created_at    INTEGER NOT NULL,
+      created_by    TEXT NOT NULL DEFAULT '',
+      archived_with TEXT NOT NULL,
+      archived_at   INTEGER NOT NULL,
+      archived_by   TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_archived_edges_project ON archived_edges(project_id, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_archived_edges_source ON archived_edges(source_id);
+    CREATE INDEX IF NOT EXISTS idx_archived_edges_target ON archived_edges(target_id);
   `)
   // ROLE, added after accounts shipped without one. Guarded, and BACKFILLED by
   // what each row could already do: an approved non-owner had full write, so
@@ -228,6 +282,11 @@ function migrate(): void {
   // access people already had, which is a migration that looks like a bug to
   // everyone it happens to. New approvals get `viewer` — that is a decision
   // about the future, not a licence to rewrite the past.
+  // ARCHIVED PROJECTS — deleting a project archives it (nothing on the board is
+  // hard-deleted); purge is the separate, host-only removal. Guarded adds.
+  const projectCols = all<{ name: string }>('PRAGMA table_info(projects)').map((c) => c.name)
+  if (!projectCols.includes('archived_at')) driver.exec('ALTER TABLE projects ADD COLUMN archived_at INTEGER')
+  if (!projectCols.includes('archived_by')) driver.exec("ALTER TABLE projects ADD COLUMN archived_by TEXT NOT NULL DEFAULT ''")
   const accountCols = all<{ name: string }>('PRAGMA table_info(accounts)').map((c) => c.name)
   if (accountCols.length > 0 && !accountCols.includes('role')) {
     driver.exec("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'")

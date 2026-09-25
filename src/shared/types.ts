@@ -62,6 +62,8 @@ export interface SpecNode {
   /** skills only: the remaining SKILL.md frontmatter (allowed-tools, model,
    *  disable-model-invocation, argument-hint, arguments) as a JSON object. */
   skillOptions?: Record<string, unknown> | null
+  /** the node's family (fog | frontier | spec | policy) — derived from type, never stored */
+  family?: NodeFamily
   /** effective progress (manual, rolled up, or Done-flag-implied) — computed, never stored */
   progressComputed?: number
   /** names of the flag rules (settings) this node currently matches, in rule order — computed, never stored */
@@ -123,6 +125,67 @@ export interface NodeDetail extends SpecNode {
   content: string
   annotations: Annotation[]
   edges: EdgeWithTitles[]
+  /** links that went to the archive with a neighbour — preserved, never live */
+  archivedEdges?: ArchivedEdge[]
+}
+
+// ---------------------------------------------------------------------------
+// The archive — where everything that leaves the graph goes. Nothing is
+// hard-deleted: resolved fog, completed actions, deleted and archived nodes all
+// land here whole, and can be restored.
+
+/** One archived node, as the archive lists it. */
+export interface ArchivedNode {
+  id: string
+  projectId: string
+  type: NodeType
+  family: NodeFamily
+  title: string
+  tags: string[]
+  /** how it left: archived | deleted | completed | answered | pruned | waived | actioned | swept */
+  verb: string
+  note: string
+  detail: Record<string, unknown> | null
+  archivedAt: number
+  archivedBy: string
+  createdAt: number
+  createdBy: string
+  /** where the file lives now: the project's `.archive/` folder */
+  filePath: string
+  /** the body snapshot — present on the detail read */
+  content?: string
+}
+
+/** A link preserved in the archive: never drawn, never counted, still readable. */
+export interface ArchivedEdge {
+  id: string
+  projectId: string
+  sourceId: string
+  targetId: string
+  /** titles and types of both ends as they were when the link was archived */
+  sourceTitle: string
+  targetTitle: string
+  sourceType: NodeType
+  targetType: NodeType
+  /** where each end is NOW — a live node, an archived one, or gone with its project */
+  sourceState: 'live' | 'archived' | 'gone'
+  targetState: 'live' | 'archived' | 'gone'
+  label: string
+  relationships: EdgeRelationship[]
+  createdAt: number
+  createdBy: string
+  /** the node whose archiving took this link along */
+  archivedWith: string
+  archivedAt: number
+  archivedBy: string
+}
+
+export interface ArchivedNodeDetail extends ArchivedNode {
+  content: string
+  annotations: Annotation[]
+  edges: ArchivedEdge[]
+  /** how many content revisions the history keeps */
+  revisions: number
 }
 
 export interface EdgeWithTitles extends SpecEdge {
@@ -497,10 +560,43 @@ export interface SkillsPayload {
  *  undecided   the options are known, nobody has chosen → a human decides
  *  unabsorbed  we know what is wrong; the spec does not say so yet → do the work
  */
-export type FogClass = 'unknown' | 'undecided' | 'unabsorbed'
+export type FogClass = 'unshaped' | 'unknown' | 'undecided' | 'unabsorbed'
 
-/** The node types that can be fog. A lens, never a new type. */
-export const FOG_TYPES: NodeType[] = ['question', 'threat', 'flaw', 'bug', 'feedback']
+// ---------------------------------------------------------------------------
+// Families — every node type belongs to exactly ONE, derived from the type and
+// never stored or tagged, so it cannot drift:
+//
+//   fog       not yet shaped or not yet known — transient: once acted on, it
+//             is CLEARED from the graph (the activity log keeps the history)
+//   frontier  grounded decisions being acted on now (actions, warps)
+//   spec      what the product is — the living truth, kept
+//   policy    what governs the work — beliefs, taste, method, kept
+
+export type NodeFamily = 'fog' | 'frontier' | 'spec' | 'policy'
+
+export const NODE_FAMILIES: NodeFamily[] = ['fog', 'frontier', 'spec', 'policy']
+
+export const NODE_FAMILY: Record<NodeType, NodeFamily> = {
+  question: 'fog', threat: 'fog', flaw: 'fog', bug: 'fog', feedback: 'fog', idea: 'fog',
+  action: 'frontier', warp: 'frontier',
+  feature: 'spec', instance: 'spec', component: 'spec', area: 'spec',
+  pillar: 'policy', principle: 'policy', skill: 'policy'
+}
+
+export const FAMILY_META: Record<NodeFamily, { label: string; hint: string }> = {
+  fog: { label: 'Fog', hint: 'Not yet shaped or not yet known — refine it, act on it, or throw it away.' },
+  frontier: { label: 'Frontier', hint: 'Grounded decisions being acted on now.' },
+  spec: { label: 'Spec', hint: 'What the product is — the living truth.' },
+  policy: { label: 'Policy', hint: 'What governs the work — beliefs, taste and method.' }
+}
+
+export const familyOf = (type: NodeType): NodeFamily => NODE_FAMILY[type]
+
+export const isNodeFamily = (v: unknown): v is NodeFamily =>
+  typeof v === 'string' && (NODE_FAMILIES as string[]).includes(v)
+
+/** The node types that can be fog — the fog FAMILY. A lens, never a new type. */
+export const FOG_TYPES: NodeType[] = (Object.keys(NODE_FAMILY) as NodeType[]).filter((t) => NODE_FAMILY[t] === 'fog')
 
 /** One unabsorbed item, with everything needed to triage it without a second call. */
 export interface FogItem {
@@ -518,8 +614,11 @@ export interface FogItem {
   areaTitle: string | null
   warpId: string | null
   warpTitle: string | null
-  /** unresolved nodes holding this one down — empty means it is on the frontier */
+  /** unresolved nodes holding this one down — empty means it is takeable */
   blockedBy: { id: string; title: string; type: NodeType }[]
+  /** a member of a warp currently in its Review stage — the review room owns it,
+   *  so Refine leaves it alone and completion never clears it */
+  inReview: boolean
   /** unresolved nodes this one holds down */
   blocks: { id: string; title: string; type: NodeType }[]
   tags: string[]
@@ -562,6 +661,8 @@ export interface FogReport {
     total: number
     byClass: Record<FogClass, number>
     byType: Record<string, number>
+    takeable: number
+    /** @deprecated alias of `takeable` — "frontier" now names the node family */
     frontier: number
     blocked: number
     unlocated: number
@@ -569,6 +670,8 @@ export interface FogReport {
   }
   areas: FogArea[]
   /** takeable right now — nothing unresolved is holding these down */
+  takeable: FogItem[]
+  /** @deprecated alias of `takeable`, kept one release for existing agents */
   frontier: FogItem[]
   blocked: FogItem[]
   signals: FogSignal[]

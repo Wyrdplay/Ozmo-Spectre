@@ -1,0 +1,86 @@
+/* ── Archive — everything that left the graph ──────────────────────────────── */
+
+.archive { flex: 1; min-height: 0; display: flex; }
+
+.archive-modes { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.archive-modes button {
+  background: none; border: none; color: var(--text-dim); font-size: 12px; padding: 4px 12px; cursor: pointer;
+}
+.archive-modes button + button { border-left: 1px solid var(--border); }
+.archive-modes button.on { background: var(--bg-active); color: var(--text); }
+
+.archive-list {
+  width: 400px; min-width: 320px; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0; background: var(--bg-raised);
+}
+.archive-search { padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
+.archive-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.archive-check { display: flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 11.5px; cursor: pointer; }
+.archive-families { display: flex; gap: 3px; flex-wrap: wrap; }
+.archive-families button {
+  background: none; border: 1px solid var(--border); border-radius: 999px; color: var(--text-dim);
+  font-size: 11px; padding: 1px 8px; cursor: pointer;
+}
+.archive-families button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.archive-count { color: var(--text-faint); font-size: 11px; }
+
+.archive-rows { flex: 1; overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.archive-row {
+  text-align: left; background: none; border: 1px solid transparent; border-radius: var(--radius-sm);
+  padding: 7px 9px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 3px;
+}
+.archive-row:hover { background: var(--bg-hover); }
+.archive-row.on { background: var(--bg-active); border-color: var(--border-strong); }
+.archive-row .t { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 550; }
+.archive-row .t span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-row .m { display: flex; gap: 5px; color: var(--text-faint); font-size: 11px; align-items: center; flex-wrap: wrap; }
+.archive-row .s { color: var(--text-dim); font-size: 11.5px; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+.verb {
+  font-size: 10.5px; border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 7px;
+  color: var(--text-dim); text-transform: lowercase;
+}
+.verb.v-answered, .verb.v-completed, .verb.v-actioned { color: var(--ok); border-color: rgba(74, 222, 128, 0.35); }
+.verb.v-deleted { color: var(--danger); border-color: rgba(248, 113, 113, 0.35); }
+.verb.v-pruned, .verb.v-waived, .verb.v-swept { color: var(--text-faint); }
+
+/* archived links: kept, readable, visibly NOT live — dashed and dimmed */
+.archive-link {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px;
+  padding: 6px 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); color: var(--text-dim);
+}
+.archive-link.in-card { margin-bottom: 4px; }
+.archive-link .rel { color: var(--text-faint); font-size: 11.5px; }
+.archive-link .when { margin-left: auto; color: var(--text-faint); font-size: 11px; }
+.archive-link .end {
+  display: inline-flex; align-items: center; gap: 5px; background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 12px; padding: 0;
+}
+.archive-link .end:hover { color: var(--text); text-decoration: underline; }
+.archive-link .end.s-live { color: var(--text); }
+.archive-link .end.s-gone { cursor: default; text-decoration: line-through; }
+.archive-link .end .state { font-size: 10px; color: var(--text-faint); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; margin-left: 4px; }
+
+.archive-detail { flex: 1; min-width: 0; overflow: auto; padding: 22px 26px; }
+.archive-card { max-width: 780px; display: flex; flex-direction: column; gap: 10px; }
+.archive-card-head { display: flex; align-items: center; gap: 8px; }
+.archive-card-head .spacer { flex: 1; }
+.archive-card h2 { font-size: 19px; line-height: 1.3; }
+.archive-card h3 { font-size: 12.5px; color: var(--text-dim); margin-top: 10px; display: flex; gap: 6px; align-items: baseline; }
+.archive-card h3 span { color: var(--text-faint); font-weight: 400; }
+.archive-meta { display: flex; gap: 12px; flex-wrap: wrap; color: var(--text-faint); font-size: 11.5px; align-items: center; }
+.archive-meta .mono { font-family: var(--mono); }
+.archive-note { border-left: 2px solid var(--accent); padding: 4px 10px; color: var(--text); font-size: 12.5px; background: var(--accent-soft); }
+.archive-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.archive-body { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; background: var(--bg-raised); }
+.archive-annotation { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+.archive-annotation .h { display: flex; gap: 6px; align-items: center; color: var(--text-faint); font-size: 11px; margin-bottom: 4px; }
+.archive-faint { color: var(--text-faint); font-size: 11.5px; }
+
+/* the Inspector's archived-links section borrows the same visual contract */
+.archived-links { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
+.archived-links summary { color: var(--text-faint); font-size: 11.5px; cursor: pointer; margin-bottom: 4px; }
+
+.archive-row.static { cursor: default; }
+.archive-row.static:hover { background: none; }
+.archive-link-restore { margin-left: 4px; }

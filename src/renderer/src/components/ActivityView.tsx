@@ -15,7 +15,13 @@ export function ActivityView(): React.JSX.Element {
     refreshActivity()
   }, [refreshActivity])
 
+  const openArchive = useStore((s) => s.openArchive)
   const jump = (subjectKind: string, subjectId: string): void => {
+    // a node that has left the graph lives in the Archive — open it there
+    if (subjectKind === 'node' && !useStore.getState().graph.nodes.some((n) => n.id === subjectId)) {
+      openArchive(subjectId)
+      return
+    }
     if (subjectKind === 'node') {
       selectNode(subjectId)
       setView('graph')

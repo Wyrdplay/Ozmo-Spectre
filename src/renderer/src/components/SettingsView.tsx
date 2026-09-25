@@ -190,13 +190,14 @@ export function SettingsView(): React.JSX.Element {
           {project && (
             <FrozenWhenLocked>
               <div className="settings-card" style={{ borderColor: '#3d2430' }}>
-                <h2 style={{ color: 'var(--danger)' }}>Danger zone</h2>
+                <h2 style={{ color: 'var(--danger)' }}>Archive this project</h2>
                 <div className="hint">
-                  Delete <b>{project.name}</b> ({project.nodeCount ?? 0} nodes). The database rows are removed;
-                  the project folder is moved to the vault trash, not destroyed.
+                  Archive <b>{project.name}</b> ({project.nodeCount ?? 0} nodes). It leaves the project list and the
+                  commons; every node, link, file and note stays exactly as it is, and the Archive can restore it.
+                  Nothing is deleted.
                 </div>
                 <div>
-                  <button className="btn danger" onClick={() => setConfirmDelProject(true)}>Delete project…</button>
+                  <button className="btn danger" onClick={() => setConfirmDelProject(true)}>Archive project…</button>
                 </div>
               </div>
             </FrozenWhenLocked>
@@ -206,8 +207,9 @@ export function SettingsView(): React.JSX.Element {
 
       {confirmDelProject && project && (
         <Confirm
-          title={`Delete project "${project.name}"?`}
-          body="All nodes, links, reviews and activity are removed from the database. Markdown files move to .ozmo/trash inside the vault."
+          title={`Archive project "${project.name}"?`}
+          confirmLabel="Archive"
+          body="It leaves the project list; nothing inside it changes. Restore it any time from the Archive → Projects."
           onConfirm={async () => {
             try {
               await rpc('projects.delete', { id: project.id })

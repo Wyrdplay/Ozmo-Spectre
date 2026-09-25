@@ -584,7 +584,8 @@ const dbtPatch = await req('PATCH', `/api/nodes/${flgF.json.id}`, { tags: ['debt
   ok('debt tag → Debt flag', dbtPatch.status === 200 && n?.flags?.includes('Debt'), JSON.stringify(n?.flags))
 }
 
-// prune: the negative-resolution verb for records — kept, dimmed, with the why
+// prune: FOG is not kept once resolved — a pruned fog node is CLEARED (vault
+// trash, the why in the activity log); a spec node is kept, dimmed, with the why
 const prF = await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'Prune Blocked Target' })
 const prB = await req('POST', `/api/projects/${pid}/nodes`, { type: 'bug', title: 'Prunable Bug', linkTo: [{ nodeId: prF.json.id, type: 'blocks', outgoing: true }] })
 const prSup = await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'Sufficient Solution' })
@@ -598,31 +599,31 @@ ok('prune warp 400 (stage not_needed instead)', wrpPrune.status === 400)
   ok('blocks fires before prune', g.json.nodes.find((x) => x.id === prF.json.id)?.flags?.includes('Blocked'))
 }
 const pr1 = await req('POST', `/api/nodes/${prB.json.id}/prune`, { note: 'not reproducible on 2b', supersededBy: prSup.json.id })
-ok('prune 200 + pruned tag', pr1.status === 200 && pr1.json.tags?.includes('pruned'), JSON.stringify(pr1.json))
+ok('prune fog 200 → cleared', pr1.status === 200 && pr1.json.cleared === true, JSON.stringify(pr1.json))
 {
-  const d = await req('GET', `/api/nodes/${prB.json.id}`)
-  ok('prune note kept as attributed annotation', d.json.annotations?.some((a) => a.body === 'not reproducible on 2b' && a.author === 'smoke-agent'),
-    JSON.stringify(d.json.annotations))
-  const supEdge = d.json.edges?.find((e) => e.targetId === prSup.json.id || e.sourceId === prSup.json.id)
-  ok('supersededBy bare connection labelled', supEdge && supEdge.label === 'superseded by' && rels(supEdge).length === 0,
-    JSON.stringify(d.json.edges))
+  const gone = await req('GET', `/api/nodes/${prB.json.id}`)
+  ok('pruned fog node is gone (404)', gone.status === 404)
+  const acts = await req('GET', `/api/projects/${pid}/activity?limit=30`)
+  const fc = acts.json.find((a) => a.action === 'fog.cleared' && a.subjectId === prB.json.id)
+  ok('fog.cleared activity keeps verb, note and supersededBy', fc && fc.detail?.verb === 'pruned' &&
+    fc.detail?.note === 'not reproducible on 2b' && fc.detail?.supersededBy === prSup.json.id, JSON.stringify(fc))
   const g = await req('GET', `/api/projects/${pid}/graph`)
-  const fNodeG = (idv) => g.json.nodes.find((x) => x.id === idv)
-  ok('pruned node gains Pruned flag (dim)', fNodeG(prB.json.id)?.flags?.includes('Pruned'), JSON.stringify(fNodeG(prB.json.id)?.flags))
-  ok('suppression: pruned blocker stops ringing its target', !fNodeG(prF.json.id)?.flags?.includes('Blocked'),
-    JSON.stringify(fNodeG(prF.json.id)?.flags))
+  ok('cleared blocker stops ringing its target', !g.json.nodes.find((x) => x.id === prF.json.id)?.flags?.includes('Blocked'))
   bl = await req('GET', `/api/projects/${pid}/backlog`)
-  ok('pruned node leaves backlog', !bl.json.some((n) => n.id === prB.json.id))
   ok('unblocked-by-prune target stays in backlog', bl.json.some((n) => n.id === prF.json.id))
 }
-const pr2 = await req('POST', `/api/nodes/${prB.json.id}/prune`, { note: 'second look — still dead' })
+// a SPEC node pruned is still kept — records stay records
+const prSpec = await req('POST', `/api/nodes/${prSup.json.id}/prune`, { note: 'superseded by the pipeline model' })
 {
-  const d = await req('GET', `/api/nodes/${prB.json.id}`)
-  ok('re-prune 200 appends the note', pr2.status === 200 && d.json.annotations?.length === 2, JSON.stringify(d.json.annotations))
+  const d = await req('GET', `/api/nodes/${prSup.json.id}`)
+  ok('prune spec node: kept + pruned tag + note annotation', prSpec.status === 200 && prSpec.json.tags?.includes('pruned') &&
+    d.status === 200 && d.json.annotations?.some((a) => a.body === 'superseded by the pipeline model'), JSON.stringify(prSpec.json))
+  const g = await req('GET', `/api/projects/${pid}/graph`)
+  ok('pruned spec node gains Pruned flag (dim)', g.json.nodes.find((x) => x.id === prSup.json.id)?.flags?.includes('Pruned'))
 }
 
-// answer: the positive-resolution verb for questions — the answer lands in the
-// file body as an ## Answer section, the record stays (answered tag → Done rule)
+// answer: an answered question is a KNOWN — it leaves the fog (removed), the
+// answer written into the trashed file and kept verbatim in the activity log
 const ansF = await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title: 'Answer Blocked Target' })
 const ansQ = await req('POST', `/api/projects/${pid}/nodes`, {
   type: 'question', title: 'Which cache strategy?', content: '## Context\n\nWrite-through vs write-back.\n',
@@ -641,72 +642,326 @@ ok('missing answer 400', ansMissing.status === 400)
   ok('blocking question rings target before answer', g.json.nodes.find((x) => x.id === ansF.json.id)?.flags?.includes('Blocked'))
 }
 const ans1 = await req('POST', `/api/nodes/${ansQ.json.id}/answer`, { answer: 'Write-through — simpler invalidation.' })
-ok('answer 200: answered tag + Done flag + detail', ans1.status === 200 && ans1.json.tags?.includes('answered') &&
-  ans1.json.flags?.includes('Done'), JSON.stringify({ tags: ans1.json.tags, flags: ans1.json.flags }))
-ok('answer written as ## Answer section', typeof ans1.json.content === 'string' && ans1.json.content.includes('## Answer') &&
-  ans1.json.content.includes('Write-through — simpler invalidation.'), JSON.stringify(ans1.json.content))
-ok('answer keeps the original body', ans1.json.content.includes('Write-through vs write-back'))
-ok('answer attribution line', ans1.json.content.includes('answered by smoke-agent'))
+ok('answer 200 → cleared, answer echoed', ans1.status === 200 && ans1.json.cleared === true &&
+  ans1.json.answer === 'Write-through — simpler invalidation.', JSON.stringify(ans1.json))
 {
+  const gone = await req('GET', `/api/nodes/${ansQ.json.id}`)
+  ok('answered question is gone (404)', gone.status === 404)
   const g = await req('GET', `/api/projects/${pid}/graph`)
-  ok('suppression: answered blocker un-rings its target', !g.json.nodes.find((x) => x.id === ansF.json.id)?.flags?.includes('Blocked'),
+  ok('answered blocker un-rings its target', !g.json.nodes.find((x) => x.id === ansF.json.id)?.flags?.includes('Blocked'),
     JSON.stringify(g.json.nodes.find((x) => x.id === ansF.json.id)?.flags))
   bl = await req('GET', `/api/projects/${pid}/backlog`)
-  ok('answered question leaves backlog', !bl.json.some((n) => n.id === ansQ.json.id))
   ok('unblocked target stays in backlog', bl.json.some((n) => n.id === ansF.json.id))
-}
-const ans2 = await req('POST', `/api/nodes/${ansQ.json.id}/answer`, { answer: 'Refinement: write-back for the hot path only.' })
-ok('re-answer appends under the same heading', ans2.status === 200 &&
-  (ans2.json.content.match(/^## Answer/gm) ?? []).length === 1 &&
-  ans2.json.content.includes('Refinement: write-back') && ans2.json.content.includes('refined by smoke-agent'),
-  JSON.stringify(ans2.json.content))
-{
   const acts = await req('GET', `/api/projects/${pid}/activity?limit=30`)
-  const qa = acts.json.find((a) => a.action === 'question.answered' && a.subjectId === ansQ.json.id && a.detail?.refinement === false)
+  const qa = acts.json.find((a) => a.action === 'question.answered' && a.subjectId === ansQ.json.id)
   ok('question.answered activity: excerpt + full answer in detail', qa && qa.summary.includes('Write-through') &&
     qa.detail?.answer === 'Write-through — simpler invalidation.', JSON.stringify(qa))
-  ok('re-answer logged as refinement', acts.json.some((a) => a.action === 'question.answered' && a.detail?.refinement === true))
+  const fc = acts.json.find((a) => a.action === 'fog.cleared' && a.subjectId === ansQ.json.id)
+  ok('fog.cleared (answered) carries the answer', fc?.detail?.verb === 'answered' && fc?.detail?.answer === 'Write-through — simpler invalidation.',
+    JSON.stringify(fc))
 }
-// refinements land inside the Answer section even when it is no longer last
-await req('PUT', `/api/nodes/${ansQ.json.id}/content`, {
-  content: '## Answer\n\nfirst.\n\n— *answered by smoke-agent, 2026-01-01*\n\n## Appendix\n\nkeep me last.\n'
-})
-const ans3 = await req('POST', `/api/nodes/${ansQ.json.id}/answer`, { answer: 'mid-section refinement' })
-{
-  const b = String(ans3.json.content ?? '')
-  ok('refinement inserted before the next section', ans3.status === 200 && b.includes('mid-section refinement') &&
-    b.indexOf('mid-section refinement') < b.indexOf('## Appendix') && b.trim().endsWith('keep me last.'),
-    JSON.stringify(b))
-}
+const ansAgain = await req('POST', `/api/nodes/${ansQ.json.id}/answer`, { answer: 'again' })
+ok('answering a cleared question 404', ansAgain.status === 404)
 
-// graduate recipe (two calls, no dedicated endpoint): answered question →
-// durable node seeded from the answer (question —derives→ new) → prune supersededBy
+// graduate recipe (two calls, no dedicated endpoint): durable node seeded from
+// the answer (question —derives→ new), then prune supersededBy → the question clears
 const grQ = await req('POST', `/api/projects/${pid}/nodes`, { type: 'question', title: 'Tabs or spaces?' })
-const grA = await req('POST', `/api/nodes/${grQ.json.id}/answer`, { answer: 'Spaces. Two of them.' })
-ok('graduate fixtures', grQ.status === 200 && grA.status === 200)
+ok('graduate fixture', grQ.status === 200)
 const grP = await req('POST', `/api/projects/${pid}/nodes`, {
   type: 'principle', title: 'Tabs or spaces',
   content: 'Spaces. Two of them.\n\n— *graduated from the question "Tabs or spaces?"*\n',
   linkTo: [{ nodeId: grQ.json.id, type: 'derives', outgoing: false }]
 })
 ok('graduate node created linked', grP.status === 200, JSON.stringify(grP.json))
-const grPrune = await req('POST', `/api/nodes/${grQ.json.id}/prune`, { note: 'Graduated to "Tabs or spaces"', supersededBy: grP.json.id })
-ok('graduate prune 200 + pruned tag', grPrune.status === 200 && grPrune.json.tags?.includes('pruned'))
 {
   const qd = await req('GET', `/api/nodes/${grQ.json.id}`)
-  // ONE connection between question and graduate: derives relationship + the
-  // superseded-by label land on the same edge (no parallel relates row)
-  const conns = qd.json.edges?.filter((e) => e.targetId === grP.json.id || e.sourceId === grP.json.id) ?? []
-  ok('question↔graduate share ONE connection', conns.length === 1, JSON.stringify(qd.json.edges))
-  const dRel = relOf(conns[0], 'derives')
-  ok('question —derives→ graduate', dRel && dRel.sourceId === grQ.json.id && dRel.targetId === grP.json.id,
-    JSON.stringify(conns))
-  ok('superseded-by labels that same connection', conns[0]?.label === 'superseded by', JSON.stringify(conns[0]?.label))
+  const dRel = qd.json.edges?.map((e) => relOf(e, 'derives')).find(Boolean)
+  ok('question —derives→ graduate', dRel && dRel.sourceId === grQ.json.id && dRel.targetId === grP.json.id, JSON.stringify(qd.json.edges))
+}
+const grPrune = await req('POST', `/api/nodes/${grQ.json.id}/prune`, { note: 'Graduated to "Tabs or spaces"', supersededBy: grP.json.id })
+ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.json.cleared === true)
+{
   const pd = await req('GET', `/api/nodes/${grP.json.id}`)
-  ok('graduate carries derives + provenance footer', pd.json.edges?.some((e) => relOf(e, 'derives')?.sourceId === grQ.json.id) &&
-    pd.json.content.includes('graduated from the question'))
-  const g = await req('GET', `/api/projects/${pid}/graph`)
-  ok('graduated question dims (Pruned)', g.json.nodes.find((x) => x.id === grQ.json.id)?.flags?.includes('Pruned'))
+  ok('graduate survives with its provenance footer', pd.status === 200 && pd.json.content.includes('graduated from the question'))
+  const acts = await req('GET', `/api/projects/${pid}/activity?limit=30`)
+  ok('graduation trail: fog.cleared points forward at the graduate', acts.json.some((a) =>
+    a.action === 'fog.cleared' && a.subjectId === grQ.json.id && a.detail?.supersededBy === grP.json.id))
+}
+
+// FAMILIES — every node carries one, derived from its type; lists filter by it
+{
+  const fam = await req('POST', `/api/projects`, { name: `families-${Date.now()}` })
+  const fp = fam.json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${fp}/nodes`, { type, title, ...extra })).json
+  const fIdea = await mk('idea', 'Unshaped spark')
+  const fFeat = await mk('feature', 'A capability')
+  const fPill = await mk('pillar', 'A belief')
+  const fAct = await mk('action', 'Do the thing')
+  const fWarpOpen = await mk('warp', 'Open increment', { stage: 'implement' })
+  const fWarpDone = await mk('warp', 'Shipped increment', { stage: 'done' })
+  ok('family is on every node payload', fIdea.family === 'fog' && fFeat.family === 'spec' && fPill.family === 'policy' &&
+    fAct.family === 'frontier', JSON.stringify([fIdea.family, fFeat.family, fPill.family, fAct.family]))
+  const ids = async (family) => (await req('GET', `/api/projects/${fp}/nodes?family=${family}`)).json.map((n) => n.id).sort()
+  ok('?family=fog lists ideas (and every fog type)', (await ids('fog')).join() === [fIdea.id].sort().join())
+  ok('?family=spec', (await ids('spec')).join() === [fFeat.id].sort().join())
+  ok('?family=policy', (await ids('policy')).join() === [fPill.id].sort().join())
+  ok('?family=frontier = open work only (a done warp is history)',
+    (await ids('frontier')).join() === [fAct.id, fWarpOpen.id].sort().join(), JSON.stringify(await ids('frontier')))
+  const bad = await req('GET', `/api/projects/${fp}/nodes?family=cloud`)
+  ok('?family=<unknown> 400', bad.status === 400)
+  const fog = (await req('GET', `/api/projects/${fp}/fog`)).json
+  const it = [...fog.takeable, ...fog.blocked].find((i) => i.id === fIdea.id)
+  ok('an idea is fog, class unshaped', it?.fogClass === 'unshaped', JSON.stringify(it))
+  ok('fog report: takeable + deprecated frontier alias agree', fog.counts.takeable === fog.counts.frontier &&
+    fog.takeable.length === fog.frontier.length && typeof fog.counts.byClass.unshaped === 'number')
+  ok('fog items carry inReview', it?.inReview === false)
+  await req('DELETE', `/api/projects/${fp}?purge=1`)
+}
+
+// THE CASCADE — completing an action clears the fog that derives it, except
+// what is kept, what an open review holds, and what still feeds another action
+{
+  const cp = (await req('POST', `/api/projects`, { name: `cascade-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${cp}/nodes`, { type, title, ...extra })).json
+  const target = await mk('feature', 'Target spec')
+  const cBug = await mk('bug', 'Bug to clear')
+  const cQ = await mk('question', 'Question to keep')
+  const cIdea = await mk('idea', 'Idea feeding two actions')
+  const act = await mk('action', 'Apply the directions', {
+    linkTo: [{ nodeId: cBug.id, type: 'derives', outgoing: false }, { nodeId: cQ.id, type: 'derives', outgoing: false },
+      { nodeId: cIdea.id, type: 'derives', outgoing: false }, { nodeId: target.id }]
+  })
+  const act2 = await mk('action', 'A second action', { linkTo: [{ nodeId: cIdea.id, type: 'derives', outgoing: false }] })
+  const strayKeep = await req('POST', `/api/nodes/${act.id}/complete`, { keep: [target.id] })
+  ok('keep naming a non-source 400', strayKeep.status === 400, JSON.stringify(strayKeep.json))
+  const badKeep = await req('POST', `/api/nodes/${act.id}/complete`, { keep: 'nope' })
+  ok('keep must be an array 400', badKeep.status === 400)
+  const c1 = await req('POST', `/api/nodes/${act.id}/complete`, { note: 'applied', keep: [cQ.id] })
+  ok('complete 200 reports cleared + kept', c1.status === 200 && c1.json.cleared.join() === cBug.id &&
+    c1.json.kept.sort().join() === [cQ.id, cIdea.id].sort().join(), JSON.stringify(c1.json))
+  ok('cleared fog is gone', (await req('GET', `/api/nodes/${cBug.id}`)).status === 404)
+  ok('kept fog stays', (await req('GET', `/api/nodes/${cQ.id}`)).status === 200)
+  ok('fog still feeding another action stays', (await req('GET', `/api/nodes/${cIdea.id}`)).status === 200)
+  ok('the spec neighbour is untouched', (await req('GET', `/api/nodes/${target.id}`)).status === 200)
+  const c2 = await req('POST', `/api/nodes/${act2.id}/complete`, {})
+  ok('the LAST action clears it', c2.status === 200 && c2.json.cleared.includes(cIdea.id) &&
+    (await req('GET', `/api/nodes/${cIdea.id}`)).status === 404, JSON.stringify(c2.json))
+  const acts = await req('GET', `/api/projects/${cp}/activity?limit=40`)
+  const ac = acts.json.find((a) => a.action === 'action.completed' && a.subjectId === act.id)
+  ok('action.completed activity lists what it cleared', ac?.detail?.cleared?.some((c) => c.id === cBug.id && c.title === 'Bug to clear'),
+    JSON.stringify(ac?.detail))
+  // complete on fog directly: the note is the resolution
+  const fz = await req('POST', `/api/nodes/${cQ.id}/complete`, { note: 'settled: per-slot saves' })
+  ok('complete on a fog node clears it', fz.status === 200 && fz.json.cleared.join() === cQ.id &&
+    (await req('GET', `/api/nodes/${cQ.id}`)).status === 404)
+  const spec = await req('POST', `/api/nodes/${target.id}/complete`, {})
+  ok('complete on spec 400 (edited, not completed)', spec.status === 400)
+  // waive outside a review clears too
+  const wb = await mk('flaw', 'Flaw nobody will fix')
+  const wv = await req('POST', `/api/nodes/${wb.id}/waive`, { note: 'design moved on' })
+  ok('waive fog outside review clears it', wv.status === 200 && wv.json.cleared === true &&
+    (await req('GET', `/api/nodes/${wb.id}`)).status === 404)
+  // review-held feedback: the room owns it — never cleared by the cascade or a direct verb
+  const rw = await mk('warp', 'Reviewed increment', { stage: 'implement' })
+  const rf = await mk('feature', 'Reviewed feature', { linkTo: [{ nodeId: rw.id }] })
+  await req('PATCH', `/api/nodes/${rw.id}`, { stage: 'review' })
+  const fb = await mk('feedback', 'Looks off', { linkTo: [{ nodeId: rw.id, type: 'member', outgoing: true }] })
+  const rAct = await mk('action', 'Fix what the feedback saw', { linkTo: [{ nodeId: fb.id, type: 'derives', outgoing: false }] })
+  const heldDirect = await req('POST', `/api/nodes/${fb.id}/complete`, {})
+  ok('complete review-held feedback 409', heldDirect.status === 409, JSON.stringify(heldDirect.json))
+  const rc = await req('POST', `/api/nodes/${rAct.id}/complete`, {})
+  ok('cascade leaves review-held feedback alone', rc.status === 200 && rc.json.kept.includes(fb.id) &&
+    (await req('GET', `/api/nodes/${fb.id}`)).status === 200, JSON.stringify(rc.json))
+  const wf = await req('POST', `/api/nodes/${fb.id}/waive`, { note: 'fine as is' })
+  ok('waive review-held feedback keeps the review vocabulary (tag, kept)', wf.status === 200 && !wf.json.cleared &&
+    wf.json.tags?.includes('pruned'), JSON.stringify(wf.json))
+  ok('reviewed feature untouched', (await req('GET', `/api/nodes/${rf.id}`)).status === 200)
+  await req('DELETE', `/api/projects/${cp}?purge=1`)
+}
+
+// THE ARCHIVE — nothing is hard-deleted: nodes leave the graph WHOLE, links
+// included, searchable and restorable
+{
+  const ap = (await req('POST', `/api/projects`, { name: `archive-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${ap}/nodes`, { type, title, ...extra })).json
+  const feat = await mk('feature', 'Checkout flow')
+  const bug = await mk('bug', 'Double charge on retry', {
+    content: 'The retry path re-submits the payment intent without an idempotency key.\n',
+    linkTo: [{ nodeId: feat.id, type: 'blocks', outgoing: true }]
+  })
+  await req('POST', `/api/nodes/${bug.id}/annotations`, { body: 'seen twice in staging' })
+  await req('PATCH', `/api/nodes/${bug.id}`, { tags: ['payments'] })
+  const done = await req('POST', `/api/nodes/${bug.id}/complete`, { note: 'idempotency key added' })
+  ok('archive: resolving fog archives it', done.status === 200 && done.json.cleared.includes(bug.id))
+  const gone = await req('GET', `/api/nodes/${bug.id}`)
+  ok('archive: the live read 404s and points at the archive', gone.status === 404 &&
+    gone.json.error?.archived === true && String(gone.json.error?.message).includes('/api/archive/'), JSON.stringify(gone.json))
+  const list = await req('GET', `/api/archive?projectId=${ap}`)
+  ok('archive: listed, newest first, with verb and who', list.status === 200 && list.json.total === 1 &&
+    list.json.items[0].id === bug.id && list.json.items[0].verb === 'completed' && list.json.items[0].archivedBy === 'smoke-agent' &&
+    list.json.items[0].family === 'fog', JSON.stringify(list.json))
+  const hit = await req('GET', `/api/archive?projectId=${ap}&q=IDEMPOTENCY`)
+  ok('archive: q searches the body snapshot, case-insensitively, with a snippet', hit.json.total === 1 &&
+    String(hit.json.items[0].snippet ?? '').toLowerCase().includes('idempotency'), JSON.stringify(hit.json))
+  ok('archive: q searches the note too', (await req('GET', `/api/archive?projectId=${ap}&q=key%20added`)).json.total === 1)
+  ok('archive: q searches tags', (await req('GET', `/api/archive?projectId=${ap}&q=payments`)).json.total === 1)
+  ok('archive: no match is an empty list, not an error', (await req('GET', `/api/archive?projectId=${ap}&q=zzzz`)).json.total === 0)
+  ok('archive: family filter', (await req('GET', `/api/archive?projectId=${ap}&family=spec`)).json.total === 0 &&
+    (await req('GET', `/api/archive?projectId=${ap}&family=fog`)).json.total === 1)
+  ok('archive: searching every project finds it too', (await req('GET', `/api/archive?q=Double%20charge`)).json.items.some((i) => i.id === bug.id))
+  const d = await req('GET', `/api/archive/${bug.id}`)
+  ok('archive: detail keeps text, tags, notes and history', d.status === 200 && d.json.content.includes('idempotency key') &&
+    d.json.tags.includes('payments') && d.json.annotations.some((a) => a.body === 'seen twice in staging') && d.json.revisions >= 1,
+    JSON.stringify(d.json).slice(0, 400))
+  const link = d.json.edges?.[0]
+  ok('archive: its link is kept as a link — ends, relationship, the live far end', d.json.edges.length === 1 &&
+    link.targetId === feat.id && link.targetState === 'live' && link.relationships.some((r) => r.type === 'blocks' && r.sourceId === bug.id) &&
+    link.targetTitle === 'Checkout flow', JSON.stringify(d.json.edges))
+  const fd = await req('GET', `/api/nodes/${feat.id}`)
+  ok('archive: the live neighbour lists it under archivedEdges, not edges', fd.json.edges.length === 0 &&
+    fd.json.archivedEdges?.length === 1 && fd.json.archivedEdges[0].sourceState === 'archived', JSON.stringify(fd.json.archivedEdges))
+  const g = await req('GET', `/api/projects/${ap}/graph`)
+  ok('archive: an archived blocker blocks nothing', !g.json.nodes.find((n) => n.id === feat.id)?.flags?.includes('Blocked'))
+  const le = await req('GET', `/api/archive/edges?nodeId=${feat.id}`)
+  ok('archive: archived links searchable by node', le.status === 200 && le.json.total === 1)
+  ok('archive: archived links searchable by title', (await req('GET', `/api/archive/edges?projectId=${ap}&q=double`)).json.total === 1)
+  ok('archive: archived links filter by relationship', (await req('GET', `/api/archive/edges?projectId=${ap}&type=blocks`)).json.total === 1 &&
+    (await req('GET', `/api/archive/edges?projectId=${ap}&type=derives`)).json.total === 0)
+  ok('archive: bad relationship type 400', (await req('GET', `/api/archive/edges?type=nope`)).status === 400)
+  // restore: row, tags, notes and the link whose far end is live all come back
+  const rs = await req('POST', `/api/archive/${bug.id}/restore`, {})
+  ok('archive: restore 200, link back', rs.status === 200 && rs.json.id === bug.id && rs.json.restoredEdges === 1, JSON.stringify(rs.json).slice(0, 300))
+  const back = await req('GET', `/api/nodes/${bug.id}`)
+  ok('archive: restored node is whole — tags, notes, text, its blocks link', back.status === 200 && back.json.tags.includes('payments') &&
+    back.json.annotations.some((a) => a.body === 'seen twice in staging') && back.json.content.includes('idempotency key') &&
+    back.json.edges.some((e) => rels(e).some((r) => r.type === 'blocks')), JSON.stringify(back.json).slice(0, 300))
+  ok('archive: restored node left the archive', (await req('GET', `/api/archive?projectId=${ap}`)).json.total === 0 &&
+    (await req('GET', `/api/archive/edges?projectId=${ap}`)).json.total === 0)
+  const g2 = await req('GET', `/api/projects/${ap}/graph`)
+  ok('archive: the restored blocker blocks again', g2.json.nodes.find((n) => n.id === feat.id)?.flags?.includes('Blocked'))
+  ok('archive: restoring a live node 404s', (await req('POST', `/api/archive/${bug.id}/restore`, {})).status === 404)
+  // DELETE is archive; the explicit verb works on ANY node (spec here)
+  const del = await req('DELETE', `/api/nodes/${feat.id}`)
+  ok('archive: DELETE archives (verb deleted)', del.status === 200 && (await req('GET', `/api/archive/${feat.id}`)).json.verb === 'deleted')
+  const bd = await req('GET', `/api/nodes/${bug.id}`)
+  ok('archive: its links went with it (the bug now shows it archived)', bd.json.edges.length === 0 && bd.json.archivedEdges?.length === 1)
+  await req('POST', `/api/archive/${feat.id}/restore`, {})
+  const av = await req('POST', `/api/nodes/${feat.id}/archive`, { note: 'checkout moved to the new service' })
+  ok('archive: the archive verb takes any node, with its note', av.status === 200 && av.json.archived === true &&
+    (await req('GET', `/api/archive/${feat.id}`)).json.note === 'checkout moved to the new service')
+  // two archived ends: the link waits until BOTH are live
+  await req('POST', `/api/nodes/${bug.id}/archive`, {})
+  const r1 = await req('POST', `/api/archive/${bug.id}/restore`, {})
+  ok('archive: a link to a still-archived node stays archived', r1.json.restoredEdges === 0)
+  const r2 = await req('POST', `/api/archive/${feat.id}/restore`, {})
+  ok('archive: …and comes back with the second restore', r2.json.restoredEdges === 1)
+  const acts = await req('GET', `/api/projects/${ap}/activity?limit=50`)
+  ok('archive: node.archived and node.restored are in the activity', acts.json.some((a) => a.action === 'node.archived') &&
+    acts.json.some((a) => a.action === 'node.restored'))
+  await req('DELETE', `/api/projects/${ap}?purge=1`)
+  ok('archive: deleting the project takes its archive with it',
+    (await req('GET', `/api/archive?q=Double%20charge`)).json.items.every((i) => i.projectId !== ap))
+}
+
+// LINKS removed by hand and PROJECTS deleted are archived too — the only true
+// removal left is the host-only purge
+{
+  const lp = (await req('POST', `/api/projects`, { name: `links-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${lp}/nodes`, { type, title, ...extra })).json
+  const a = await mk('feature', 'Search')
+  const b = await mk('component', 'Index')
+  const e = await req('POST', `/api/projects/${lp}/edges`, { sourceId: a.id, targetId: b.id, type: 'depends', label: 'queries' })
+  await req('POST', `/api/edges/${e.json.id}/annotations`, { body: 'hot path' })
+  const rm = await req('DELETE', `/api/edges/${e.json.id}`)
+  ok('links: removing a link by hand succeeds', rm.status === 200)
+  const le = await req('GET', `/api/archive/edges?nodeId=${a.id}`)
+  const got = le.json.items?.[0]
+  ok('links: a hand-removed link is archived whole — label, relationship, marked by hand', le.json.total === 1 &&
+    got.label === 'queries' && got.archivedWith === '' && got.relationships.some((r) => r.type === 'depends'), JSON.stringify(le.json))
+  ok('links: …and is gone from the live node', (await req('GET', `/api/nodes/${a.id}`)).json.edges.length === 0)
+  // restoring a NODE never drags a hand-removed link back
+  await req('POST', `/api/nodes/${b.id}/archive`, {})
+  const rb = await req('POST', `/api/archive/${b.id}/restore`, {})
+  ok('links: restoring a node leaves a hand-removed link archived', rb.json.restoredEdges === 0 &&
+    (await req('GET', `/api/archive/edges?nodeId=${a.id}`)).json.total === 1)
+  await req('POST', `/api/nodes/${b.id}/archive`, {})
+  const blocked = await req('POST', `/api/archive/edges/${e.json.id}/restore`, {})
+  ok('links: restoring a link needs both ends live (409)', blocked.status === 409, JSON.stringify(blocked.json))
+  await req('POST', `/api/archive/${b.id}/restore`, {})
+  const lr = await req('POST', `/api/archive/edges/${e.json.id}/restore`, {})
+  const ad = await req('GET', `/api/nodes/${a.id}`)
+  ok('links: its own restore puts it back — relationship, label and notes', lr.status === 200 &&
+    ad.json.edges.some((x) => x.id === e.json.id && x.label === 'queries' && rels(x).some((r) => r.type === 'depends') && x.annotationCount === 1),
+    JSON.stringify(ad.json.edges))
+  ok('links: restoring a live link 404s', (await req('POST', `/api/archive/edges/${e.json.id}/restore`, {})).status === 404)
+
+  // projects: DELETE archives; restore brings it back whole
+  const del = await req('DELETE', `/api/projects/${lp}`)
+  ok('projects: DELETE archives the project', del.status === 200 && del.json.archived === true)
+  const list = await req('GET', '/api/projects')
+  ok('projects: an archived project leaves the project list', !list.json.some((p) => p.id === lp))
+  const arch = await req('GET', '/api/archive/projects')
+  ok('projects: …and is listed in the archive', arch.json.some((p) => p.id === lp && p.nodeCount === 2), JSON.stringify(arch.json).slice(0, 300))
+  ok('projects: nothing inside was touched', (await req('GET', `/api/nodes/${a.id}`)).status === 200)
+  ok('projects: archiving twice 409', (await req('DELETE', `/api/projects/${lp}`)).status === 409)
+  const rp = await req('POST', `/api/archive/projects/${lp}/restore`, {})
+  ok('projects: restore puts it back on the list', rp.status === 200 &&
+    (await req('GET', '/api/projects')).json.some((p) => p.id === lp && p.nodeCount === 2))
+  ok('projects: restoring a live project 409', (await req('POST', `/api/archive/projects/${lp}/restore`, {})).status === 409)
+  const pg = await req('DELETE', `/api/projects/${lp}?purge=1`)
+  ok('projects: purge is the one true removal', pg.status === 200 && (await req('GET', `/api/projects/${lp}`)).status === 404 &&
+    !(await req('GET', '/api/archive/projects')).json.some((p) => p.id === lp))
+}
+
+// REFINE — a pass over the fog becomes ONE action the responded items derive
+{
+  const rp = (await req('POST', `/api/projects`, { name: `refine-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${rp}/nodes`, { type, title, ...extra })).json
+  const q1 = await mk('question', 'Per-slot or rolling saves?', { content: 'Players lose progress on crash.\n\n## Options\n\n- Per-slot (recommended)\n- Rolling\n' })
+  const b1 = await mk('bug', 'Save corrupts on alt-tab')
+  const i1 = await mk('idea', 'Cloud saves')
+  const feat = await mk('feature', 'Saving')
+  const none = await req('POST', `/api/projects/${rp}/refine`, { entries: [] })
+  ok('refine with no entries 400', none.status === 400)
+  const notFog = await req('POST', `/api/projects/${rp}/refine`, { entries: [{ nodeId: feat.id, response: 'x' }] })
+  ok('refine on a spec node 400', notFog.status === 400, JSON.stringify(notFog.json))
+  const blank = await req('POST', `/api/projects/${rp}/refine`, { entries: [{ nodeId: q1.id, response: '  ' }] })
+  ok('refine with a blank response 400', blank.status === 400)
+  const dup = await req('POST', `/api/projects/${rp}/refine`, { entries: [{ nodeId: q1.id, response: 'a' }, { nodeId: q1.id, response: 'b' }] })
+  ok('refine naming a node twice 400', dup.status === 400)
+  const missing = await req('POST', `/api/projects/${rp}/refine`, { entries: [{ nodeId: 'nd_nope000000', response: 'a' }] })
+  ok('refine on an unknown node 404', missing.status === 404)
+  const r = await req('POST', `/api/projects/${rp}/refine`, {
+    entries: [{ nodeId: q1.id, response: 'Per-slot, 3 slots.' }, { nodeId: b1.id, response: 'Flush before the focus change; no retry.' }],
+    skipped: [i1.id]
+  })
+  ok('refine 200: one action, counts', r.status === 200 && typeof r.json.id === 'string' && r.json.responded === 2 &&
+    r.json.skipped === 1 && r.json.action?.type === 'action' && r.json.action?.tags?.includes('refine'), JSON.stringify(r.json))
+  const a = await req('GET', `/api/nodes/${r.json.id}`)
+  const body = String(a.json.content ?? '')
+  ok('transcript: each item, its response, the skipped list', body.includes(`[question] Per-slot or rolling saves? · ${q1.id}`) &&
+    body.includes('Per-slot, 3 slots.') && body.includes('Flush before the focus change') &&
+    body.includes('## Skipped') && body.includes(i1.id), body)
+  ok('transcript quotes the item lead', body.includes('> Players lose progress on crash.'))
+  const derivesIn = (a.json.edges ?? []).filter((e) => rels(e).some((x) => x.type === 'derives' && x.targetId === r.json.id))
+  ok('every responded item derives the action, labelled refine', derivesIn.length === 2 && derivesIn.every((e) => e.label === 'refine'),
+    JSON.stringify(a.json.edges))
+  const acts = await req('GET', `/api/projects/${rp}/activity?limit=20`)
+  ok('refine.submitted activity', acts.json.some((x) => x.action === 'refine.submitted' && x.subjectId === r.json.id))
+  const done = await req('POST', `/api/nodes/${r.json.id}/complete`, { note: 'applied', keep: [b1.id] })
+  ok('completing the refine action clears its fog, minus keep', done.status === 200 && done.json.cleared.join() === q1.id &&
+    (await req('GET', `/api/nodes/${q1.id}`)).status === 404 && (await req('GET', `/api/nodes/${b1.id}`)).status === 200 &&
+    (await req('GET', `/api/nodes/${i1.id}`)).status === 200, JSON.stringify(done.json))
+
+  // CLEAR RESOLVED — fog resolved the old way (a tag), swept only on apply
+  await req('PATCH', `/api/nodes/${b1.id}`, { tags: ['fixed'] })
+  const dry = await req('POST', `/api/projects/${rp}/fog/clear-resolved`, {})
+  ok('clear-resolved dry run lists, clears nothing', dry.status === 200 && dry.json.apply === false &&
+    dry.json.candidates.map((c) => c.id).join() === b1.id && (await req('GET', `/api/nodes/${b1.id}`)).status === 200, JSON.stringify(dry.json))
+  const wet = await req('POST', `/api/projects/${rp}/fog/clear-resolved`, { apply: true })
+  ok('clear-resolved apply clears exactly that list', wet.status === 200 && wet.json.cleared === 1 &&
+    (await req('GET', `/api/nodes/${b1.id}`)).status === 404 && (await req('GET', `/api/nodes/${i1.id}`)).status === 200)
+  await req('DELETE', `/api/projects/${rp}?purge=1`)
 }
 
 // convert: identity-preserving type change — same node, new hat. Preserves
@@ -1910,14 +2165,20 @@ ok('member → feature rejected (warp or area only)', arBadTgt.status === 400 &&
       JSON.stringify(back.json.edges.map((e) => [e.label, rels(e).length])))
     ok('unwaive keeps the rationale trail (annotations survive)', (back.json.annotations ?? []).length >= 2,
       JSON.stringify((back.json.annotations ?? []).map((a) => a.body)))
-    // a waive that DREW its own connection takes it away again
-    const solo = (await req('POST', `/api/projects/${pid}/nodes`, { type: 'feedback', title: 'CL Solo Waive' })).json
+    // a waive that DREW its own connection takes it away again. The feedback
+    // members the warp under review: outside a review a waive CLEARS fog, and
+    // there would be nothing left to unwaive.
+    const solo = (await req('POST', `/api/projects/${pid}/nodes`, {
+      type: 'feedback', title: 'CL Solo Waive', linkTo: [{ nodeId: W.id, type: 'member', outgoing: true }]
+    })).json
     await req('POST', `/api/nodes/${solo.id}/waive`, { note: 'covered', into: workB.id })
     await req('POST', `/api/nodes/${solo.id}/unwaive`, {})
     const soloBack = await req('GET', `/api/nodes/${solo.id}`)
     ok('unwaive deletes a connection the waive itself drew',
       !soloBack.json.edges.some((e) => e.sourceId === workB.id || e.targetId === workB.id),
       JSON.stringify(soloBack.json.edges.map((e) => e.label)))
+    // it was only a fixture for the edge — it must not hold this review's gate
+    await req('DELETE', `/api/nodes/${solo.id}`)
   }
 
   // ---- the `fold` ALIAS: the verb was renamed, nothing in flight may break --
@@ -2309,7 +2570,7 @@ let probeProjectId = ''
   const pfb = await req('POST', `/api/projects/${p2id}/nodes`, { type: 'feedback', title: 'Probe Obs', linkTo: [{ nodeId: n1.json.id }] })
   await req('POST', `/api/nodes/${pfb.json.id}/waive`, { note: 'probe waive' })
   ok('orphan-probe fixtures', n1.status === 200 && n2.status === 200 && e1.status === 200 && pfb.status === 200)
-  const delP2 = await req('DELETE', `/api/projects/${p2id}`)
+  const delP2 = await req('DELETE', `/api/projects/${p2id}?purge=1`)
   ok('probe project delete', delP2.status === 200)
   const gn1 = await req('GET', `/api/nodes/${n1.json.id}`)
   const gn2 = await req('GET', `/api/nodes/${n2.json.id}`)
@@ -2355,7 +2616,8 @@ let probeProjectId = ''
     JSON.stringify(reviewKeys.filter((k) => !s.includes(k))))
   ok('llms.txt: no stale review-node/close-review surface',
     !s.includes('close-review') && !s.includes('"type":"review"'), 'stale review-node docs found')
-  ok('llms.txt: answer + graduate recipes', ['/api/nodes/:id/answer', '## Answer', 'Graduate an answered question'].every((k) => s.includes(k)))
+  ok('llms.txt: answer + graduate recipes', ['/api/nodes/:id/answer', '## Answer', 'Graduate a question'].every((k) => s.includes(k)))
+  ok('llms.txt: families, the cascade and Refine', ['THE FAMILIES', 'THE CASCADE', '/api/projects/:id/refine', 'clear-resolved', 'unshaped', 'takeable'].every((k) => s.includes(k)))
   ok('llms.txt: convert endpoint + decision paragraph',
     ['/api/nodes/:id/convert', 'Convert vs graduate vs create-linked'].every((k) => s.includes(k)))
   ok('llms.txt: connections + relationships model',
@@ -2528,7 +2790,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
 
   // deleting the far project takes the crossing with it (the orphan hazard:
   // ON DELETE CASCADE alone would leave A's edge pointing at a deleted node)
-  const xdelB = await req('DELETE', `/api/projects/${xbId}`)
+  const xdelB = await req('DELETE', `/api/projects/${xbId}?purge=1`)
   ok('cross-project: far project deletes', xdelB.status === 200)
   const gAfter = await req('GET', `/api/projects/${xaId}/graph`)
   ok('cross-project: crossing is gone from the surviving project',
@@ -2537,7 +2799,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     !(gAfter.json.nodes ?? []).some((n) => n.id === xbN.json.id))
   ok('cross-project: surviving project keeps its own nodes',
     (gAfter.json.nodes ?? []).some((n) => n.id === xaN.json.id))
-  const xdelA = await req('DELETE', `/api/projects/${xaId}`)
+  const xdelA = await req('DELETE', `/api/projects/${xaId}?purge=1`)
   ok('cross-project: near project deletes', xdelA.status === 200)
 }
 
@@ -2598,8 +2860,8 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   ok('refer: receiver can rank it in their own backlog',
     refRows.some((n) => n.id === refd.json.id && n.rank === 3))
 
-  await req('DELETE', `/api/projects/${rdId}`)
-  await req('DELETE', `/api/projects/${rsId}`)
+  await req('DELETE', `/api/projects/${rdId}?purge=1`)
+  await req('DELETE', `/api/projects/${rsId}?purge=1`)
 }
 
 // ---------------------------------------------------------------------------
@@ -2682,8 +2944,8 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   ok('canon: after severance the consumer owns it outright',
     (await req('PATCH', `/api/nodes/${ref.json.id}`, { title: 'Now mine' })).status === 200)
 
-  await req('DELETE', `/api/projects/${coId}`)
-  await req('DELETE', `/api/projects/${cuId}`)
+  await req('DELETE', `/api/projects/${coId}?purge=1`)
+  await req('DELETE', `/api/projects/${cuId}?purge=1`)
 }
 
 // --- the DOCUMENT export: a graph, or part of one, as ONE markdown document.
@@ -2819,7 +3081,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   const after = (await req('GET', `/api/projects/${dpid}/activity`)).json.length
   ok('document: exporting writes nothing to the activity log', before === after, `${before} -> ${after}`)
 
-  await req('DELETE', `/api/projects/${dpid}`)
+  await req('DELETE', `/api/projects/${dpid}?purge=1`)
 }
 
 // --- SKILLS: standing instructions authored as nodes and INSTALLED as
@@ -3207,7 +3469,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
       // forgetting a target must NOT delete anyone's files — uninstall is the verb for that
       ok('skills: removing a target left the files on disk alone', fs.existsSync(skFileFor('hand-written')))
     }
-    await req('DELETE', `/api/projects/${spid}`)
+    await req('DELETE', `/api/projects/${spid}?purge=1`)
     fs.rmSync(skRoot, { recursive: true, force: true })
     ok('skills: the throwaway root is gone — nothing was left in tmp', !fs.existsSync(skRoot), skRoot)
   }
@@ -3222,8 +3484,8 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   const mk = async (type, title, extra = {}) =>
     (await req('POST', `/api/projects/${fpid}/nodes`, { type, title, ...extra })).json
   const report = async (q = '') => (await req('GET', `/api/projects/${fpid}/fog${q}`)).json
-  const itemOf = (r, id) => [...(r.frontier ?? []), ...(r.blocked ?? [])].find((i) => i.id === id)
-  const onFrontier = (r, id) => (r.frontier ?? []).some((i) => i.id === id)
+  const itemOf = (r, id) => [...(r.takeable ?? []), ...(r.blocked ?? [])].find((i) => i.id === id)
+  const onFrontier = (r, id) => (r.takeable ?? []).some((i) => i.id === id)
   const inFog = (r, id) => !!itemOf(r, id)
   const signal = (r, kind) => (r.signals ?? []).find((s) => s.kind === kind)
   const inArea = (id) => ({ linkTo: [{ nodeId: id }] })
@@ -3272,7 +3534,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: DESIGNATED feedback is not fog at all — it was absorbed into what it derived',
       !inFog(r1, fbDone.id))
     ok('fog: an action is never fog — the lens is five types, not "everything open"', !inFog(r1, act.id))
-    ok('fog: a feature is never fog', !r1.frontier.concat(r1.blocked).some((i) => i.type === 'feature'))
+    ok('fog: a feature is never fog', !r1.takeable.concat(r1.blocked).some((i) => i.type === 'feature'))
 
     // ---- 2. hazy FOLLOWS THE TAG AND IS NEVER INFERRED ---------------------
     // "can you state the question precisely NOW" is the human's call: the only
@@ -3281,12 +3543,12 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: hazy is NEVER inferred — an untagged question is sharp however vague it reads',
       itemOf(r1, qCache.id)?.hazy === false && itemOf(r1, threat.id)?.hazy === false)
     ok('fog: counts.hazy counts exactly the tagged ones', r1.counts.hazy === 1, String(r1.counts.hazy))
-    const hazyElsewhere = r1.frontier.concat(r1.blocked).filter((i) => i.hazy).length
+    const hazyElsewhere = r1.takeable.concat(r1.blocked).filter((i) => i.hazy).length
     ok('fog: no other item acquired hazy along the way', hazyElsewhere === 1, String(hazyElsewhere))
 
     // ---- 3. THE COUNTS RECONCILE -------------------------------------------
     const sums = (o) => Object.values(o ?? {}).reduce((a, b) => a + b, 0)
-    ok('fog: frontier + blocked === total', r1.counts.frontier + r1.counts.blocked === r1.counts.total,
+    ok('fog: frontier + blocked === total', r1.counts.takeable + r1.counts.blocked === r1.counts.total,
       JSON.stringify(r1.counts))
     ok('fog: byClass sums to total', sums(r1.counts.byClass) === r1.counts.total, JSON.stringify(r1.counts.byClass))
     ok('fog: byType sums to total', sums(r1.counts.byType) === r1.counts.total, JSON.stringify(r1.counts.byType))
@@ -3294,7 +3556,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
       r1.counts.byType.question === 7 && r1.counts.byType.threat === 1 && r1.counts.byType.flaw === 1 &&
       r1.counts.byType.bug === 1 && r1.counts.byType.feedback === 1, JSON.stringify(r1.counts.byType))
     ok('fog: the arrays match the counts when nothing is limited',
-      r1.frontier.length === r1.counts.frontier && r1.blocked.length === r1.counts.blocked)
+      r1.takeable.length === r1.counts.takeable && r1.blocked.length === r1.counts.blocked)
     ok('fog: nothing is blocked yet, so everything is takeable', r1.counts.blocked === 0)
     // unlocated counts by AREA — a warp member with no area is honestly unlocated
     ok('fog: warp-only members count as unlocated (density is measured against geography)',
@@ -3321,7 +3583,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
       String(itemOf(rb, qCache.id)?.body ?? '').includes('UNIQUE-FOG-PROSE-MARKER'),
       String(itemOf(rb, qCache.id)?.body ?? '').slice(0, 120))
     ok('fog: bodies=1 carries prose for the blocked list too, not just the frontier',
-      rb.frontier.concat(rb.blocked).every((i) => typeof i.body === 'string'))
+      rb.takeable.concat(rb.blocked).every((i) => typeof i.body === 'string'))
 
     // ---- 6. BLOCKING MOVES AN ITEM OFF THE FRONTIER ------------------------
     const blocker = await mk('bug', 'The blocking bug')
@@ -3334,7 +3596,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: and the blocker names what it holds down',
       itemOf(r2, blocker.id)?.blocks?.some((b) => b.id === qCache.id))
     ok('fog: frontier + blocked still === total with a block in play',
-      r2.counts.frontier + r2.counts.blocked === r2.counts.total, JSON.stringify(r2.counts))
+      r2.counts.takeable + r2.counts.blocked === r2.counts.total, JSON.stringify(r2.counts))
     // resolving the SOURCE is enough — nobody has to go and delete the edge.
     // Same suppression the Blocked flag rule and the ship gate apply.
     await req('PATCH', `/api/nodes/${blocker.id}`, { tags: ['fixed'] })
@@ -3370,7 +3632,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: with every open question ordered, no-decision-order stops firing',
       signal(r5, 'no-decision-order') === undefined, JSON.stringify(r5.signals?.map((s) => s.kind)))
     ok('fog: the ordered questions are now a chain — one takeable head, the rest blocked',
-      r5.frontier.filter((i) => i.type === 'question').length === 1, String(r5.counts.frontier))
+      r5.takeable.filter((i) => i.type === 'question').length === 1, String(r5.counts.takeable))
     ok('fog: undesignated-feedback names the observation nobody designated',
       signal(r5, 'undesignated-feedback')?.count === 1, JSON.stringify(signal(r5, 'undesignated-feedback')))
     ok('fog: unlocated-fog reports the items in no district',
@@ -3383,7 +3645,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: a node-scoped report covers exactly that district',
       areaFog.counts.total === 9 && inFog(areaFog, qCache.id) && !inFog(areaFog, bug.id),
       JSON.stringify(areaFog.counts))
-    ok('fog: a scoped report reconciles too', areaFog.counts.frontier + areaFog.counts.blocked === areaFog.counts.total)
+    ok('fog: a scoped report reconciles too', areaFog.counts.takeable + areaFog.counts.blocked === areaFog.counts.total)
     ok('fog: a scoped report lists only the districts represented, not every area',
       (areaFog.areas ?? []).length === 1 && areaFog.areas[0].id === area.id,
       JSON.stringify((areaFog.areas ?? []).map((a) => a.id)))
@@ -3392,7 +3654,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
       warpFog.counts.total === 2 && inFog(warpFog, bug.id) && inFog(warpFog, fb.id) && !inFog(warpFog, qCache.id),
       JSON.stringify(warpFog.counts))
     ok('fog: bodies=1 works on the scoped route too',
-      warpFog.frontier.concat(warpFog.blocked).every((i) => typeof i.body === 'string'))
+      warpFog.takeable.concat(warpFog.blocked).every((i) => typeof i.body === 'string'))
     // area= narrows the project report the same way, but takes an AREA only
     const viaQuery = (await req('GET', `/api/projects/${fpid}/fog?area=${area.id}`)).json
     ok('fog: ?area= narrows the project report identically', viaQuery.counts.total === areaFog.counts.total)
@@ -3408,9 +3670,9 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     // ---- 9. limit TRIMS THE ARRAYS, NEVER THE COUNTS ----------------------
     const lim = await report('?limit=2')
     ok('fog: limit caps the frontier and blocked ARRAYS',
-      lim.frontier.length <= 2 && lim.blocked.length <= 2)
+      lim.takeable.length <= 2 && lim.blocked.length <= 2)
     ok('fog: but the counts stay true about the whole scope — exact numbers, bounded queue',
-      lim.counts.total === r5.counts.total && lim.counts.frontier === r5.counts.frontier,
+      lim.counts.total === r5.counts.total && lim.counts.takeable === r5.counts.takeable,
       JSON.stringify(lim.counts))
     const badLimit = await req('GET', `/api/projects/${fpid}/fog?limit=0`)
     ok('fog: a non-positive limit is a 400, not a silently empty report', badLimit.status === 400)
@@ -3442,7 +3704,7 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok('fog: the counts followed the three resolutions down', r6.counts.total === r5.counts.total - 3,
       JSON.stringify({ before: r5.counts.total, after: r6.counts.total }))
     ok('fog: and still reconcile afterwards',
-      r6.counts.frontier + r6.counts.blocked === r6.counts.total &&
+      r6.counts.takeable + r6.counts.blocked === r6.counts.total &&
       sums(r6.counts.byClass) === r6.counts.total, JSON.stringify(r6.counts))
     // answering the head of the chain releases what it was gating — the same
     // suppression, arriving from the positive terminal verb this time
@@ -3512,14 +3774,14 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
       await req('DELETE', `/api/nodes/${dw.json.id}`)
     }
 
-    const rm = await req('DELETE', `/api/projects/${fpid}`)
+    const rm = await req('DELETE', `/api/projects/${fpid}?purge=1`)
     ok('fog: the fixture project is deleted', rm.status === 200)
     ok('fog: and it is gone', (await req('GET', `/api/projects/${fpid}`)).status === 404)
   }
 }
 
 // cleanup
-const del = await req('DELETE', `/api/projects/${pid}`)
+const del = await req('DELETE', `/api/projects/${pid}?purge=1`)
 ok('project delete', del.status === 200)
 const gone = await req('GET', `/api/projects/${pid}`)
 ok('project gone', gone.status === 404)
@@ -3566,8 +3828,9 @@ ok('project gone', gone.status === 404)
       edges: count('SELECT COUNT(*) FROM edges WHERE project_id NOT IN (SELECT id FROM projects) OR source_id NOT IN (SELECT id FROM nodes) OR target_id NOT IN (SELECT id FROM nodes)'),
       edge_relationships: count('SELECT COUNT(*) FROM edge_relationships WHERE edge_id NOT IN (SELECT id FROM edges)'),
       node_tags: count('SELECT COUNT(*) FROM node_tags WHERE node_id NOT IN (SELECT id FROM nodes)'),
-      node_revisions: count('SELECT COUNT(*) FROM node_revisions WHERE node_id NOT IN (SELECT id FROM nodes)'),
-      annotations: count("SELECT COUNT(*) FROM annotations WHERE (parent_kind = 'node' AND parent_id NOT IN (SELECT id FROM nodes)) OR (parent_kind = 'edge' AND parent_id NOT IN (SELECT id FROM edges))")
+      // an ARCHIVED node's history is the archive, not an orphan
+      node_revisions: count('SELECT COUNT(*) FROM node_revisions WHERE node_id NOT IN (SELECT id FROM nodes) AND node_id NOT IN (SELECT id FROM archived_nodes)'),
+      annotations: count("SELECT COUNT(*) FROM annotations WHERE (parent_kind = 'node' AND parent_id NOT IN (SELECT id FROM nodes) AND parent_id NOT IN (SELECT id FROM archived_nodes)) OR (parent_kind = 'edge' AND parent_id NOT IN (SELECT id FROM edges) AND parent_id NOT IN (SELECT id FROM archived_edges))")
     }
     ok('row-level: zero orphans in every child table', Object.values(orphans).every((n) => n === 0), JSON.stringify(orphans))
     // the review tables are GONE — retired by the review-nodes migrations, counts in meta
@@ -3624,8 +3887,11 @@ ok('project gone', gone.status === 404)
             + (SELECT COUNT(*) FROM nodes WHERE project_id IN (?,?))
             + (SELECT COUNT(*) FROM edges WHERE project_id IN (?,?))
             + (SELECT COUNT(*) FROM activity WHERE project_id IN (?,?))
+            + (SELECT COUNT(*) FROM archived_nodes WHERE project_id IN (?,?))
+            + (SELECT COUNT(*) FROM archived_edges WHERE project_id IN (?,?))
             ${skillInstallTerm}`,
-      [pid, probeProjectId, pid, probeProjectId, pid, probeProjectId, pid, probeProjectId])
+      [pid, probeProjectId, pid, probeProjectId, pid, probeProjectId, pid, probeProjectId,
+        pid, probeProjectId, pid, probeProjectId])
     ok('row-level: deleted projects left zero rows', leftover === 0, `${leftover} rows remain (pid=${pid}, probe=${probeProjectId}, db=${dbFile})`)
     sdb.close()
   }

@@ -21,7 +21,7 @@
 import { FOG_TYPES, type FogClass, type FogReport, type NodeType, type SpecNode } from '@shared/types'
 
 /** Class order everywhere: least known → most known (see the ink ramp below). */
-export const FOG_CLASSES: FogClass[] = ['unknown', 'undecided', 'unabsorbed']
+export const FOG_CLASSES: FogClass[] = ['unshaped', 'unknown', 'undecided', 'unabsorbed']
 
 /**
  * The halo form drawn around a lifted fog node. THE distinguishing channel —
@@ -33,11 +33,12 @@ export const FOG_CLASSES: FogClass[] = ['unknown', 'undecided', 'unabsorbed']
  *
  * The forms are an ORDINAL ramp of ink — the more we know, the more solid the
  * ring, which is also the semantic order of the three classes:
+ *   wisp    faint, sparse dashes  not yet a thing at all — an idea to shape or drop
  *   dotted  thin, mostly gaps   nobody knows the answer
  *   split   two bold arcs       the options are known, the choice is not made
  *   solid   one heavy ring      we know what is wrong; the spec does not say so
  */
-export type FogForm = 'dotted' | 'split' | 'solid'
+export type FogForm = 'wisp' | 'dotted' | 'split' | 'solid'
 
 export interface FogClassMeta {
   label: string
@@ -53,6 +54,12 @@ export interface FogClassMeta {
 }
 
 export const FOG_CLASS_META: Record<FogClass, FogClassMeta> = {
+  unshaped: {
+    label: 'unshaped',
+    hint: 'Not yet a thing at all — give it shape, or throw it away.',
+    color: '#5f6b80',
+    form: 'wisp'
+  },
   unknown: {
     label: 'unknown',
     hint: 'Nobody knows the answer — go and find out.',
@@ -78,11 +85,12 @@ export const FOG_CLASS_META: Record<FogClass, FogClassMeta> = {
 export const FOG_HAZE = '#a9b6c9'
 
 /** Line weight of a class's halo, in world units (scaled by zoom at draw time). */
-export const FOG_RING_WIDTH: Record<FogForm, number> = { dotted: 1.2, split: 2.4, solid: 3.2 }
+export const FOG_RING_WIDTH: Record<FogForm, number> = { wisp: 1, dotted: 1.2, split: 2.4, solid: 3.2 }
 
 /**
  * LOCAL fallback classification, by node type alone.
  *
+ *   idea              → unshaped    not yet a thing — shape it or throw it away
  *   question, threat  → unknown     an open question; a plan endangered by one
  *   feedback          → undecided   an observation nobody has designated yet
  *   bug, flaw         → unabsorbed  a known wrongness the spec has not taken in
@@ -93,6 +101,8 @@ export const FOG_RING_WIDTH: Record<FogForm, number> = { dotted: 1.2, split: 2.4
  */
 export function localFogClass(type: NodeType): FogClass | null {
   switch (type) {
+    case 'idea':
+      return 'unshaped'
     case 'question':
     case 'threat':
       return 'unknown'
@@ -141,14 +151,14 @@ export function buildFogIndex(nodes: SpecNode[], report: FogReport | null, dimFl
   const byId = new Map<string, FogEntry>()
   if (report) {
     const present = new Set(nodes.map((n) => n.id))
-    const take = (items: typeof report.frontier, blocked: boolean): void => {
+    const take = (items: typeof report.takeable, blocked: boolean): void => {
       for (const it of items ?? []) {
         // a report can be a beat behind the graph — never light an id that is gone
         if (!present.has(it.id)) continue
         byId.set(it.id, { fogClass: it.fogClass, hazy: !!it.hazy, blocked, authoritative: true })
       }
     }
-    take(report.frontier, false)
+    take(report.takeable ?? report.frontier, false)
     take(report.blocked, true)
     return { source: 'report', byId }
   }
@@ -170,7 +180,7 @@ export interface FogStats {
   hazy: number
   /** takeable right now — nothing unresolved is holding it down. Always 0 minus
    *  `blocked` in local mode, where blocked-ness is unknowable without the report. */
-  frontier: number
+  takeable: number
   blocked: number
   /** fog belonging to no district — counted, never hidden, or every density is a lie */
   unlocated: number
@@ -178,7 +188,7 @@ export interface FogStats {
   byArea: Map<string, { total: number; byClass: Record<FogClass, number>; hazy: number; density: number }>
 }
 
-const zeroByClass = (): Record<FogClass, number> => ({ unknown: 0, undecided: 0, unabsorbed: 0 })
+const zeroByClass = (): Record<FogClass, number> => ({ unshaped: 0, unknown: 0, undecided: 0, unabsorbed: 0 })
 
 /**
  * Fold a fog index over the district map the canvas already computed. Pure and
@@ -186,14 +196,14 @@ const zeroByClass = (): Record<FogClass, number> => ({ unknown: 0, undecided: 0,
  */
 export function fogStats(index: FogIndex, areaMembers: Map<string, string[]>): FogStats {
   const stats: FogStats = {
-    total: 0, byClass: zeroByClass(), hazy: 0, frontier: 0, blocked: 0, unlocated: 0, byArea: new Map()
+    total: 0, byClass: zeroByClass(), hazy: 0, takeable: 0, blocked: 0, unlocated: 0, byArea: new Map()
   }
   for (const e of index.byId.values()) {
     stats.total++
     stats.byClass[e.fogClass]++
     if (e.hazy) stats.hazy++
     if (e.blocked) stats.blocked++
-    else stats.frontier++
+    else stats.takeable++
   }
   const located = new Set<string>()
   for (const [areaId, members] of areaMembers) {
