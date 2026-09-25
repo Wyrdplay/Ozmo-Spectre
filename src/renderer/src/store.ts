@@ -641,10 +641,12 @@ export const useStore = create<OzmoState>((set, get) => ({
           }
         }
         // prune collapse state to nodes that still ARE containers: classes
-        // (class-of sources) or areas with members (member targets)
+        // (class-of sources) or areas and warps with members (member targets).
+        // This must name the same containers GraphView does, or a collapse the
+        // canvas honours is thrown away on the next refresh.
         let collapsedContainerIds = s.collapsedContainerIds
         if (collapsedContainerIds.length) {
-          const areas = new Set(graph.nodes.filter((n) => n.type === 'area').map((n) => n.id))
+          const areas = new Set(graph.nodes.filter((n) => n.type === 'area' || n.type === 'warp').map((n) => n.id))
           const containers = new Set<string>()
           for (const e of graph.edges) {
             for (const r of edgeRelationships(e)) {

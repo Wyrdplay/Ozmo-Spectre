@@ -67,11 +67,12 @@ const HULL_PAD = 34
 
 /**
  * Everything the canvas needs to know about CONTAINER structure + collapse
- * state. A container is a class (class-of instances) or an area (member
- * district) — one shared hide/re-route/badge/remember code path for both.
+ * state. A container is a class (class-of instances), an area (member
+ * district) or a warp (member increment) — one shared hide/re-route/badge/
+ * remember code path for all three.
  */
 interface ContainerInfo {
-  /** containerId → contained node ids: class-of targets ∪ (areas only) member sources */
+  /** containerId → contained node ids: class-of targets ∪ member sources (areas and warps) */
   membersOf: Map<string, string[]>
   /** area id → its member node ids (subset of membersOf — hulls + health read this) */
   areaMembers: Map<string, string[]>
@@ -314,10 +315,17 @@ export function GraphView(): React.JSX.Element {
 
   // container structure + canvas collapse: hidden members leave the sim/draw/
   // hit/fit entirely; their outside connections re-route to the hub, faded.
-  // Containers: classes (class-of targets) AND areas (member sources) — one
-  // shared code path for both container relationships.
+  // Containers: classes (class-of targets), areas AND warps (member sources) —
+  // one shared code path. Warps group in time as areas group in space, and on a
+  // big board they are the other half of the crossings: Dice goes 4238 → 229
+  // with areas collapsed and → 28 with warps collapsed too.
+  //
+  // A node can sit in an area AND a warp. It stays hidden while ANY collapsed
+  // container holds it — `hidden` is rebuilt from every collapsed container on
+  // each change, so expanding one never reveals what another still hides.
   const containerInfo = useMemo<ContainerInfo>(() => {
     const areaIds = new Set(graph.nodes.filter((n) => n.type === 'area').map((n) => n.id))
+    const warpIds = new Set(graph.nodes.filter((n) => n.type === 'warp').map((n) => n.id))
     const membersOf = new Map<string, string[]>()
     const areaMembers = new Map<string, string[]>()
     const push = (map: Map<string, string[]>, key: string, val: string): void => {
@@ -331,6 +339,9 @@ export function GraphView(): React.JSX.Element {
         else if (r.type === 'member' && areaIds.has(r.targetId)) {
           push(membersOf, r.targetId, r.sourceId)
           push(areaMembers, r.targetId, r.sourceId)
+        } else if (r.type === 'member' && warpIds.has(r.targetId)) {
+          // warps collapse like areas; they draw no hull, so not in areaMembers
+          push(membersOf, r.targetId, r.sourceId)
         }
       }
     }
@@ -2282,7 +2293,7 @@ export function GraphView(): React.JSX.Element {
   }
 
   const ctxNode = ctxMenu ? nodesRef.current.find((n) => n.id === ctxMenu.nodeId)?.data : null
-  /** contained count of the ctx-menu node (class instances ∪ area members) — drives collapse/expand */
+  /** contained count of the ctx-menu node (class instances ∪ area/warp members) — drives collapse/expand */
   const ctxContainedCount = ctxMenu ? containerInfo.membersOf.get(ctxMenu.nodeId)?.length ?? 0 : 0
   /** ids the open ctx menu operates on — non-null only for the selection-wide menu
    *  (revalidated against the live selection so a shrink/deletion degrades safely) */
@@ -2615,14 +2626,15 @@ export function GraphView(): React.JSX.Element {
           {ctxContainedCount > 0 && (
             <button
               title={collapsedContainerIds.includes(ctxMenu.nodeId)
-                ? `Bring the hidden ${ctxNode.type === 'area' ? 'members' : 'instances'} back onto the canvas`
-                : `Hide the ${ctxNode.type === 'area' ? 'members behind this area' : 'instances behind this class'} — it keeps a count badge`}
+                ? `Bring the hidden ${ctxNode.type === 'area' || ctxNode.type === 'warp' ? 'members' : 'instances'} back onto the canvas` +
+                  (ctxNode.type === 'area' || ctxNode.type === 'warp' ? ' (a member another collapsed container holds stays hidden)' : '')
+                : `Hide the ${ctxNode.type === 'area' ? 'members behind this area' : ctxNode.type === 'warp' ? 'members behind this warp' : 'instances behind this class'} — it keeps a count badge`}
               onClick={() => { toggleContainerCollapse(ctxMenu.nodeId); setCtxMenu(null) }}
             >
-              {ctxNode.type === 'area'
+              {ctxNode.type === 'area' || ctxNode.type === 'warp'
                 ? (collapsedContainerIds.includes(ctxMenu.nodeId)
-                    ? `Expand area (${ctxContainedCount})`
-                    : `Collapse area (${ctxContainedCount})`)
+                    ? `Expand ${ctxNode.type} (${ctxContainedCount})`
+                    : `Collapse ${ctxNode.type} (${ctxContainedCount})`)
                 : (collapsedContainerIds.includes(ctxMenu.nodeId)
                     ? `Expand ${ctxContainedCount} instance${ctxContainedCount === 1 ? '' : 's'}`
                     : `Collapse ${ctxContainedCount} instance${ctxContainedCount === 1 ? '' : 's'}`)}
