@@ -607,7 +607,8 @@ export type BodyKind = 'document' | 'reference' | 'graph'
  * non-fog type — findings about a spec (bug, flaw, threat, question, feedback)
  * are never a place a spec lives. `action` is excluded too (desk
  * recommendation): completing one removes it, which would orphan its folder.
- * `idea` is fog by family but explicitly allowed by the ruling.
+ * `idea` is fog by family but explicitly allowed by the ruling. Reaffirmed
+ * 2026-10-24: depth is unlimited, the type list stands.
  */
 export const SUBGRAPH_TYPES: NodeType[] = ['area', 'feature', 'component', 'instance', 'warp', 'pillar', 'principle', 'idea', 'skill']
 

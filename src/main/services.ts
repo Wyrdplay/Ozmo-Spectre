@@ -1004,6 +1004,9 @@ export function createNode(
     slug?: string | null; description?: string | null; skillOptions?: Record<string, unknown> | null
     /** HOME: create it inside this sub-graph (default: the project top level) */
     graphId?: string | null
+    /** DECOMPOSE: create it inside this node, promoting the node to a sub-graph
+     *  first if it is not one — the way a child is made (decomposition is nesting) */
+    inside?: string | null
   },
   actor: string
 ): SpecNode {
@@ -1011,6 +1014,14 @@ export function createNode(
   need(p.type !== 'project', 'a project is created with POST /api/projects {"name", "parentId?"} — it is a folder as well as a node')
   need(p.projectId !== WORKSPACE_ROOT_ID, 'the workspace root holds projects only — create a project with POST /api/projects', 400)
   const proj = projectRow(p.projectId)
+  if (p.inside) {
+    need(!p.graphId || p.graphId === p.inside, 'give inside or graphId, not both')
+    const parent = nodeRow(String(p.inside))
+    need(parent.project_id === p.projectId, `"${parent.title}" is in another project — create the child there`, 400)
+    // a parent that cannot hold a graph (fog, an action) is decomposed by link alone
+    if (!parent.is_graph && SUBGRAPH_OK.has(parent.type as NodeType) && !parent.references_node_id) promoteNode({ id: parent.id }, actor)
+    if (nodeRow(parent.id).is_graph) p.graphId = parent.id
+  }
   // a project is a graph: naming the project itself is naming its top level
   const home = p.graphId && p.graphId !== p.projectId ? String(p.graphId) : null
   if (home) {
@@ -2207,7 +2218,10 @@ export function completeAction(p: { id: string; note?: string; keep?: unknown },
       `SELECT 1 AS x FROM edge_relationships er JOIN nodes n ON n.id = er.target_id
        WHERE er.type = 'derives' AND er.source_id = ? AND er.target_id <> ? AND n.type = 'action'`, [f.id, r.id]
     )
-    if (keep.has(f.id) || (f.type === 'feedback' && held.has(f.id)) || f.references_node_id || feedsAnother) kept.push(f.id)
+    // fog that holds a graph of its own (an idea may) stays: clearing it would
+    // pull its residents' home out from under them
+    const holds = !!f.is_graph && residentCount(f.id) > 0
+    if (keep.has(f.id) || (f.type === 'feedback' && held.has(f.id)) || f.references_node_id || feedsAnother || holds) kept.push(f.id)
     else toClear.push(f)
   }
 
@@ -2246,6 +2260,8 @@ export function clearResolvedFog(p: { projectId: string; apply?: boolean }, acto
   const held = reviewHeldIds(p.projectId)
   const candidates = nodes
     .filter((n) => isFogType(n.type) && resolved.has(n.id) && !n.referencesNodeId && !(n.type === 'feedback' && held.has(n.id)))
+    // a node still holding residents is never swept out from under them
+    .filter((n) => n.bodyKind !== 'graph' || residentCount(n.id) === 0)
     .map((n) => ({ id: n.id, type: n.type, title: n.title, tags: n.tags }))
   if (!p.apply) return { apply: false, candidates, cleared: 0 }
   const touched: string[] = []

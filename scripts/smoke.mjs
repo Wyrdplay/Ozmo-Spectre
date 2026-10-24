@@ -1009,6 +1009,35 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   await req('DELETE', `/api/projects/${hp}?purge=1`)
 }
 
+// DECOMPOSITION IS NESTING — a child is made inside its parent, at any depth;
+// the type rule stands, and a node holding residents is never cleared from under them
+{
+  const dp = (await req('POST', '/api/projects', { name: `decomp-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${dp}/nodes`, { type, title, ...extra })).json
+  const F = await mk('feature', 'Saving')
+  const c1 = await mk('feature', 'Autosave', { inside: F.id, linkTo: [{ nodeId: F.id, type: 'derives', outgoing: false }] })
+  const f1 = (await req('GET', `/api/nodes/${F.id}`)).json
+  ok('decomposition: a child made inside its parent promotes the parent and lives in it',
+    f1.bodyKind === 'graph' && c1.graphId === F.id && f1.edges.some((e) => rels(e).some((r) => r.type === 'derives')), JSON.stringify(c1).slice(0, 200))
+  const c2 = await mk('feature', 'Autosave interval', { inside: c1.id })
+  ok('decomposition: and again, a level deeper', c2.graphId === c1.id && /Saving[\\/]Autosave/.test(c2.filePath), c2.filePath)
+  const bug = await mk('bug', 'Saves corrupt')
+  const under = await mk('question', 'Which writes race?', { inside: bug.id })
+  ok('decomposition: the type rule stands — a bug is never a door, its child stays beside it',
+    (await req('GET', `/api/nodes/${bug.id}`)).json.bodyKind === 'document' && under.graphId === null)
+  // an idea is fog by family but may hold a graph: never cleared out from under its residents
+  const idea = await mk('idea', 'Cloud saves', { tags: ['done'] })
+  await mk('feature', 'Cloud slot sync', { inside: idea.id })
+  const dry = (await req('POST', `/api/projects/${dp}/fog/clear-resolved`, { apply: false })).json
+  ok('decomposition: the sweep skips an idea that holds residents', !dry.candidates.some((c) => c.id === idea.id), JSON.stringify(dry.candidates))
+  const act = await mk('action', 'Ship cloud saves', { linkTo: [{ nodeId: idea.id, type: 'derives', outgoing: false }] })
+  const done = await req('POST', `/api/nodes/${act.id}/complete`, {})
+  ok('decomposition: completing an action keeps the idea it came from while the idea holds residents',
+    done.status === 200 && (done.json.kept ?? []).includes(idea.id) && (await req('GET', `/api/nodes/${idea.id}`)).status === 200,
+    JSON.stringify(done.json).slice(0, 200))
+  await req('DELETE', `/api/projects/${dp}?purge=1`)
+}
+
 // PROJECTS ARE NODES — type `project`, body always a graph. Projects nest inside
 // projects; a project's door sits in the graph it lives in; its folder note is
 // its spec; nesting moves the folder whole and changes nothing inside.

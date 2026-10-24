@@ -76,11 +76,16 @@ export function QuickAdd(): React.JSX.Element {
       const linkTo = quickAdd.linkTo
         ? links.filter((l) => nodeById.has(l.nodeId)).map((l) => ({ nodeId: l.nodeId, type: l.type, outgoing: l.outgoing }))
         : []
+      // "Add child" (one preset link: parent —derives→ new) makes the child INSIDE
+      // its parent — decomposition is nesting; the core promotes the parent when
+      // it can hold a graph, and keeps the link either way
+      const preset = quickAdd.linkTo ?? []
+      const inside = preset.length === 1 && preset[0].type === 'derives' && preset[0].outgoing === false ? preset[0].nodeId : null
       const node = await rpc<SpecNode>('nodes.create', {
         projectId,
-        // a node is born where you are standing — made inside a sub-graph, it
-        // must not appear at the top level and vanish from the canvas
-        graphId: useStore.getState().graphRoot,
+        // otherwise a node is born where you are standing — made inside a
+        // sub-graph, it must not appear at the top level and vanish from the canvas
+        ...(inside ? { inside } : { graphId: useStore.getState().graphRoot }),
         type,
         title: title.trim(),
         tags,
