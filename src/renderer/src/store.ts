@@ -43,6 +43,24 @@ let graphRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let skillsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let fogRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
+// LIVE REFRESH UNDER LOAD. Every node/edge/annotation event re-reads the whole
+// graph (~1MB and a few hundred ms of server time on a large project) and, with
+// the lens on, the fog report. An agent writing a dozen times a second turned
+// that into a read every 80ms from every open board — overlapping, since nothing
+// stopped a second read starting while the first was still out — and the server
+// spent its time answering boards instead of the agent. Now:
+//  - the first change after a quiet spell still refreshes almost at once;
+//  - during a burst, at most one refresh per interval;
+//  - never two reads of the same thing in flight, and a change that lands during
+//    one earns exactly one more read after it, so the last change is never lost.
+const GRAPH_REFRESH_MIN_INTERVAL_MS = 1000
+const FOG_REFRESH_MIN_INTERVAL_MS = 2000
+let lastGraphRefreshAt = 0
+let lastFogRefreshAt = 0
+let graphInFlight: Promise<void> | null = null
+let graphAgain = false
+let fogAgain = false
+
 // canvas container-collapse is per-machine UI state, persisted per project.
 // A CONTAINER is a class (node with class-of instances) or an area (member
 // district) — one set, one code path. The legacy per-class key migrates in.
@@ -623,58 +641,79 @@ export const useStore = create<OzmoState>((set, get) => ({
     }
   },
 
-  refreshGraph: async () => {
-    const { projectId } = get()
-    if (!projectId) return
-    try {
-      const graph = await rpc<GraphPayload>('graph.get', { projectId })
-      set((s) => {
-        // selection survives refreshes, minus ids that no longer exist
-        let selection = s.selection
-        if (selection?.kind === 'nodes') {
-          const present = new Set(graph.nodes.map((n) => n.id))
-          const ids = selection.ids.filter((id) => present.has(id))
-          if (ids.length !== selection.ids.length) {
-            selection = ids.length
-              ? { kind: 'nodes', ids, anchor: ids.includes(selection.anchor) ? selection.anchor : ids[ids.length - 1] }
-              : null
-          }
-        }
-        // prune collapse state to nodes that still ARE containers: classes
-        // (class-of sources) or areas and warps with members (member targets).
-        // This must name the same containers GraphView does, or a collapse the
-        // canvas honours is thrown away on the next refresh.
-        let collapsedContainerIds = s.collapsedContainerIds
-        if (collapsedContainerIds.length) {
-          const areas = new Set(graph.nodes.filter((n) => n.type === 'area' || n.type === 'warp').map((n) => n.id))
-          const containers = new Set<string>()
-          for (const e of graph.edges) {
-            for (const r of edgeRelationships(e)) {
-              if (r.type === 'class-of') containers.add(r.sourceId)
-              else if (r.type === 'member' && areas.has(r.targetId)) containers.add(r.targetId)
+  refreshGraph: () => {
+    if (graphInFlight) {
+      graphAgain = true
+      return graphInFlight
+    }
+    const loadOnce = async (): Promise<void> => {
+      const { projectId } = get()
+      if (!projectId) return
+      try {
+        const graph = await rpc<GraphPayload>('graph.get', { projectId })
+        // a slow answer for the project we just left must not paint this one
+        if (get().projectId !== projectId) return
+        set((s) => {
+          // selection survives refreshes, minus ids that no longer exist
+          let selection = s.selection
+          if (selection?.kind === 'nodes') {
+            const present = new Set(graph.nodes.map((n) => n.id))
+            const ids = selection.ids.filter((id) => present.has(id))
+            if (ids.length !== selection.ids.length) {
+              selection = ids.length
+                ? { kind: 'nodes', ids, anchor: ids.includes(selection.anchor) ? selection.anchor : ids[ids.length - 1] }
+                : null
             }
           }
-          const pruned = collapsedContainerIds.filter((id) => containers.has(id))
-          if (pruned.length !== collapsedContainerIds.length) {
-            collapsedContainerIds = pruned
-            saveCollapsed(projectId, pruned)
+          // prune collapse state to nodes that still ARE containers: classes
+          // (class-of sources) or areas and warps with members (member targets).
+          // This must name the same containers GraphView does, or a collapse the
+          // canvas honours is thrown away on the next refresh.
+          let collapsedContainerIds = s.collapsedContainerIds
+          if (collapsedContainerIds.length) {
+            const areas = new Set(graph.nodes.filter((n) => n.type === 'area' || n.type === 'warp').map((n) => n.id))
+            const containers = new Set<string>()
+            for (const e of graph.edges) {
+              for (const r of edgeRelationships(e)) {
+                if (r.type === 'class-of') containers.add(r.sourceId)
+                else if (r.type === 'member' && areas.has(r.targetId)) containers.add(r.targetId)
+              }
+            }
+            const pruned = collapsedContainerIds.filter((id) => containers.has(id))
+            if (pruned.length !== collapsedContainerIds.length) {
+              collapsedContainerIds = pruned
+              saveCollapsed(projectId, pruned)
+            }
           }
-        }
-        return { graph, graphVersion: s.graphVersion + 1, selection, collapsedContainerIds }
-      })
-    } catch {
-      /* project may have just been deleted */
+          return { graph, graphVersion: s.graphVersion + 1, selection, collapsedContainerIds }
+        })
+      } catch {
+        /* project may have just been deleted */
+      }
     }
+    graphInFlight = (async () => {
+      try {
+        do {
+          graphAgain = false
+          await loadOnce()
+        } while (graphAgain)
+      } finally {
+        graphInFlight = null
+      }
+    })()
+    return graphInFlight
   },
 
   refreshGraphSoon: () => {
     if (graphRefreshTimer) return
+    const wait = Math.max(80, GRAPH_REFRESH_MIN_INTERVAL_MS - (Date.now() - lastGraphRefreshAt))
     graphRefreshTimer = setTimeout(() => {
       graphRefreshTimer = null
+      lastGraphRefreshAt = Date.now()
       get().refreshGraph()
       if (get().view === 'warps') get().refreshWarps()
       if (get().view === 'backlog') get().refreshBacklog()
-    }, 80)
+    }, wait)
   },
 
   refreshBacklog: async () => {
@@ -708,7 +747,12 @@ export const useStore = create<OzmoState>((set, get) => ({
   // and the canvas carries on with the local derivation.
   refreshFog: async () => {
     const { projectId, fogLoading } = get()
-    if (!projectId || fogLoading) return
+    if (!projectId) return
+    if (fogLoading) {
+      fogAgain = true // read once more when this one lands, rather than drop the change
+      return
+    }
+    fogAgain = false
     set({ fogLoading: true })
     try {
       const fog = await rpc<FogReport>('fog.get', { projectId })
@@ -724,15 +768,19 @@ export const useStore = create<OzmoState>((set, get) => ({
       // a missing endpoint drops it, because there is nothing to be stale about
       set({ fogLoading: false, fogUnavailable: missing, fog: missing ? null : get().fog })
       if (!missing) get().toast(`fog report failed: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      if (fogAgain) get().refreshFogSoon()
     }
   },
 
   refreshFogSoon: () => {
     if (fogRefreshTimer) return
+    const wait = Math.max(200, FOG_REFRESH_MIN_INTERVAL_MS - (Date.now() - lastFogRefreshAt))
     fogRefreshTimer = setTimeout(() => {
       fogRefreshTimer = null
+      lastFogRefreshAt = Date.now()
       if (get().lens) void get().refreshFog()
-    }, 200)
+    }, wait)
   },
 
   setLens: (id) =>

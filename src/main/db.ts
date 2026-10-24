@@ -134,6 +134,11 @@ function migrate(): void {
       created_at INTEGER NOT NULL, created_by TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_edges_project ON edges(project_id);
+    -- By endpoint. Every "connections of this node" read looks up this way, and
+    -- both columns are ON DELETE CASCADE children of nodes, so without these a
+    -- single node delete scanned the whole edges table twice.
+    CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
     CREATE TABLE IF NOT EXISTS edge_relationships (
       edge_id TEXT NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
       type TEXT NOT NULL,
@@ -143,6 +148,10 @@ function migrate(): void {
       created_by TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (edge_id, type)
     );
+    -- reviewHeldIds walks 'member' inward one node at a time; unindexed, each
+    -- step was a full scan, and it dominated the fog report
+    CREATE INDEX IF NOT EXISTS idx_edge_rel_target ON edge_relationships(target_id, type);
+    CREATE INDEX IF NOT EXISTS idx_edge_rel_source ON edge_relationships(source_id, type);
     CREATE TABLE IF NOT EXISTS annotations (
       id TEXT PRIMARY KEY,
       parent_kind TEXT NOT NULL CHECK (parent_kind IN ('node','edge')),
@@ -842,12 +851,13 @@ function scheduleSave(): void {
 }
 
 /**
- * Make everything written so far durable.
+ * Start making everything written so far durable — the debounced path.
  *
- * On sql.js this re-serialises the WHOLE file (temp + rename) and re-asserts
- * foreign_keys, because export() closed and reopened the connection underneath
- * us — miss that and cascades die from the first debounced save onward, which
- * is the original orphan-rows bug. Both of those live in the sql.js driver now.
+ * On sql.js this snapshots the WHOLE database (and re-asserts foreign_keys,
+ * because export() closed and reopened the connection underneath us — miss
+ * that and cascades die from the first debounced save onward, which is the
+ * original orphan-rows bug) and writes it in the background, so a slow disk
+ * never stalls a request. Both of those live in the sql.js driver.
  *
  * On the native driver the rows were already durable when the statement
  * returned; this only checkpoints the WAL back into the main file.
@@ -858,12 +868,15 @@ export function persistNow(): void {
   driver.persist()
 }
 
+/** Synchronous: on return the file on disk is current. Shutdown and switching use this. */
 export function flushDb(): void {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (dirty) persistNow()
+  if (!driver || !dbFile) return
+  driver.flush(dirty)
+  dirty = false
 }
 
 /** Final flush + release. The file left behind must open under EITHER driver. */

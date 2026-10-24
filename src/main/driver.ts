@@ -29,16 +29,24 @@ export interface SqlDriver {
   all<T = Record<string, unknown>>(sql: string, params?: readonly unknown[]): T[]
   get<T = Record<string, unknown>>(sql: string, params?: readonly unknown[]): T | undefined
   /**
-   * Make everything written so far durable on disk.
+   * Start making everything written so far durable on disk. May finish after
+   * it returns — the debounced save path, which must not block requests.
    *
    * This is the whole reason the seam exists. For `sql.js` it is a whole-file
-   * re-serialisation costing O(database size) — 21ms at 12MB, 5.9s at 663MB —
-   * regardless of how few rows changed. For the native driver the data is
-   * ALREADY durable when the statement returned, so this is only a WAL
-   * checkpoint that keeps the main file current (and therefore readable by
-   * sql.js, which matters while both drivers are in play).
+   * re-serialisation costing O(database size) regardless of how few rows
+   * changed; the snapshot is taken now and the bytes are written in the
+   * background. For the native driver the data is ALREADY durable when the
+   * statement returned, so this is only a WAL checkpoint that keeps the main
+   * file current (and therefore readable by sql.js, which matters while both
+   * drivers are in play).
    */
   persist(): void
+  /**
+   * Synchronous: when this returns, the file on disk holds everything written
+   * so far. Shutdown and board switching use this. `dirty` says whether there
+   * are writes the driver has not yet been asked to persist.
+   */
+  flush(dirty: boolean): void
   /** Flush and release the file. Must leave the file readable by the OTHER driver. */
   close(): void
 }

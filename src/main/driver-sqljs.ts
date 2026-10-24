@@ -65,6 +65,12 @@ function refuseIfWalPending(file: string): void {
 export async function openSqlJsDriver(file: string): Promise<SqlDriver> {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   refuseIfWalPending(file)
+  // a temp file left by a killed process is a half-written copy, never the truth:
+  // the real file only ever changes by rename
+  const base = path.basename(file)
+  for (const f of fs.readdirSync(path.dirname(file))) {
+    if (f.startsWith(base + '.tmp')) fs.rmSync(path.join(path.dirname(file), f), { force: true })
+  }
   const wasmDir = path.dirname(require.resolve('sql.js'))
   const SQL = await initSqlJs({ locateFile: (f: string) => path.join(wasmDir, f) })
   const db: Database = fs.existsSync(file)
@@ -76,26 +82,127 @@ export async function openSqlJsDriver(file: string): Promise<SqlDriver> {
   }
   enableForeignKeys() // immediately after construction, before any other statement
 
-  const all = <T>(sql: string, params: readonly unknown[] = []): T[] => {
+  /**
+   * Column names are read ONCE per statement, not per row: getAsObject() asks
+   * the WASM side for every name on every row, which on a graph read of ~20k
+   * rows was the single largest self-time entry in the profile. Same object
+   * shape (a repeated name still resolves to the last column), ~1.9× faster.
+   */
+  const readRows = <T>(sql: string, params: readonly unknown[], limit: number): T[] => {
     const stmt = db.prepare(sql)
     try {
       stmt.bind(params as never[])
+      const cols = stmt.getColumnNames()
       const rows: T[] = []
-      while (stmt.step()) rows.push(stmt.getAsObject() as T)
+      while (rows.length < limit && stmt.step()) {
+        const values = stmt.get()
+        const row: Record<string, unknown> = {}
+        for (let i = 0; i < cols.length; i++) row[cols[i]] = values[i]
+        rows.push(row as T)
+      }
       return rows
     } finally {
       stmt.free()
     }
   }
 
-  /** O(database size), every time, however little changed. */
-  const persist = (): void => {
+  /**
+   * SAVING WITHOUT STOPPING THE WORLD.
+   *
+   * export() is cheap (~20ms at 37MB). Writing those bytes is not: on a Docker
+   * Desktop bind mount (9p/drvfs) one 37MB write measured 0.5–2s, sometimes
+   * far worse, and a writeFileSync there held every request hostage for the
+   * whole of it. So the snapshot is taken synchronously — it is the consistent
+   * point — and the bytes go to disk off the event loop.
+   *
+   * Every snapshot carries a generation. Only a NEWER generation may replace
+   * the file, and the rename itself stays synchronous so that check and the
+   * rename cannot be split by a flush landing in between. At most one write is
+   * in flight; snapshots taken meanwhile collapse into the latest one.
+   *
+   * flush() is the synchronous path for shutdown and board switching: it
+   * writes a fresh snapshot and wins over anything still in flight, which then
+   * discards itself.
+   *
+   * Every temp file is named for this driver instance and its generation. The
+   * desktop app can close a board and reopen the same file while a background
+   * write is still out; with one shared temp name the two would write into the
+   * same file, and whichever renamed last could put torn bytes in place. Once
+   * closed, a driver never renames again.
+   */
+  let exportedGen = 0
+  let committedGen = 0
+  let writing = false
+  let closed = false
+  let queued: { gen: number; data: Buffer } | null = null
+  const instance = `${process.pid}-${Date.now().toString(36)}`
+  const tmpFor = (gen: number): string => `${file}.tmp-${instance}-${gen}`
+  // the background loop is a floating promise: anything thrown out of it would
+  // be an unhandled rejection, which ends the process on Node 20
+  const discard = (tmp: string): void => {
+    try {
+      fs.rmSync(tmp, { force: true })
+    } catch {
+      /* swept at the next open */
+    }
+  }
+
+  const snapshot = (): { gen: number; data: Buffer } => {
     const data = Buffer.from(db.export())
     enableForeignKeys() // export() just reset the connection — see the note above
-    const tmp = file + '.tmp'
-    fs.writeFileSync(tmp, data)
-    fs.renameSync(tmp, file)
+    return { gen: ++exportedGen, data }
   }
+
+  const drain = async (): Promise<void> => {
+    if (writing) return
+    writing = true
+    let failures = 0
+    try {
+      while (queued) {
+        const s = queued
+        queued = null
+        if (closed || s.gen <= committedGen) continue
+        const tmp = tmpFor(s.gen)
+        try {
+          await fs.promises.writeFile(tmp, s.data)
+          if (!closed && s.gen > committedGen) {
+            fs.renameSync(tmp, file)
+            committedGen = s.gen
+          } else {
+            discard(tmp) // a flush overtook us, or we were closed — ours is older
+          }
+          failures = 0
+        } catch (e) {
+          discard(tmp)
+          failures++
+          console.error(`[ozmo] background save failed (attempt ${failures}) — retrying`, e)
+          if (!queued) queued = s // nothing newer to write: try this one again
+          await new Promise((r) => setTimeout(r, Math.min(30_000, 500 * 2 ** failures)))
+        }
+      }
+    } finally {
+      writing = false
+    }
+  }
+
+  /** Snapshot now, write in the background. The file on disk trails by one write at most. */
+  const persist = (): void => {
+    queued = snapshot()
+    void drain()
+  }
+
+  /** Synchronous and final: when this returns, the file on disk is the database in memory. */
+  const flush = (dirty: boolean): void => {
+    if (closed || (!dirty && committedGen === exportedGen)) return
+    const s = snapshot()
+    queued = null
+    const tmp = tmpFor(s.gen)
+    fs.writeFileSync(tmp, s.data)
+    fs.renameSync(tmp, file)
+    committedGen = s.gen
+  }
+
+  const all = <T>(sql: string, params: readonly unknown[] = []): T[] => readRows<T>(sql, params, Infinity)
 
   return {
     name: 'sqljs',
@@ -117,13 +224,16 @@ export async function openSqlJsDriver(file: string): Promise<SqlDriver> {
     all,
 
     get<T>(sql: string, params: readonly unknown[] = []): T | undefined {
-      return all<T>(sql, params)[0]
+      return readRows<T>(sql, params, 1)[0]
     },
 
     persist,
 
+    flush,
+
     close(): void {
-      persist()
+      flush(true)
+      closed = true
       db.close()
     }
   }

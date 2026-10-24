@@ -235,6 +235,8 @@ ok('cleared progress falls back to stage', gNode(warp2.json.id)?.progressCompute
 // search + activity
 const found = await req('GET', `/api/search?projectId=${pid}&q=100ms`)
 ok('content search', found.json.contentMatches?.some((m) => m.nodeId === feat.json.id), JSON.stringify(found.json))
+const unscoped = await req('GET', '/api/search?q=100ms')
+ok('search without projectId is a 400 that says so, not a 500', unscoped.status === 400 && /projectId/.test(JSON.stringify(unscoped.json)), `${unscoped.status} ${JSON.stringify(unscoped.json)}`)
 const act = await req('GET', `/api/projects/${pid}/activity`)
 ok('activity log', act.json.length > 10 && act.json.every((a) => a.actor))
 ok('actor attribution', act.json.some((a) => a.actor === 'smoke-agent'))
@@ -2825,6 +2827,12 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
     ok(`cross-project: foreign endpoint rides along in ${label}'s payload`, !!f)
     ok(`cross-project: foreign node in ${label} keeps its own projectId`, !!f && f.projectId !== id)
   }
+
+  // impact walks depends inward, so B's node reaches A's requirer — a node its
+  // own project's graph does not hold. That lookup used to throw on `.title`.
+  const xImp = await req('GET', `/api/nodes/${xbN.json.id}/impact`)
+  ok('cross-project: impact across the boundary answers', xImp.status === 200, JSON.stringify(xImp.json).slice(0, 160))
+  ok('cross-project: impact names the foreign requirer', JSON.stringify(xImp.json).includes(xaN.json.id))
 
   // SCHEDULING must not cross — a foreign member would feed a roll-up with work
   // the project cannot finish, and addresses aims a warp at a goal it owns

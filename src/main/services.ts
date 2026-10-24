@@ -3315,8 +3315,10 @@ export interface ImpactPayload {
  */
 export function getImpact(p: { id: string }): ImpactPayload {
   const r = nodeRow(p.id)
-  const { nodes, edges, resolved } = graphInternal(r.project_id)
-  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const { nodes, edges, resolved, foreignNodes } = graphInternal(r.project_id)
+  // foreign endpoints too: a cross-project blocks/depends is real impact, and
+  // without them the walk reached ids it could not look up and threw on .title
+  const byId = new Map([...nodes, ...foreignNodes].map((n) => [n.id, n]))
   const start = byId.get(p.id)!
   const push = (map: Map<string, string[]>, key: string, val: string): void => {
     const list = map.get(key) ?? []
@@ -3792,6 +3794,9 @@ export function search(p: { projectId: string; q: string }): {
   nodes: SpecNode[]
   contentMatches: { nodeId: string; title: string; type: NodeType; snippet: string }[]
 } {
+  // without it the query below bound `undefined` and sql.js answered with a 500
+  // ("tried to bind a value of an unknown type") — agents hit this in the logs
+  need(typeof p.projectId === 'string' && p.projectId, 'projectId is required — search is per project')
   need(p.q?.trim(), 'q is required')
   const q = p.q.trim().toLowerCase()
   const nodes = listNodes({ projectId: p.projectId }).filter(

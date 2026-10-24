@@ -60,6 +60,10 @@ export function openNativeDriver(file: string): SqlDriver {
   // last few committed transactions on an OS-level crash (not on app crash),
   // which is the same exposure the 400ms debounce already accepted.
   if (journal !== 'delete') db.pragma('synchronous = NORMAL')
+  // SQLite's default page cache is ~2MB; a served board is tens of MB and every
+  // graph read touches most of it. 64MB keeps a board of today's size resident,
+  // which is what sql.js got for free by holding the whole file in memory.
+  db.pragma('cache_size = -65536')
 
   /**
    * better-sqlite3 compiles a statement once; reusing it is most of the win on
@@ -77,12 +81,17 @@ export function openNativeDriver(file: string): SqlDriver {
    */
   process.once('exit', () => closeCleanly())
 
+  // Bounded: an `IN (?,?,…)` query is new SQL text for every list length, so an
+  // unbounded cache grows for as long as the process lives. Map order is
+  // insertion order, so the first key is the oldest.
+  const CACHE_MAX = 256
   const cache = new Map<string, Database.Statement>()
   const TRANSIENT = /^\s*(begin|commit|rollback|savepoint|release|pragma)\b/i
   const prep = (sql: string): Database.Statement => {
     let s = cache.get(sql)
     if (!s) {
       s = db.prepare(sql)
+      if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!)
       cache.set(sql, s)
     }
     return s
@@ -126,6 +135,11 @@ export function openNativeDriver(file: string): SqlDriver {
 
     /** Already durable. Fold the WAL back so the main file stays current. */
     persist(): void {
+      if (journal !== 'delete') db.pragma('wal_checkpoint(PASSIVE)')
+    },
+
+    // rows are durable when their statement returns; this only folds the WAL back
+    flush(): void {
       if (journal !== 'delete') db.pragma('wal_checkpoint(PASSIVE)')
     },
 
