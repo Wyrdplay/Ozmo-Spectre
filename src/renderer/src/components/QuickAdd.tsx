@@ -78,6 +78,9 @@ export function QuickAdd(): React.JSX.Element {
         : []
       const node = await rpc<SpecNode>('nodes.create', {
         projectId,
+        // a node is born where you are standing — made inside a sub-graph, it
+        // must not appear at the top level and vanish from the canvas
+        graphId: useStore.getState().graphRoot,
         type,
         title: title.trim(),
         tags,

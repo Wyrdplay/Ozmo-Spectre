@@ -38,10 +38,22 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'pan', group: 'navigation', gesture: 'drag the background', what: 'pan the canvas' },
   { id: 'zoom', group: 'navigation', gesture: 'wheel', what: 'zoom' },
   { id: 'palette', group: 'navigation', keys: 'ctrl+k', what: 'jump to anything — the command palette' },
+  // the hierarchy: doors (projects, sub-graphs) are gone through, never dug into
+  { id: 'enter-door', group: 'navigation', gesture: 'double-click a door', what: 'go into a project or sub-graph (its node wears a ▣ stack)' },
+  { id: 'follow-portal', group: 'navigation', gesture: 'double-click a portal', what: 'go to where a ghosted node really lives' },
+  { id: 'descend-enter', group: 'navigation', keys: 'enter', what: 'go into the selected door · go to the selected portal' },
+  { id: 'descend', group: 'navigation', keys: 'ctrl+arrowdown', what: 'go into the selected door' },
+  { id: 'ascend', group: 'navigation', keys: 'ctrl+arrowup', what: 'up one level — back out through the door you came in by' },
+  { id: 'back', group: 'navigation', keys: 'alt+arrowleft', what: 'back — retrace the last move through the hierarchy' },
+  { id: 'forward', group: 'navigation', keys: 'alt+arrowright', what: 'forward' },
+  { id: 'back-alt', group: 'navigation', keys: 'ctrl+[', what: 'back (the macOS chord)' },
+  { id: 'forward-alt', group: 'navigation', keys: 'ctrl+]', what: 'forward (the macOS chord)' },
   { id: 'find', group: 'navigation', keys: 'ctrl+f', what: 'find on the canvas (enter / shift+enter cycles the matches)' },
   { id: 'context-menu', group: 'navigation', gesture: 'right-click', what: 'the node menu — file feedback, convert, links, delete' },
   // editing
-  { id: 'new-node-here', group: 'editing', gesture: 'double-click', what: 'new node where you clicked' },
+  { id: 'new-node-here', group: 'editing', gesture: 'double-click empty canvas', what: 'new node where you clicked, on this level' },
+  { id: 'move-into', group: 'editing', gesture: 'drag onto a door', what: 'move the node (or selection) inside it — the toast offers Undo' },
+  { id: 'move-up', group: 'editing', gesture: 'drag onto the path bar', what: 'move it up into that level' },
   { id: 'quick-add', group: 'editing', keys: 'ctrl+n', what: 'new node beside the selection' },
   { id: 'move-pin', group: 'editing', gesture: 'drag a node', what: 'move it (and pin it, when ⌖ pin is on)' },
   { id: 'pin-toggle', group: 'editing', keys: 'ctrl+p', what: 'pin or unpin the selection where it sits' },
@@ -62,9 +74,10 @@ export function shortcut(id: string): Shortcut | undefined {
 /** The chord as it should read in the UI — 'ctrl' renders as ⌘ on a Mac. */
 export function chordLabel(keys: string): string {
   const mac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || '')
+  const arrows: Record<string, string> = { arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→' }
   return keys
     .split('+')
-    .map((k) => (k === 'ctrl' ? (mac ? '⌘' : 'ctrl') : k))
+    .map((k) => (k === 'ctrl' ? (mac ? '⌘' : 'ctrl') : k === 'alt' && mac ? '⌥' : arrows[k] ?? k))
     .join('+')
 }
 

@@ -1,0 +1,60 @@
+/* The path bar — where you are in the hierarchy, above every view that follows the board. */
+
+.content-body { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
+
+.pathbar {
+  display: flex; align-items: center; gap: 1px; flex-wrap: nowrap;
+  min-height: 34px; padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+  overflow-x: auto; overflow-y: visible;
+  position: relative; z-index: 30;
+}
+
+.pathbar-seg {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--text-dim); padding: 3px 7px; cursor: pointer;
+  white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  font: inherit;
+}
+.pathbar-seg:hover:not(.here) { background: var(--bg-hover); color: var(--text); }
+.pathbar-seg.here { color: var(--text); font-weight: 600; cursor: default; }
+.pathbar-seg.project .pathbar-mark { color: var(--text-faint); font-size: 11px; }
+.pathbar-seg.here.project .pathbar-mark { color: var(--accent); }
+/* a drag from the canvas over a segment: dropping moves the nodes up into it */
+.pathbar-seg.drop-hot { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+
+.pathbar-sep-wrap { position: relative; display: inline-flex; }
+.pathbar-sep {
+  background: none; border: none; border-radius: 5px; color: var(--text-dim);
+  font-size: 11px; padding: 4px 6px; cursor: pointer; line-height: 1;
+}
+.pathbar-sep:hover:not(:disabled), .pathbar-sep.open { background: var(--bg-hover); color: var(--text); }
+.pathbar-sep:disabled { opacity: 0.35; cursor: default; }
+
+.pathbar-menu {
+  position: fixed; z-index: 60; margin-top: 26px; min-width: 200px; max-height: 60vh; overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow); padding: 4px; display: flex; flex-direction: column;
+}
+.pathbar-menu button {
+  text-align: left; background: none; border: none; color: var(--text); font-size: 12.5px;
+  padding: 6px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 360px;
+}
+.pathbar-menu button:hover { background: var(--bg-hover); }
+.pathbar-menu button.current { color: var(--accent); }
+
+.pathbar-fold { display: inline-flex; }
+
+.pathbar-note { margin-left: auto; padding-left: 12px; color: var(--text-faint); font-size: 11.5px; white-space: nowrap; }
+.pathbar-note button {
+  background: none; border: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0;
+}
+.pathbar-note button:hover { text-decoration: underline; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pathbar-seg, .pathbar-sep { transition: background 120ms, color 120ms; }
+}

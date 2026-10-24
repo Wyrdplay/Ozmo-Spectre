@@ -282,6 +282,8 @@ function GraduateModal({ detail, onClose }: { detail: NodeDetail; onClose: () =>
     try {
       created = await rpc<SpecNode>('nodes.create', {
         projectId: detail.projectId,
+        // what a node graduates into lives beside it
+        graphId: detail.graphId ?? null,
         type,
         title: title.trim(),
         content,
@@ -460,9 +462,23 @@ function ConvertModal({ detail, onClose }: { detail: NodeDetail; onClose: () => 
  */
 function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null {
   const graphNodes = useStore((s) => s.graph.nodes)
-  const selectNode = useStore((s) => s.selectNode)
-  const setFocusNode = useStore((s) => s.setFocusNode)
   const projects = useStore((s) => s.projects)
+  const projectId = useStore((s) => s.projectId)
+  const graphRoot = useStore((s) => s.graphRoot)
+  const go = useStore((s) => s.go)
+  // shown somewhere it does not live (a portal, or a node from another project):
+  // the way to where it does
+  const elsewhere = detail.projectId !== projectId || (detail.graphId ?? null) !== graphRoot
+  const where = projects.find((p) => p.id === detail.projectId)?.name
+  const goHome = elsewhere ? (
+    <button
+      className="chip home-chip link"
+      title="This node lives on another level — go there, with it in view"
+      onClick={() => void go({ projectId: detail.projectId, graphId: detail.graphId ?? null, nodeId: detail.id })}
+    >
+      go to where it lives ›
+    </button>
+  ) : null
   if (detail.type === 'project') {
     const count = projects.find((p) => p.id === detail.id)?.nodeCount
     return (
@@ -473,7 +489,7 @@ function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null
   }
   const inside = detail.bodyKind === 'graph' ? graphNodes.filter((n) => n.graphId === detail.id).length : 0
   const home = detail.graphId ? graphNodes.find((n) => n.id === detail.graphId) : null
-  if (detail.bodyKind !== 'graph' && !home) return null
+  if (detail.bodyKind !== 'graph' && !home && !goHome) return null
   return (
     <>
       {detail.bodyKind === 'graph' && (
@@ -481,15 +497,13 @@ function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null
           ▣ sub-graph · {inside} inside
         </span>
       )}
-      {home && (
-        <button
-          className="chip home-chip link"
-          title={`Lives inside the sub-graph "${home.title}" — open it`}
-          onClick={() => { selectNode(home.id); setFocusNode(home.id) }}
-        >
+      {home && !goHome && (
+        <span className="chip home-chip" title={`Lives inside the sub-graph "${home.title}"`}>
           in {home.title}
-        </button>
+        </span>
       )}
+      {goHome && (detail.projectId !== projectId && where ? <span className="chip home-chip">in {where}{home ? ` ▸ ${home.title}` : ''}</span> : home ? <span className="chip home-chip">in {home.title}</span> : null)}
+      {goHome}
     </>
   )
 }
@@ -537,6 +551,12 @@ function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { messa
   }
   return (
     <>
+      {detail.bodyKind === 'graph' && (
+        <button className="btn sm" title="Go inside (or double-click its node, or press Enter)"
+          onClick={() => void useStore.getState().descend(detail.id)}>
+          open ›
+        </button>
+      )}
       {detail.bodyKind !== 'graph' && canHold && (
         <button className="btn sm ghost" disabled={!!lock}
           title={locked ?? 'Give this node a graph of its own. Nothing moves in — choose what does with "move into…"'}

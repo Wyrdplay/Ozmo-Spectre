@@ -8,6 +8,7 @@ import {
 } from '@shared/types'
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
+import { formatAddress, isDoor, parseAddress, setUnfolded, type Address } from './lib/hierarchy'
 import { RpcError, rpc } from './api'
 import { host, type LinkStatus } from './host'
 
@@ -60,6 +61,28 @@ let lastFogRefreshAt = 0
 let graphInFlight: Promise<void> | null = null
 let graphAgain = false
 let fogAgain = false
+
+// ── the address bar ───────────────────────────────────────────────────────
+// Every move through the hierarchy is a history entry (lib/hierarchy.ts has the
+// format), so back and forward — the browser's own, Alt+←/→, the mouse's side
+// buttons — retrace descend, ascend and side-steps alike.
+
+function writeAddress(a: Address, push: boolean): void {
+  const url = window.location.pathname + window.location.search + formatAddress(a)
+  if (url === window.location.pathname + window.location.search + window.location.hash) return
+  if (push) window.history.pushState(null, '', url)
+  else window.history.replaceState(null, '', url)
+}
+
+let historyListening = false
+function listenForHistory(): void {
+  if (historyListening) return
+  historyListening = true
+  window.addEventListener('popstate', () => {
+    const a = parseAddress(window.location.hash)
+    if (a) void useStore.getState().go(a, { push: false })
+  })
+}
 
 // canvas container-collapse is per-machine UI state, persisted per project.
 // A CONTAINER is a class (node with class-of instances) or an area (member
@@ -337,8 +360,24 @@ interface OzmoState {
    *  row) — they stay in the receded layer instead of leaving the canvas. */
   hiddenFogClasses: FogClass[]
 
+  /** the sub-graph the canvas stands in — null = the project's top level. The
+   *  canvas shows one level (lib/hierarchy.ts); every other view still reads
+   *  the whole project. */
+  graphRoot: string | null
+  /** a door to pulse once on the canvas — set by ascend, consumed by the canvas */
+  navPulseId: string | null
+
   boot: () => Promise<void>
-  setProject: (id: string) => Promise<void>
+  setProject: (id: string, graphId?: string | null, history?: 'push' | 'replace' | 'none') => Promise<void>
+  /** THE navigation verb: stand somewhere (project + level), optionally with a
+   *  node focused and selected. Pushes a history entry unless `push` is false
+   *  (back/forward replaying one). */
+  go: (to: Address, opts?: { push?: boolean; select?: string | null; pulse?: string | null }) => Promise<void>
+  /** through a door: a sub-graph, or a project */
+  descend: (doorId: string) => Promise<void>
+  /** up one level: the enclosing sub-graph, else the enclosing project. The door
+   *  you came through is selected and pulsed. False when already at a root. */
+  ascend: () => Promise<boolean>
   setView: (v: View) => void
   refreshProjects: () => Promise<void>
   refreshGraph: () => Promise<void>
@@ -469,6 +508,8 @@ export const useStore = create<OzmoState>((set, get) => ({
   view: 'graph',
   graph: { nodes: [], edges: [] },
   graphVersion: 0,
+  graphRoot: null,
+  navPulseId: null,
   backlog: [],
   warps: [],
   activity: [],
@@ -561,15 +602,25 @@ export const useStore = create<OzmoState>((set, get) => ({
         rpc<AppSettings>('settings.get'),
         rpc<Project[]>('projects.list')
       ])
+      // an address in the URL (a pasted link, a reload) wins over the last project used
+      const addr = parseAddress(window.location.hash)
+      const fromUrl = addr && projects.some((p) => p.id === addr.projectId) ? addr : null
       const savedProject = localStorage.getItem('ozmo.projectId')
-      const projectId = projects.find((p) => p.id === savedProject)?.id ?? projects[0]?.id ?? null
+      const projectId = fromUrl?.projectId ?? projects.find((p) => p.id === savedProject)?.id ?? projects[0]?.id ?? null
       // the address to SHOW and COPY is the one this client really uses: inside
       // a container the core only knows the port it bound, not the one published
       const reached = host().apiBase
       const shown: AppInfo = reached ? { ...info, apiBase: reached } : info
       set({ info: shown, settings, projects, projectId, booted: true, collapsedContainerIds: loadCollapsed(projectId) })
+      listenForHistory()
       if (projectId) {
         await Promise.all([get().refreshGraph(), get().refreshWarps()])
+        if (fromUrl) {
+          // the level and the node, once the graph that holds them has landed
+          await get().go(fromUrl, { push: false })
+        } else {
+          writeAddress({ projectId, graphId: null }, false)
+        }
       }
     } catch (e) {
       set({ booted: true })
@@ -603,9 +654,13 @@ export const useStore = create<OzmoState>((set, get) => ({
     }
   },
 
-  setProject: async (id) => {
+  setProject: async (id, graphId = null, history = 'push') => {
+    // switching project from anywhere (the picker, an agent's ui.focus) is a move
+    // through the hierarchy like any other: it gets a history entry
+    if (history !== 'none' && id !== get().projectId) writeAddress({ projectId: id, graphId }, history === 'push')
     localStorage.setItem('ozmo.projectId', id)
     set({
+      graphRoot: graphId,
       projectId: id, selection: null, selectionPositions: {}, backlog: [], warps: [], activity: [],
       openReviewIds: [], activeReviewId: null, focusNodeId: null, findQuery: null, hiddenFlags: [],
       // tags are project vocabulary — a filter on "canvas" means nothing in the next project
@@ -618,6 +673,61 @@ export const useStore = create<OzmoState>((set, get) => ({
     })
     await Promise.all([get().refreshGraph(), get().refreshWarps()])
     if (get().lens) void get().refreshFog()
+  },
+
+  go: async (to, opts = {}) => {
+    const push = opts.push ?? true
+    if (to.projectId !== get().projectId) {
+      if (!get().projects.some((p) => p.id === to.projectId)) return
+      await get().setProject(to.projectId, null, 'none')
+    }
+    const { graph } = get()
+    // a level that is not a door of this project (gone, demoted, never was) is its top level
+    const door = to.graphId ? graph.nodes.find((n) => n.id === to.graphId && n.projectId === to.projectId && n.type !== 'project' && isDoor(n)) : null
+    const graphId = door ? door.id : null
+    // a node to land on: it decides the level when the caller did not, because
+    // a node is only ever shown where it lives
+    const node = to.nodeId ? graph.nodes.find((n) => n.id === to.nodeId && n.projectId === to.projectId) : null
+    const level = node && !to.graphId ? node.graphId ?? null : graphId
+    // a new level starts with every group of portals folded
+    if (level !== get().graphRoot) setUnfolded([])
+    set({
+      graphRoot: level,
+      // a new level starts with nothing selected and nothing being found
+      ...(level !== get().graphRoot ? { selection: null, findQuery: null } : {}),
+      navPulseId: opts.pulse ?? null
+    })
+    // a node asked for is centred; a door selected on the way back up is not —
+    // that level's own remembered view is the point of coming back to it
+    if (node) {
+      get().selectNode(node.id)
+      set({ focusNodeId: node.id })
+    } else if (opts.select) {
+      get().selectNode(opts.select)
+    }
+    writeAddress({ projectId: to.projectId, graphId: level, nodeId: node?.id ?? null }, push)
+  },
+
+  descend: async (doorId) => {
+    const { graph, projectId } = get()
+    const door = graph.nodes.find((n) => n.id === doorId)
+    if (!door || !projectId || !isDoor(door) || door.portal) return
+    if (door.type === 'project') await get().go({ projectId: door.id, graphId: null })
+    else await get().go({ projectId: door.projectId, graphId: door.id })
+  },
+
+  ascend: async () => {
+    const { graph, graphRoot, projectId, projects } = get()
+    if (!projectId) return false
+    if (graphRoot) {
+      const here = graph.nodes.find((n) => n.id === graphRoot)
+      await get().go({ projectId, graphId: here?.graphId ?? null }, { select: graphRoot, pulse: graphRoot })
+      return true
+    }
+    const parent = projects.find((p) => p.id === projectId)?.parentId
+    if (!parent) return false
+    await get().go({ projectId: parent, graphId: null }, { select: projectId, pulse: projectId })
+    return true
   },
 
   setView: (v) => {
@@ -634,7 +744,7 @@ export const useStore = create<OzmoState>((set, get) => ({
     const { projectId } = get()
     if (projectId && !projects.find((p) => p.id === projectId)) {
       const next = projects[0]?.id ?? null
-      set({ projects, projectId: next, graph: { nodes: [], edges: [] }, selection: null })
+      set({ projects, projectId: next, graph: { nodes: [], edges: [] }, graphRoot: null, selection: null })
       if (next) await get().setProject(next)
     } else {
       set({ projects })
@@ -1104,6 +1214,7 @@ export const useStore = create<OzmoState>((set, get) => ({
         projects: [],
         projectId: null,
         graph: { nodes: [], edges: [] },
+        graphRoot: null,
         backlog: [],
         warps: [],
         activity: [],
@@ -1155,6 +1266,11 @@ export const useStore = create<OzmoState>((set, get) => ({
         }
         if (d.reviewId) s.openReview(d.reviewId)
         if (d.nodeId) {
+          // a node is shown where it lives: stand on its level first
+          const home = get().graph.nodes.find((n) => n.id === d.nodeId)
+          if (home && (home.graphId ?? null) !== get().graphRoot && home.projectId === get().projectId) {
+            void get().go({ projectId: home.projectId, graphId: home.graphId ?? null })
+          }
           get().selectNode(d.nodeId)
           set({
             focusNodeId: d.nodeId,

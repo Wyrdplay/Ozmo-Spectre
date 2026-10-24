@@ -31,6 +31,7 @@ import {
 } from './widgets'
 import { HelpPanel } from './HelpPanel'
 import { inTextField, matches } from '@/lib/shortcuts'
+import { canvasGraph, homePath, isDoor, isGroupGhost, setUnfolded, unfoldedGroups } from '@/lib/hierarchy'
 
 interface SimNode extends SimulationNodeDatum {
   id: string
@@ -185,8 +186,54 @@ function drawInnerGlyph(ctx: CanvasRenderingContext2D, inner: NodeInnerStyle, cx
 
 interface Transform { k: number; x: number; y: number }
 
+/**
+ * Seat every PORTAL on the rim around this level's own nodes, grouped by the
+ * level it really lives in — one sector of the rim per home, a gap between
+ * sectors — and pin it there. A portal's stored position belongs to ANOTHER
+ * level's map, so it means nothing here; the rim says "elsewhere, that way" and
+ * keeps the links into it from tangling through the middle. Pins are view
+ * state only: a portal is never dragged, so they are never written.
+ */
+function placePortals(nodes: SimNode[]): void {
+  const portals = nodes.filter((n) => n.data.portal)
+  if (!portals.length) return
+  const local = nodes.filter((n) => !n.data.portal)
+  const cx = local.length ? local.reduce((s, n) => s + (n.x ?? 0), 0) / local.length : 0
+  const cy = local.length ? local.reduce((s, n) => s + (n.y ?? 0), 0) / local.length : 0
+  const reach = local.reduce((m, n) => Math.max(m, Math.hypot((n.x ?? 0) - cx, (n.y ?? 0) - cy)), 0)
+  const R = Math.max(320, reach + 160)
+  const groups = new Map<string, SimNode[]>()
+  for (const p of portals) {
+    const key = `${p.data.projectId}|${p.data.graphId ?? ''}`
+    groups.set(key, [...(groups.get(key) ?? []), p])
+  }
+  const GAP = 0.8 // empty seats between two homes' sectors
+  const seats = portals.length + groups.size * GAP
+  let seat = 0
+  for (const key of [...groups.keys()].sort()) {
+    for (const p of groups.get(key)!.sort((a, b) => a.data.title.localeCompare(b.data.title))) {
+      const a = -Math.PI / 2 + (seat / seats) * Math.PI * 2
+      p.fx = p.x = cx + R * Math.cos(a)
+      p.fy = p.y = cy + R * Math.sin(a)
+      seat++
+    }
+    seat += GAP
+  }
+}
+
+/** The camera each level was left at, for this session: going back up lands you
+ *  on the view you left, not on a fresh fit. Keyed `project|sub-graph`. */
+const viewportMemory = new Map<string, Transform>()
+
+const reducedMotion = (): boolean =>
+  typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+
 export function GraphView(): React.JSX.Element {
-  const graph = useStore((s) => s.graph)
+  // ONE level of the hierarchy: what lives here, plus portals (lib/hierarchy.ts).
+  // Every read of the graph in this file goes through this — the store's own
+  // `graph` is the whole project, which is what the other views want.
+  const graph = useStore((s) => canvasGraph(s.graph, s.projectId, s.graphRoot, s.projects))
+  const graphRoot = useStore((s) => s.graphRoot)
   const graphVersion = useStore((s) => s.graphVersion)
   const projectId = useStore((s) => s.projectId)
   const selection = useStore((s) => s.selection)
@@ -259,7 +306,12 @@ export function GraphView(): React.JSX.Element {
   const lensTargetRef = useRef(0)
   const linkDragRef = useRef<{ sourceId: string; wx: number; wy: number } | null>(null)
   const topologyRef = useRef('')
+  /** the level (project|sub-graph) the camera was last fitted to */
   const fittedProjectRef = useRef<string | null>(null)
+  /** false only for the very first level shown — that one fits after the sim settles */
+  const arrivalRef = useRef(false)
+  /** enterDoor already remembered the view being left (before its dive) */
+  const leavingSavedRef = useRef(false)
   const selectionRef = useRef(selection)
   selectionRef.current = selection
   const filtersRef = useRef(typeFilters)
@@ -324,8 +376,11 @@ export function GraphView(): React.JSX.Element {
   // container holds it — `hidden` is rebuilt from every collapsed container on
   // each change, so expanding one never reveals what another still hides.
   const containerInfo = useMemo<ContainerInfo>(() => {
-    const areaIds = new Set(graph.nodes.filter((n) => n.type === 'area').map((n) => n.id))
-    const warpIds = new Set(graph.nodes.filter((n) => n.type === 'warp').map((n) => n.id))
+    // containers and their members are THIS level's: a portal is a pointer to
+    // another level, never a container here and never inside a hull here
+    const portals = new Set(graph.nodes.filter((n) => n.portal).map((n) => n.id))
+    const areaIds = new Set(graph.nodes.filter((n) => n.type === 'area' && !n.portal).map((n) => n.id))
+    const warpIds = new Set(graph.nodes.filter((n) => n.type === 'warp' && !n.portal).map((n) => n.id))
     const membersOf = new Map<string, string[]>()
     const areaMembers = new Map<string, string[]>()
     const push = (map: Map<string, string[]>, key: string, val: string): void => {
@@ -334,6 +389,7 @@ export function GraphView(): React.JSX.Element {
       map.set(key, list)
     }
     for (const e of graph.edges) {
+      if (portals.has(e.sourceId) || portals.has(e.targetId)) continue
       for (const r of edgeRelationships(e)) {
         if (r.type === 'class-of') push(membersOf, r.sourceId, r.targetId)
         else if (r.type === 'member' && areaIds.has(r.targetId)) {
@@ -389,6 +445,42 @@ export function GraphView(): React.JSX.Element {
   }, [graph.edges, graph.nodes, collapsedContainerIds])
   const containerInfoRef = useRef(containerInfo)
   containerInfoRef.current = containerInfo
+
+  // DOORS and PORTALS — what this level says about the levels around it: how
+  // much lives behind each door (a sub-graph's residents, a project's nodes),
+  // and where each portal really lives, as a path
+  const fullGraph = useStore((s) => s.graph)
+  const projects = useStore((s) => s.projects)
+  const doorInfo = useMemo(() => {
+    const counts = new Map<string, number>()
+    const paths = new Map<string, string>()
+    for (const n of graph.nodes) {
+      if (n.portal) {
+        const where = homePath(n, fullGraph.nodes, projects)
+        paths.set(n.id, n.aggregate ? `${n.aggregate} link${n.aggregate === 1 ? '' : 's'} · ${where}` : where)
+      }
+      else if (n.type === 'project') counts.set(n.id, projects.find((p) => p.id === n.id)?.nodeCount ?? 0)
+      else if (n.bodyKind === 'graph') counts.set(n.id, 0)
+    }
+    for (const n of fullGraph.nodes) {
+      if (n.graphId && n.type !== 'project' && counts.has(n.graphId)) counts.set(n.graphId, counts.get(n.graphId)! + 1)
+    }
+    return { counts, paths }
+  }, [graph.nodes, fullGraph.nodes, projects])
+  const doorInfoRef = useRef(doorInfo)
+  doorInfoRef.current = doorInfo
+  const doorLinksRef = useRef(graph.doorLinks)
+  doorLinksRef.current = graph.doorLinks
+  /** the door the drag would drop into, highlighted while it would */
+  const dropTargetRef = useRef<string | null>(null)
+  /** one pulse on the door you came back out of (ascend) */
+  const navPulseId = useStore((s) => s.navPulseId)
+  const pulseRef = useRef<{ id: string; at: number } | null>(null)
+  useEffect(() => {
+    if (!navPulseId) return
+    pulseRef.current = { id: navPulseId, at: performance.now() }
+    useStore.setState({ navPulseId: null })
+  }, [navPulseId])
   /** last sim positions of hidden members — expansion restores them in place */
   const hiddenPosRef = useRef(new Map<string, { x: number; y: number }>())
 
@@ -596,7 +688,10 @@ export function GraphView(): React.JSX.Element {
   const applyGraphMerge = useCallback((): void => {
     const sim = simRef.current
     if (!sim) return
-    const { graph, projectId } = useStore.getState()
+    const st = useStore.getState()
+    const { projectId, graphRoot } = st
+    const graph = canvasGraph(st.graph, projectId, graphRoot, st.projects)
+    const levelKey = `${projectId}|${graphRoot ?? ''}`
     const { hidden } = containerInfoRef.current
     // remember where members sat before they hide, so expansion restores them in place
     for (const n of nodesRef.current) {
@@ -625,6 +720,8 @@ export function GraphView(): React.JSX.Element {
           }
         }
         ex.data = g
+        // a portal keeps the rim seat placePortals gave it
+        if (g.portal) return ex
         if (g.pinned && g.x != null && dragRef.current?.node !== ex) {
           ex.fx = g.x
           ex.fy = g.y
@@ -655,16 +752,39 @@ export function GraphView(): React.JSX.Element {
     })
     linksRef.current = links
     sim.nodes(nodes)
-    ;(sim.force('link') as ReturnType<typeof forceLink<SimNode, SimLink>>).links(links)
+    // a door is pulled toward what links INTO it (DoorLinks) so it sits beside
+    // its neighbours — forces only: these are never drawn as, or hit as, edges
+    const live = new Set(nodes.map((n) => n.id))
+    const doorPulls: SimLink[] = graph.doorLinks
+      .filter((d) => live.has(d.fromId) && live.has(d.doorId))
+      .map((d) => ({ source: d.fromId, target: d.doorId, data: { id: `door:${d.fromId}|${d.doorId}`, relationships: [] } as unknown as SpecEdge }))
+    ;(sim.force('link') as ReturnType<typeof forceLink<SimNode, SimLink>>).links([...links, ...doorPulls])
 
     const topo = liveNodes.map((n) => n.id).sort().join(',') + '|' + liveEdges.map((e) => e.id).sort().join(',')
     if (topo !== topologyRef.current) {
       topologyRef.current = topo
-      sim.alpha(fittedProjectRef.current === projectId ? 0.35 : 0.9).restart()
+      placePortals(nodes)
+      sim.alpha(fittedProjectRef.current === levelKey ? 0.35 : 0.9).restart()
     }
-    if (fittedProjectRef.current !== projectId && graph.nodes.length) {
-      fittedProjectRef.current = projectId
-      setTimeout(() => fitView(), 650)
+    // ARRIVING on a level: the view you left it at, if you have been here
+    // before; otherwise grow out of the door you came through into a fit
+    if (fittedProjectRef.current !== levelKey && graph.nodes.length) {
+      if (fittedProjectRef.current && !leavingSavedRef.current) viewportMemory.set(fittedProjectRef.current, { ...transformRef.current })
+      leavingSavedRef.current = false
+      fittedProjectRef.current = levelKey
+      const saved = viewportMemory.get(levelKey)
+      const canvas = canvasRef.current
+      if (saved) {
+        targetTransformRef.current = { ...saved }
+      } else if (arrivalRef.current && canvas && !reducedMotion()) {
+        // start small, centred, and let the fit ease it open
+        const t = transformRef.current
+        transformRef.current = { k: t.k * 0.35, x: canvas.clientWidth / 2 * 0.65 + t.x * 0.35, y: canvas.clientHeight / 2 * 0.65 + t.y * 0.35 }
+        setTimeout(() => fitView(), 140)
+      } else {
+        setTimeout(() => fitView(), arrivalRef.current ? 60 : 650)
+      }
+      arrivalRef.current = true
     }
   }, [fitView])
 
@@ -678,7 +798,7 @@ export function GraphView(): React.JSX.Element {
       return
     }
     applyGraphMerge()
-  }, [graphVersion, projectId, collapsedContainerIds, applyGraphMerge])
+  }, [graphVersion, projectId, graphRoot, collapsedContainerIds, applyGraphMerge])
 
   /** record a drag-end drop so merges hold this pin until its PATCH round-trips */
   const guardDrop = (n: SimNode): void => {
@@ -1272,6 +1392,41 @@ export function GraphView(): React.JSX.Element {
         ctx.globalAlpha = 1
       }
 
+      // DOOR LINKS: connections into things that live behind a door on this
+      // level, gathered onto the door — one line per (node, door), thicker the
+      // more it stands for, its count at the middle. An approximation like the
+      // collapse reroutes above: no arrowheads, never selectable.
+      const dls = doorLinksRef.current
+      if (dls.length) {
+        const byId = new Map(nodesRef.current.map((n) => [n.id, n]))
+        ctx.strokeStyle = '#8b94a7'
+        ctx.font = '600 9px Inter, system-ui, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        for (const dl of dls) {
+          const a = byId.get(dl.fromId)
+          const b = byId.get(dl.doorId)
+          if (!a || !b || !nodeVisible(a) || !nodeVisible(b)) continue
+          const ax = px(a) * t.k + t.x
+          const ay = py(a) * t.k + t.y
+          const bx = px(b) * t.k + t.x
+          const by = py(b) * t.k + t.y
+          if (segmentOffscreen(ax, ay, bx, by)) continue
+          ctx.globalAlpha = fm !== null ? 0.08 : 0.3
+          ctx.lineWidth = (1.1 + Math.log2(dl.count) * 0.8) * Math.max(t.k, 0.7)
+          ctx.beginPath()
+          ctx.moveTo(ax, ay)
+          ctx.lineTo(bx, by)
+          ctx.stroke()
+          if (dl.count > 1 && t.k > 0.5) {
+            ctx.globalAlpha = fm !== null ? 0.15 : 0.75
+            ctx.fillStyle = '#8b94a7'
+            ctx.fillText(`${dl.count}`, (ax + bx) / 2, (ay + by) / 2 - 7)
+          }
+        }
+        ctx.globalAlpha = 1
+      }
+
       // edges — ONE line per connection; typed relationships annotate it.
       // bare → relates gray · exactly one relationship → that type's classic
       // look (color/dash/arrow, oriented by the relationship's own direction) ·
@@ -1317,10 +1472,13 @@ export function GraphView(): React.JSX.Element {
         // They recede rather than vanish: the mesh would otherwise drown the one
         // thing the lens is drawing, and hover still lights any single line.
         if (lensPhase > 0.02 && !isSel && !isHover) baseAlpha *= 1 - 0.55 * lensPhase
+        // a link leaving this level is faint and dashed all the way to its portal
+        const leaves = !!(s.data.portal || e.data.portal)
+        if (leaves && !isSel && !isHover) baseAlpha *= 0.55
         ctx.strokeStyle = isSel ? '#e6eaf2' : lineColor
         ctx.globalAlpha = baseAlpha
         ctx.lineWidth = (isSel ? 2.4 : 1.4) * Math.max(t.k, 0.7)
-        ctx.setLineDash(single?.dashed ? [5 * t.k, 4 * t.k] : [])
+        ctx.setLineDash(single?.dashed || leaves ? [5 * t.k, 4 * t.k] : [])
         ctx.beginPath()
         ctx.moveTo(ax, ay)
         ctx.lineTo(bx, by)
@@ -1441,10 +1599,30 @@ export function GraphView(): React.JSX.Element {
         const fog = fogL === null ? undefined : fogL.get(n.id)
         let baseAlpha = fm === null ? (dim ? 0.5 : 1) : isMatch ? 1 : 0.15
         if (fogL !== null && !fog) baseAlpha *= 0.2
+        // a PORTAL is a ghost of a node living on another level: faint, dashed,
+        // never filled — present so the link into it has somewhere to land
+        const portal = !!n.data.portal
+        if (portal) baseAlpha *= isHover || isSel ? 0.75 : 0.45
+        // a DOOR (a project, or a node whose body is a graph) carries a stack of
+        // outlines behind it — "there is a whole board in here" — so lives-inside
+        // never looks like belongs-to (an area has none)
+        const door = !portal && isDoor(n.data)
+        if (door) {
+          const stackShape = meta.shape === 'ring' ? 'circle' : meta.shape
+          ctx.shadowBlur = 0
+          ctx.strokeStyle = meta.color
+          ctx.lineWidth = Math.max(1, 1.3 * Math.min(t.k, 1.4))
+          for (const [step, a] of [[2, 0.28], [1, 0.5]] as const) {
+            const d = step * 3.6 * Math.max(t.k, 0.5)
+            ctx.globalAlpha = baseAlpha * a
+            traceGeom(ctx, shapeGeometry(stackShape, cx + d, cy - d, r))
+            ctx.stroke()
+          }
+        }
 
         ctx.globalAlpha = baseAlpha
         ctx.shadowColor = meta.color
-        ctx.shadowBlur = (isSel || isHover ? 22 : fog ? 17 : 9) * Math.min(t.k, 1.4)
+        ctx.shadowBlur = portal ? 0 : (isSel || isHover ? 22 : fog ? 17 : 9) * Math.min(t.k, 1.4)
         ctx.fillStyle = meta.color
         ctx.strokeStyle = meta.color
 
@@ -1487,7 +1665,12 @@ export function GraphView(): React.JSX.Element {
           }
         } else {
           traceGeom(ctx, geom)
-          if (outline) {
+          if (portal) {
+            ctx.lineWidth = Math.max(1, 1.4 * Math.min(t.k, 1.4))
+            ctx.setLineDash([3 * Math.max(t.k, 0.6), 3 * Math.max(t.k, 0.6)])
+            ctx.stroke()
+            ctx.setLineDash([])
+          } else if (outline) {
             ctx.lineWidth = Math.max(1, OUTLINE_WIDTH * t.k)
             ctx.lineJoin = 'round'
             ctx.stroke()
@@ -1597,7 +1780,57 @@ export function GraphView(): React.JSX.Element {
           ctx.shadowBlur = 0
           ctx.globalAlpha = baseAlpha
         }
-        if (n.data.pinned && t.k > 0.45) {
+        // the door a drag would drop into: a bright ring while it would
+        if (door && dropTargetRef.current === n.id) {
+          ctx.strokeStyle = '#38bdf8'
+          ctx.globalAlpha = 1
+          ctx.lineWidth = 2.6
+          ctx.shadowColor = '#38bdf8'
+          ctx.shadowBlur = 18
+          ctx.beginPath()
+          ctx.arc(cx, cy, r + 9 * Math.max(t.k, 0.6) + 4, 0, Math.PI * 2)
+          ctx.stroke()
+          ctx.shadowBlur = 0
+          ctx.globalAlpha = baseAlpha
+        }
+        // one expanding pulse on the door you came back out of
+        const pulse = pulseRef.current
+        if (pulse && pulse.id === n.id) {
+          const p = (performance.now() - pulse.at) / 900
+          if (p >= 1) pulseRef.current = null
+          else {
+            ctx.strokeStyle = meta.color
+            ctx.globalAlpha = (1 - p) * 0.9
+            ctx.lineWidth = 2.2
+            ctx.beginPath()
+            ctx.arc(cx, cy, r + (6 + p * 28) * Math.max(t.k, 0.6), 0, Math.PI * 2)
+            ctx.stroke()
+            ctx.globalAlpha = baseAlpha
+          }
+        }
+        // how much lives behind a door — a quiet ▣ count at the lower right
+        if (door && t.k > 0.35) {
+          const count = doorInfoRef.current.counts.get(n.id) ?? 0
+          const text = `▣ ${count}`
+          ctx.font = '600 9px Inter, system-ui, sans-serif'
+          const bw = ctx.measureText(text).width + 9
+          const bx = cx + r * 0.75
+          const by = cy + r * 0.75
+          ctx.globalAlpha = fm !== null && !isMatch ? 0.15 : 0.95
+          ctx.beginPath()
+          ctx.roundRect(bx - 2, by - CONTAINER_BADGE_H / 2, bw, CONTAINER_BADGE_H, CONTAINER_BADGE_H / 2)
+          ctx.fillStyle = '#0f131c'
+          ctx.fill()
+          ctx.strokeStyle = meta.color + '99'
+          ctx.lineWidth = 1
+          ctx.stroke()
+          ctx.fillStyle = meta.color
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(text, bx + 2.5, by + 0.5)
+          ctx.globalAlpha = baseAlpha
+        }
+        if (n.data.pinned && !portal && t.k > 0.45) {
           ctx.fillStyle = '#8b94a7'
           ctx.beginPath()
           ctx.arc(cx + r * 0.85, cy - r * 0.85, 2.6, 0, Math.PI * 2)
@@ -1696,8 +1929,16 @@ export function GraphView(): React.JSX.Element {
             ? '#e6eaf2'
             : fogL !== null && !isFog
               ? 'rgba(139,148,167,0.22)'
-              : nodeDimmed(n) ? 'rgba(139,148,167,0.55)' : 'rgba(230,234,242,0.82)'
+              : nodeDimmed(n) || n.data.portal ? 'rgba(139,148,167,0.55)' : 'rgba(230,234,242,0.82)'
           ctx.fillText(title, cx, cy)
+          // a portal says where it really lives, under its name
+          const where = n.data.portal ? doorInfoRef.current.paths.get(n.id) : undefined
+          if (where) {
+            ctx.font = '9.5px Inter, system-ui, sans-serif'
+            ctx.fillStyle = 'rgba(139,148,167,0.6)'
+            ctx.fillText(`↗ ${where.length > 34 ? '…' + where.slice(-33) : where}`, cx, cy + 13)
+            ctx.font = '11px Inter, system-ui, sans-serif'
+          }
         }
       }
     }
@@ -1779,6 +2020,17 @@ export function GraphView(): React.JSX.Element {
       return
     }
 
+    // a portal is selected (the inspector shows it, read where it lives) but
+    // never dragged: its seat on the rim is this view's, not a position
+    if (node?.data.portal) {
+      // a folded group's ghost opens into its portals; a single portal selects
+      if (isGroupGhost(node.id)) {
+        setUnfolded([...unfoldedGroups(), node.id.slice(1)])
+        useStore.setState((s) => ({ graphVersion: s.graphVersion + 1 }))
+      } else selectNode(node.id)
+      return
+    }
+
     if (node) {
       const sel = selectionRef.current
       // THE SHARPEST HAZARD IN THIS FILE. Under a displacing lens every node is
@@ -1798,7 +2050,7 @@ export function GraphView(): React.JSX.Element {
       // pointer-down on a member of a 2+ selection drags the whole selection
       const group =
         !frozen && sel?.kind === 'nodes' && sel.ids.length >= 2 && sel.ids.includes(node.id)
-          ? nodesRef.current.filter((n) => sel.ids.includes(n.id)).map((n) => ({ n, x0: n.x ?? 0, y0: n.y ?? 0 }))
+          ? nodesRef.current.filter((n) => sel.ids.includes(n.id) && !n.data.portal).map((n) => ({ n, x0: n.x ?? 0, y0: n.y ?? 0 }))
           : null
       dragRef.current = { node, moved: false, group, wx0: wx, wy0: wy, frozen }
       e.currentTarget.setPointerCapture(e.pointerId)
@@ -1859,6 +2111,10 @@ export function GraphView(): React.JSX.Element {
         drag.node.fx = wx
         drag.node.fy = wy
       }
+      // over a door, or a segment of the path bar: the drop would MOVE it there
+      const dragged = new Set(drag.group ? drag.group.map((m) => m.n.id) : [drag.node.id])
+      dropTargetRef.current = lockRef.current ? null : doorUnder(wx, wy, dragged)?.id ?? null
+      markPathDrop(lockRef.current ? null : pathDropAt(e.clientX, e.clientY))
       return
     }
     const pan = panRef.current
@@ -1936,6 +2192,21 @@ export function GraphView(): React.JSX.Element {
     if (drag) {
       dragRef.current = null
       if (!drag.frozen) simRef.current?.alphaTarget(0).velocityDecay(0.35)
+      // dropped INTO a door or onto a path segment: a move, not a reposition
+      const intoDoor = drag.moved && !drag.frozen ? dropTargetRef.current : null
+      const intoPath = drag.moved && !drag.frozen ? pathDropAt(e.clientX, e.clientY) : null
+      dropTargetRef.current = null
+      markPathDrop(null)
+      if (intoDoor || intoPath) {
+        const members = drag.group ? drag.group.map((m) => m.n) : [drag.node]
+        for (const m of members) if (!m.data.pinned) { m.fx = null; m.fy = null }
+        const door = intoDoor ? nodesRef.current.find((n) => n.id === intoDoor) : null
+        const target = intoDoor ?? intoPath!.dataset.dropGraph!
+        const label = door?.data.title ?? intoPath!.dataset.dropLabel ?? 'there'
+        void moveInto(members.map((m) => m.id), target, label, door ? door.data.type === 'project' && door.id !== projectId : intoPath!.dataset.dropProject === '1')
+        flushPendingMerge()
+        return
+      }
       if (!drag.moved) {
         // plain click — even on a member of a bigger selection — selects just it
         selectNode(drag.node.id)
@@ -1976,7 +2247,81 @@ export function GraphView(): React.JSX.Element {
       dragRef.current = null
       simRef.current?.alphaTarget(0).velocityDecay(0.35)
     }
+    dropTargetRef.current = null
+    markPathDrop(null)
     flushPendingMerge()
+  }
+
+  // ── going through doors ─────────────────────────────────────────────────
+
+  /** The door under a world point, ignoring what is being dragged. Generous —
+   *  1.25× the radius — because a drop target you have to hit exactly is not one. */
+  const doorUnder = (wx: number, wy: number, except: Set<string>): SimNode | null => {
+    let best: SimNode | null = null
+    let bestD = Infinity
+    for (const n of visibleNodes()) {
+      if (except.has(n.id) || n.data.portal || !isDoor(n.data)) continue
+      const d = Math.hypot(px(n) - wx, py(n) - wy)
+      if (d <= stylesRef.current.node[n.data.type].radius * 1.25 + 6 && d < bestD) {
+        best = n
+        bestD = d
+      }
+    }
+    return best
+  }
+
+  /** A path-bar segment under the pointer — the canvas holds the pointer capture,
+   *  so the bar never sees the drag itself; this asks the document instead. */
+  const pathDropAt = (clientX: number, clientY: number): HTMLElement | null =>
+    (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest<HTMLElement>('[data-drop-graph]') ?? null
+  const pathDropRef = useRef<HTMLElement | null>(null)
+  const markPathDrop = (el: HTMLElement | null): void => {
+    if (pathDropRef.current === el) return
+    pathDropRef.current?.classList.remove('drop-hot')
+    el?.classList.add('drop-hot')
+    pathDropRef.current = el
+  }
+
+  /** Move nodes into a door (or up into a path segment), with one Undo that puts
+   *  every one of them back where it lived — this level. */
+  const moveInto = async (ids: string[], target: string, label: string, otherProject: boolean): Promise<void> => {
+    const st = useStore.getState()
+    const back = st.graphRoot ?? st.projectId
+    try {
+      const res = await rpc<{ moved: string[] }>('nodes.move', { ids, graphId: target })
+      const n = res.moved.length
+      if (!n) return
+      select(null)
+      toast(`moved ${n === 1 ? `"${nodesRef.current.find((x) => x.id === res.moved[0])?.data.title ?? 'it'}"` : `${n} nodes`} into "${label}"${otherProject ? ', another project' : ''}`,
+        'info', {
+          label: 'Undo',
+          run: () => {
+            rpc('nodes.move', { ids: res.moved, graphId: back }).catch((e) => toast(e instanceof Error ? e.message : String(e)))
+          }
+        })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** Through a door: the camera dives into it, then the level changes. The view
+   *  being left is remembered BEFORE the dive, so coming back up lands on it. */
+  const enterDoor = (n: SimNode): void => {
+    const canvas = canvasRef.current
+    if (fittedProjectRef.current) viewportMemory.set(fittedProjectRef.current, { ...transformRef.current })
+    leavingSavedRef.current = true
+    if (canvas && !reducedMotion()) {
+      const k = Math.min(3.2, Math.max(transformRef.current.k * 2.6, 1.6))
+      targetTransformRef.current = { k, x: canvas.clientWidth / 2 - px(n) * k, y: canvas.clientHeight / 2 - py(n) * k }
+      setTimeout(() => void useStore.getState().descend(n.id), 170)
+    } else {
+      void useStore.getState().descend(n.id)
+    }
+  }
+
+  /** A portal's node, where it lives: its level, it focused (a side-step). */
+  const followPortal = (n: SimNode): void => {
+    void useStore.getState().go({ projectId: n.data.projectId, graphId: n.data.graphId ?? null, nodeId: isGroupGhost(n.id) ? null : n.id })
   }
 
   const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>): void => {
@@ -1986,8 +2331,9 @@ export function GraphView(): React.JSX.Element {
     const { x, y } = toWorld(cx, cy)
     if (hitContainerBadge(cx, cy)) return // fast badge clicks must not spawn quick-add
     const hit = hitNode(x, y)
-    // a project's door: double-click goes through it
-    if (hit?.data.type === 'project' && !hit.data.portal) void useStore.getState().setProject(hit.id)
+    // a door: go through it · a portal: go to where it lives · nothing: a new node here
+    if (hit?.data.portal) followPortal(hit)
+    else if (hit && isDoor(hit.data)) enterDoor(hit)
     else if (!hit) showQuickAdd(dropPoint(x, y))
   }
 
@@ -2024,6 +2370,25 @@ export function GraphView(): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (inTextField(e)) return
+      // Enter / Ctrl+↓ on ONE selected door goes through it; Enter on a portal
+      // goes to where it lives. (Ctrl+↑, back and forward live on the path bar:
+      // they work from every view, not only the canvas.)
+      if (matches('descend', e) || matches('descend-enter', e)) {
+        const sel = selectionRef.current
+        if (sel?.kind === 'nodes' && sel.ids.length === 1) {
+          const n = nodesRef.current.find((x) => x.id === sel.ids[0])
+          if (n?.data.portal && matches('descend-enter', e)) {
+            e.preventDefault()
+            followPortal(n)
+            return
+          }
+          if (n && !n.data.portal && isDoor(n.data)) {
+            e.preventDefault()
+            enterDoor(n)
+            return
+          }
+        }
+      }
       // Ctrl/Cmd+Shift+A — DEEP select-all: the same lens as Ctrl+A (type ∩ flag ∩
       // tag ∩ find) but collapse-BLIND, so members hidden inside collapsed classes
       // and areas join the selection. Containers are NOT expanded — shift means
@@ -2032,7 +2397,10 @@ export function GraphView(): React.JSX.Element {
       if (matches('select-all-deep', e)) {
         e.preventDefault()
         const fmNow = findStateRef.current.matches
-        const ids = useStore.getState().graph.nodes
+        const st = useStore.getState()
+        // this level's nodes — a portal stands for another level, never part of a selection here
+        const ids = canvasGraph(st.graph, st.projectId, st.graphRoot, st.projects).nodes
+          .filter((n) => !n.portal)
           .filter((n) =>
             filtersRef.current[n.type] &&
             nodeMatchesFlagFilter(n.flags, flagFilterRef.current.hidden) &&
@@ -2537,8 +2905,18 @@ export function GraphView(): React.JSX.Element {
       {graph.nodes.length === 0 && (
         <div className="empty" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
           <div className="big">◈</div>
-          <h3>An empty canvas</h3>
-          <div>Double-click anywhere to plant your first idea.<br />Agents can join in at <code>127.0.0.1</code> — see Settings.</div>
+          {graphRoot ? (
+            // an empty ROOM, not an empty board: say how things get in, and how to get out
+            <>
+              <h3>Nothing lives in “{fullGraph.nodes.find((n) => n.id === graphRoot)?.title ?? 'this sub-graph'}” yet</h3>
+              <div>Double-click to add a node here, or drag nodes onto its door from the level above.<br />Ctrl+↑ goes back up.</div>
+            </>
+          ) : (
+            <>
+              <h3>An empty canvas</h3>
+              <div>Double-click anywhere to plant your first idea.<br />Agents can join in at <code>127.0.0.1</code> — see Settings.</div>
+            </>
+          )}
         </div>
       )}
 

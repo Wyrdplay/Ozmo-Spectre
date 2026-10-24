@@ -81,6 +81,10 @@ export interface SpecNode {
   /** read-only ghost of a node OUTSIDE the graph being read, present because a
    *  connection crosses the boundary — set only on scoped graph reads */
   portal?: boolean
+  /** CLIENT-SIDE ONLY: a folded group of portals — this ghost stands for the
+   *  level they all live in, and the number is how many connections lead there.
+   *  The core never sends it; the canvas makes it (renderer lib/hierarchy). */
+  aggregate?: number
   /** effective progress (manual, rolled up, or Done-flag-implied) — computed, never stored */
   progressComputed?: number
   /** names of the flag rules (settings) this node currently matches, in rule order — computed, never stored */

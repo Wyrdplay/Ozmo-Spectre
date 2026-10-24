@@ -20,6 +20,7 @@ import { Onboarding } from './components/Onboarding'
 import { WorkspaceChooser } from './components/WorkspaceChooser'
 import { LoadingScreen } from './components/LoadingScreen'
 import { LockBanner } from './components/BoardLock'
+import { PathBar } from './components/PathBar'
 import { inTextField, matches } from './lib/shortcuts'
 
 export default function App(): React.JSX.Element {
@@ -101,16 +102,20 @@ export default function App(): React.JSX.Element {
       {session.readOnly && <LockBanner lock={session.readOnly} />}
       <Sidebar />
       <div className="content">
-        {view === 'graph' && <GraphView />}
-        {view === 'lists' && <ListsView />}
-        {view === 'backlog' && <BacklogView />}
-        {view === 'refine' && <RefineView />}
-        {view === 'warps' && <WarpsView />}
-        {view === 'reviews' && <ReviewsView />}
-        {view === 'archive' && <ArchiveView />}
-        {view === 'agentic' && <AgenticView />}
-        {view === 'activity' && <ActivityView />}
-        {view === 'settings' && <SettingsView />}
+        {/* where you are — above every view that follows the board */}
+        <PathBar />
+        <div className="content-body">
+          {view === 'graph' && <GraphView />}
+          {view === 'lists' && <ListsView />}
+          {view === 'backlog' && <BacklogView />}
+          {view === 'refine' && <RefineView />}
+          {view === 'warps' && <WarpsView />}
+          {view === 'reviews' && <ReviewsView />}
+          {view === 'archive' && <ArchiveView />}
+          {view === 'agentic' && <AgenticView />}
+          {view === 'activity' && <ActivityView />}
+          {view === 'settings' && <SettingsView />}
+        </div>
       </div>
       {showInspector && <Inspector />}
       {quickAdd.open && <QuickAdd />}
