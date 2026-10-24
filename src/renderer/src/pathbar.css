@@ -88,3 +88,17 @@
 @media (prefers-reduced-motion: no-preference) {
   .pathbar-seg, .pathbar-sep { transition: background 120ms, color 120ms; }
 }
+
+/* a sub-graph, at a glance, in the Inspector — what lives inside, and the way in */
+.door-dashboard {
+  margin: 0 16px 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-panel); display: flex; flex-direction: column; gap: 8px; font-size: 12px;
+}
+.door-dashboard-head { display: flex; align-items: center; gap: 10px; color: var(--text-dim); }
+.door-dashboard-head b { color: var(--text); }
+.door-dashboard-head .spacer { flex: 1; }
+.door-fog { color: var(--warn); }
+.door-dashboard-types { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.door-type { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; }
+.door-dashboard-warps { display: flex; flex-wrap: wrap; gap: 5px; }
+.door-dashboard-empty { color: var(--text-faint); }

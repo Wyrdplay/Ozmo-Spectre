@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, SUBGRAPH_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships,
+  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, SUBGRAPH_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships, warpStageOpen,
   type NodeDetail, type EdgeWithTitles, type Annotation, type EdgeType, type NodeType, type RelationshipType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
@@ -11,6 +11,7 @@ import {
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
 import { lockedProps, useBoardLock } from './BoardLock'
+import { livesWithin } from '@/lib/hierarchy'
 import { timeAgo } from '@/lib/markdown'
 
 /** Confirm dialog for the complete verb: optional note, then the node is removed.
@@ -505,6 +506,56 @@ function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null
       {goHome && (detail.projectId !== projectId && where ? <span className="chip home-chip">in {where}{home ? ` ▸ ${home.title}` : ''}</span> : home ? <span className="chip home-chip">in {home.title}</span> : null)}
       {goHome}
     </>
+  )
+}
+
+/**
+ * A SUB-GRAPH, at a glance, from outside: what lives in it (at every depth), how
+ * much of that is still fog, which warps in it are under way — and the way in.
+ * Read off the project graph the board already holds; no query of its own.
+ */
+function DoorDashboard({ detail }: { detail: NodeDetail }): React.JSX.Element {
+  const nodes = useStore((s) => s.graph.nodes)
+  const styleOf = useTypeStyles()
+  const typeOrder = useOrderedTypes()
+  const inside = useMemo(() => {
+    const byId = new Map(nodes.map((n) => [n.id, n]))
+    return nodes.filter((n) => n.id !== detail.id && n.projectId === detail.projectId && livesWithin(n, detail.id, byId))
+  }, [nodes, detail.id, detail.projectId])
+  const direct = inside.filter((n) => n.graphId === detail.id).length
+  const byType = new Map<NodeType, number>()
+  for (const n of inside) byType.set(n.type, (byType.get(n.type) ?? 0) + 1)
+  const fog = inside.filter((n) => NODE_FAMILY[n.type] === 'fog').length
+  const openWarps = inside.filter((n) => n.type === 'warp' && warpStageOpen(n.stage))
+  return (
+    <div className="door-dashboard">
+      <div className="door-dashboard-head">
+        <span><b>{inside.length}</b> inside{inside.length !== direct ? ` · ${direct} directly` : ''}</span>
+        {fog > 0 && <span className="door-fog" title="Unknowns and unshaped work still in here">{fog} fog</span>}
+        <span className="spacer" />
+        <button className="btn sm primary" onClick={() => void useStore.getState().descend(detail.id)}>open ›</button>
+      </div>
+      {inside.length > 0 && (
+        <div className="door-dashboard-types">
+          {typeOrder.filter((t) => byType.has(t)).map((t) => (
+            <span key={t} className="door-type" style={{ color: styleOf(t).color }}>
+              <TypeDot type={t} /> {byType.get(t)} {byType.get(t) === 1 ? NODE_TYPES[t].label.toLowerCase() : NODE_TYPES[t].plural.toLowerCase()}
+            </span>
+          ))}
+        </div>
+      )}
+      {openWarps.length > 0 && (
+        <div className="door-dashboard-warps">
+          {openWarps.slice(0, 4).map((w) => (
+            <span key={w.id} className="chip">{w.title} · {w.stage}</span>
+          ))}
+          {openWarps.length > 4 && <span className="chip">+{openWarps.length - 4} more</span>}
+        </div>
+      )}
+      {inside.length === 0 && (
+        <div className="door-dashboard-empty">Nothing lives here yet — drag nodes onto its door, or open it and add some.</div>
+      )}
+    </div>
   )
 }
 
@@ -1007,6 +1058,8 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
         </div>
         <TagsEditor tags={detail.tags} disabled={!!lock} onChange={(tags) => patch({ tags })} />
       </div>
+
+      {detail.bodyKind === 'graph' && detail.type !== 'project' && <DoorDashboard detail={detail} />}
 
       <div className="tabs">
         <button className={`tab ${tab === 'spec' ? 'active' : ''}`} onClick={() => setTab('spec')}>Spec</button>
