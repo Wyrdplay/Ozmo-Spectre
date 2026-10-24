@@ -1908,7 +1908,10 @@ async function moveHome(r: NodeRow, target: string | null, actor: string, destPr
   if (target) {
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
     need(g, `graph "${target}" not found`, 404)
-    need(SUBGRAPH_OK.has(g!.type as NodeType) && !g!.references_node_id,
+    // a graph that already exists may always take a node back (demote moves
+    // residents up into it, even a legacy idea door); opening a new one follows
+    // the type rule, which callers that move by choice enforce first
+    need(g!.is_graph || (SUBGRAPH_OK.has(g!.type as NodeType) && !g!.references_node_id),
       `"${g!.title}" is a ${g!.type}, and a ${g!.type} never holds anything — only ${SUBGRAPH_TYPES.join(', ')} and projects do`, 400)
     need(g!.project_id === destProject, `"${g!.title}" is not in the project this move lands in`, 400)
     need(target !== r.id, 'a node cannot live inside itself', 400)
