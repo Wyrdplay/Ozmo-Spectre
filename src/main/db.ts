@@ -879,6 +879,12 @@ export function flushDb(): void {
   dirty = false
 }
 
+/** The database file open right now — '' before the first open. Caches built
+ *  over one board (the search index) compare it to know when the board changed. */
+export function openFile(): string {
+  return dbFile
+}
+
 /** Final flush + release. The file left behind must open under EITHER driver. */
 export function closeDb(): void {
   if (!driver) return

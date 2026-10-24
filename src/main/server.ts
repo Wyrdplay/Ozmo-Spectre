@@ -739,6 +739,9 @@ export async function startServer(
   app.post('/api/board/unlock', h('board.unlock', () => ({})))
 
   // --- misc ---
+  // EVERYWHERE: every project, ranked nearest-first from `from` (a sub-graph or
+  // project id), each result with its path; `doors=1` = only things you can go into
+  app.get('/api/search/all', h('search.all', (r) => ({ q: r.query.q, from: r.query.from, limit: r.query.limit, doors: r.query.doors })))
   app.get('/api/search', h('search.run', (r) => ({ projectId: r.query.projectId as string, q: r.query.q as string })))
   app.post('/api/ui/focus', h('ui.focus', (r) => r.body))
 

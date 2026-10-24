@@ -1119,6 +1119,42 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   await req('DELETE', `/api/projects/${R.id}?purge=1`)
 }
 
+// SEARCH EVERYWHERE — every project, nearest-first, a path on every result, from
+// an index the core keeps current from its own events
+{
+  const stamp = Date.now()
+  const A = (await req('POST', '/api/projects', { name: `Alpha ${stamp}` })).json
+  const B = (await req('POST', '/api/projects', { name: `Beta ${stamp}`, parentId: A.id })).json
+  const word = `zyx${stamp}`
+  const mk = async (pid, title, extra = {}) => (await req('POST', `/api/projects/${pid}/nodes`, { type: 'feature', title, ...extra })).json
+  const a1 = await mk(A.id, `The ${word} pipeline`)
+  const b1 = await mk(B.id, `The ${word} pipeline`)
+  const sub = await mk(B.id, `Rooms ${stamp}`)
+  await req('POST', `/api/nodes/${sub.id}/promote`, {})
+  const deep = await mk(B.id, `Deep ${stamp}`, { graphId: sub.id, content: `only the body says ${word}-marker here` })
+  const s = async (q, extra = '') => req('GET', `/api/search/all?q=${encodeURIComponent(q)}${extra}`)
+  const fromA = (await s(`${word} pipeline`, `&from=${A.id}`)).json.results
+  const fromB = (await s(`${word} pipeline`, `&from=${B.id}`)).json.results
+  ok('search everywhere: finds the same title in two projects', fromA.length >= 2 && fromA.some((r) => r.id === b1.id), JSON.stringify(fromA.map((r) => r.id)))
+  ok('search everywhere: nearest first — standing in Alpha, Alpha\'s comes first', fromA[0]?.id === a1.id, JSON.stringify(fromA.map((r) => [r.title, r.path, r.score])))
+  ok('search everywhere: …and standing in Beta, Beta\'s', fromB[0]?.id === b1.id, JSON.stringify(fromB.map((r) => [r.title, r.path, r.score])))
+  ok('search everywhere: every result says where it lives', fromB.find((r) => r.id === b1.id)?.path === `Alpha ${stamp} ▸ Beta ${stamp}`, JSON.stringify(fromB[0]))
+  const body = (await s(`${word}-marker`)).json.results
+  ok('search everywhere: a body match, with its snippet and its sub-graph in the path', body[0]?.id === deep.id && body[0].match === 'body' &&
+    body[0].snippet?.includes('marker') && body[0].path.endsWith(`Rooms ${stamp}`), JSON.stringify(body[0]))
+  ok('search everywhere: doors=1 lists only what can be gone into', (await s(`${stamp}`, '&doors=1')).json.results.every((r) => r.type === 'project' || r.bodyKind === 'graph'))
+  ok('search everywhere: type: and in: filters', (await s(`${word} type:bug`)).json.results.length === 0 &&
+    (await s(`${word} in:beta`)).json.results.every((r) => r.path.includes('Beta')))
+  await req('PATCH', `/api/nodes/${a1.id}`, { title: `Renamed ${word} thing` })
+  ok('search everywhere: the index follows a rename at once', (await s(`renamed ${word}`)).json.results[0]?.id === a1.id)
+  await req('POST', `/api/nodes/${b1.id}/archive`, {})
+  ok('search everywhere: an archived node is not found', !(await s(`${word} pipeline`)).json.results.some((r) => r.id === b1.id))
+  ok('search everywhere: q is required', (await s('')).status === 400)
+  await req('DELETE', `/api/projects/${B.id}?purge=1`)
+  await req('DELETE', `/api/projects/${A.id}?purge=1`)
+  ok('search everywhere: a purged project leaves nothing behind', (await s(word)).json.results.length === 0)
+}
+
 // REFINE — a pass over the fog becomes ONE action the responded items derive
 {
   const rp = (await req('POST', `/api/projects`, { name: `refine-${Date.now()}` })).json.id

@@ -444,6 +444,22 @@ Activity         GET  /api/projects/:id/activity?limit=100&since=<epoch ms>  —
                                                        edge.created/deleted carry the connection endpoints (deleted
                                                        also lists the relationships it carried); edge.relationship.
                                                        added/updated/removed carry {type,sourceId,targetId}
+Search everywhere GET /api/search/all?q=<text>&from=<id>&limit=<n>&doors=1
+                                                     — EVERY project, one ranked list:
+                                                     { results: [ {id, title, type, projectId, graphId,
+                                                       bodyKind, path, match: title|tag|body, snippet?,
+                                                       score} ], total }. Ranked by match quality (exact
+                                                     title, prefix, phrase, every word, tag, body), then
+                                                     NEARNESS to \`from\` (the sub-graph or project you
+                                                     stand in: here, below, above, cousins, elsewhere),
+                                                     then recency. \`path\` is where it lives, e.g.
+                                                     "Engine ▸ Rendering" — use it to tell same-named
+                                                     nodes apart. Words are ANDed. Filters in q: #tag,
+                                                     type:bug, in:<place name> (that place and below).
+                                                     doors=1 = only projects and sub-graphs. Archived
+                                                     nodes and archived projects are not searched. Use
+                                                     this to find anything; the per-project search below
+                                                     is the older, project-bound form.
 Search           GET  /api/search?projectId=<id>&q=<text>   — titles, tags, and spec content.
                                                      TWO LISTS, not one, and both are CAPPED SILENTLY:
                                                      { nodes: [ ...full SpecNode rows whose TITLE or a

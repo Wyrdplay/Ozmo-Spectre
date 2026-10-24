@@ -37,7 +37,7 @@ export const SHORTCUTS: Shortcut[] = [
   // navigation
   { id: 'pan', group: 'navigation', gesture: 'drag the background', what: 'pan the canvas' },
   { id: 'zoom', group: 'navigation', gesture: 'wheel', what: 'zoom' },
-  { id: 'palette', group: 'navigation', keys: 'ctrl+k', what: 'jump to anything — the command palette' },
+  { id: 'palette', group: 'navigation', keys: 'ctrl+k', what: 'search every project — enter lands on it in its own level' },
   // the hierarchy: doors (projects, sub-graphs) are gone through, never dug into
   { id: 'enter-door', group: 'navigation', gesture: 'double-click a door', what: 'go into a project or sub-graph (its node wears a ▣ stack)' },
   { id: 'follow-portal', group: 'navigation', gesture: 'double-click a portal', what: 'go to where a ghosted node really lives' },
@@ -54,6 +54,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'new-node-here', group: 'editing', gesture: 'double-click empty canvas', what: 'new node where you clicked, on this level' },
   { id: 'move-into', group: 'editing', gesture: 'drag onto a door', what: 'move the node (or selection) inside it — the toast offers Undo' },
   { id: 'move-up', group: 'editing', gesture: 'drag onto the path bar', what: 'move it up into that level' },
+  { id: 'move-to', group: 'editing', keys: 'ctrl+shift+m', what: 'move the selection into any project or sub-graph — search for it' },
   { id: 'quick-add', group: 'editing', keys: 'ctrl+n', what: 'new node beside the selection' },
   { id: 'move-pin', group: 'editing', gesture: 'drag a node', what: 'move it (and pin it, when ⌖ pin is on)' },
   { id: 'pin-toggle', group: 'editing', keys: 'ctrl+p', what: 'pin or unpin the selection where it sits' },

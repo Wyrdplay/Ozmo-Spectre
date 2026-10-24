@@ -5,6 +5,7 @@ import { openDb, flushDb } from './db'
 import * as vault from './vault'
 import { registerWatcherHandlers, ensureProjectNodes } from './services'
 import { seedIfEmpty } from './seed'
+import { warmSearch } from './search'
 import { startServer, stopServer, getPort } from './server'
 import { accounts, setAccountProvider, type IssuedSession } from './account'
 import { localAccounts } from './account-local'
@@ -89,6 +90,8 @@ async function main(): Promise<void> {
   // every project is a node (the hierarchy's migration — idempotent)
   ensureProjectNodes()
   seedIfEmpty()
+  // build the search index ahead of the first keystroke, off the boot path
+  setTimeout(warmSearch, 1500)
 
   // ---- who owns a served board -------------------------------------------
   //

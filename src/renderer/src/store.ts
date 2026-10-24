@@ -22,6 +22,20 @@ export type Selection =
   | { kind: 'nodes'; ids: string[]; anchor: string }
   | { kind: 'edge'; id: string }
 
+/** ONE picker, three jobs (search everywhere): go somewhere, move the selection
+ *  into a door, or link a node to anything — the same ranking and keys for all. */
+export type PaletteMode =
+  | { mode: 'jump' }
+  | { mode: 'move'; ids: string[] }
+  | { mode: 'link'; sourceId: string; relType: EdgeType }
+
+/** A level recently stood in — the palette offers these before anything is typed. */
+export interface RecentPlace {
+  projectId: string
+  graphId: string | null
+  title: string
+}
+
 /** Preset link for quick-add: type/direction omitted = resolved by the type-pair matrix. */
 export interface QuickAddLink {
   nodeId: string
@@ -325,6 +339,10 @@ interface OzmoState {
   helpOpen: boolean
   quickAdd: { open: boolean; x?: number; y?: number; linkTo?: QuickAddLink[]; type?: NodeType }
   palette: boolean
+  /** what the palette is FOR while open: jump anywhere, move the selection into a door, or link a node to anything */
+  paletteMode: PaletteMode
+  /** the last places stood in, newest first — the palette's empty state */
+  recentPlaces: RecentPlace[]
   /** the export dialog: null = closed; a scope preselects which tab it opens on */
   exportScope: 'project' | 'selection' | 'container' | 'filter' | null
   toasts: Toast[]
@@ -433,7 +451,7 @@ interface OzmoState {
   toggleHelp: () => void
   showQuickAdd: (pos?: { x: number; y: number }, linkTo?: (string | QuickAddLink)[], type?: NodeType) => void
   hideQuickAdd: () => void
-  setPalette: (open: boolean) => void
+  setPalette: (open: boolean, mode?: PaletteMode) => void
   setExportScope: (s: 'project' | 'selection' | 'container' | 'filter' | null) => void
   toast: (msg: string, kind?: 'error' | 'info', action?: { label: string; run: () => void }) => void
   dismissToast: (id: number) => void
@@ -532,6 +550,8 @@ export const useStore = create<OzmoState>((set, get) => ({
   helpOpen: loadHelpOpen(),
   quickAdd: { open: false },
   palette: false,
+  paletteMode: { mode: 'jump' },
+  recentPlaces: [],
   exportScope: null,
   toasts: [],
   focusNodeId: null,
@@ -706,6 +726,16 @@ export const useStore = create<OzmoState>((set, get) => ({
       get().selectNode(opts.select)
     }
     writeAddress({ projectId: to.projectId, graphId: level, nodeId: node?.id ?? null }, push)
+    // remember the place, newest first — what the palette offers before you type
+    const title = level ? graph.nodes.find((n) => n.id === level)?.title : get().projects.find((p) => p.id === to.projectId)?.name
+    if (title) {
+      set((s) => ({
+        recentPlaces: [
+          { projectId: to.projectId, graphId: level, title },
+          ...s.recentPlaces.filter((r) => !(r.projectId === to.projectId && r.graphId === level))
+        ].slice(0, 8)
+      }))
+    }
   },
 
   descend: async (doorId) => {
@@ -1116,7 +1146,7 @@ export const useStore = create<OzmoState>((set, get) => ({
     })
   },
   hideQuickAdd: () => set({ quickAdd: { open: false } }),
-  setPalette: (open) => set({ palette: open }),
+  setPalette: (open, mode = { mode: 'jump' }) => set({ palette: open, paletteMode: mode }),
   setExportScope: (exportScope) => set({ exportScope }),
 
   toast: (msg, kind = 'error', action) => {

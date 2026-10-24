@@ -1158,7 +1158,18 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
                     }
                   }}
                 />
-                <button className="btn sm ghost" onClick={() => setAddingLink(null)}>cancel</button>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {/* the picker above knows this level; search reaches every project */}
+                  <button className="btn sm ghost" title="Link to a node anywhere — another sub-graph, another project"
+                    onClick={() => {
+                      const relType = addingLink
+                      setAddingLink(null)
+                      useStore.getState().setPalette(true, { mode: 'link', sourceId: id, relType })
+                    }}>
+                    ⌕ anywhere…
+                  </button>
+                  <button className="btn sm ghost" onClick={() => setAddingLink(null)}>cancel</button>
+                </div>
               </div>
             )}
             {/* a project is never converted, pruned or archived as a node — the

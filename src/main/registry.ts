@@ -7,6 +7,7 @@ import { accounts, type Account } from './account'
 import * as skills from './skills'
 import { buildDocument } from './document'
 import { exportProject, importProject } from './transfer'
+import { searchAll } from './search'
 import { getBoardLock, getSettings, setBoardLock, updateSettings } from './settings'
 import { emitEvent } from './events'
 import { rolesGrantableBy } from '@shared/types'
@@ -93,6 +94,7 @@ const CAPABILITY: Record<string, Capability> = {
   'commons.list': 'read',
   'activity.list': 'read',
   'search.run': 'read',
+  'search.all': 'read',
   'document.build': 'read',
   // Exporting a project is a READ, for the same reason building a document is:
   // it copies rows and bodies out and writes nothing back. That the copy happens
@@ -545,6 +547,8 @@ export const registry: Record<string, Handler> = {
 
   'activity.list': (p) => svc.listActivity(p),
   'search.run': (p) => svc.search(p),
+  // every project, nearest-first, a path on every result (search.ts)
+  'search.all': (p) => searchAll(p),
 
   /**
    * TRIMMED unless the caller is approved. The full payload carries the vault

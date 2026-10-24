@@ -5,6 +5,7 @@ import { openDb, flushDb, closeDb } from './db'
 import * as vault from './vault'
 import { registerWatcherHandlers, ensureProjectNodes } from './services'
 import { seedIfEmpty } from './seed'
+import { warmSearch } from './search'
 import { startServer, stopServer, getPort } from './server'
 import { setAppInfoProvider } from './registry'
 import { startProxy, stopProxy, setRemoteTarget } from './remote'
@@ -103,6 +104,8 @@ export async function openWorkspace(): Promise<void> {
   // every project is a node (the hierarchy's migration — idempotent)
   ensureProjectNodes()
   seedIfEmpty()
+  // build the search index ahead of the first keystroke, off the boot path
+  setTimeout(warmSearch, 1500)
   vault.startWatcher()
 
   const port = await startServer(settings.apiPort, getWindow, version)

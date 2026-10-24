@@ -4163,7 +4163,7 @@ export function search(p: { projectId: string; q: string }): {
 } {
   // without it the query below bound `undefined` and sql.js answered with a 500
   // ("tried to bind a value of an unknown type") — agents hit this in the logs
-  need(typeof p.projectId === 'string' && p.projectId, 'projectId is required — search is per project')
+  need(typeof p.projectId === 'string' && p.projectId, 'projectId is required — this search is per project; GET /api/search/all searches every project')
   need(p.q?.trim(), 'q is required')
   const q = p.q.trim().toLowerCase()
   const nodes = listNodes({ projectId: p.projectId }).filter(

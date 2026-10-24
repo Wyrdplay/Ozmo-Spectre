@@ -45,6 +45,13 @@ export default function App(): React.JSX.Element {
       if (matches('palette', e)) {
         e.preventDefault()
         setPalette(true)
+      } else if (matches('move-to', e) && !inTextField(e)) {
+        // the same search, listing only doors: the selection moves into the one chosen
+        const sel = useStore.getState().selection
+        if (sel?.kind === 'nodes' && sel.ids.length && !useStore.getState().session?.readOnly) {
+          e.preventDefault()
+          setPalette(true, { mode: 'move', ids: sel.ids })
+        }
       } else if (matches('quick-add', e) && !inTextField(e)) {
         e.preventDefault()
         showQuickAdd()
