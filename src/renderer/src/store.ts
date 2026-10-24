@@ -451,7 +451,7 @@ export const UNFLAGGED = '\u0000unflagged'
 
 const ALL_TYPES: Record<NodeType, boolean> = {
   idea: true, pillar: true, principle: true, feature: true, instance: true, component: true, bug: true, question: true, warp: true, area: true, action: true,
-  feedback: true, threat: true, flaw: true, skill: true
+  feedback: true, threat: true, flaw: true, skill: true, project: true
 }
 
 const ALL_RELS: Record<EdgeType, boolean> = {

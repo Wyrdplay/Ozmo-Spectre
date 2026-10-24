@@ -3,6 +3,7 @@ import { useStore, type View } from '@/store'
 import { rpc } from '@/api'
 import { Confirm, Modal, useCopyFlash } from './widgets'
 import { timeAgo } from '@/lib/markdown'
+import { isWithinProject, projectTree } from '@/lib/projects'
 import { NODE_FAMILY, warpStageOpen, type Project } from '@shared/types'
 import '../sidebar.css'
 
@@ -95,6 +96,10 @@ export function Sidebar(): React.JSX.Element {
   const skills = useStore((s) => s.skills)
   const toast = useStore((s) => s.toast)
   const [creating, setCreating] = useState(false)
+  // where a new project goes: the top level, or inside the current one
+  const [createIn, setCreateIn] = useState<string | null>(null)
+  const [moving, setMoving] = useState(false)
+  const tree = useMemo(() => projectTree(projects), [projects])
   // the project's own actions — archive it, bring an archived one back — sit on
   // the picker they act on, not in the app-wide Settings
   const [projMenu, setProjMenu] = useState(false)
@@ -175,7 +180,7 @@ export function Sidebar(): React.JSX.Element {
   const createProject = async (): Promise<void> => {
     if (!name.trim()) return
     try {
-      const p = await rpc<Project>('projects.create', { name: name.trim() })
+      const p = await rpc<Project>('projects.create', { name: name.trim(), parentId: createIn })
       setCreating(false)
       setName('')
       await useStore.getState().refreshProjects()
@@ -264,12 +269,15 @@ Switch workspace`}
         <select
           value={projectId ?? ''}
           onChange={(e) => {
-            if (e.target.value === '__new__') setCreating(true)
-            else setProject(e.target.value)
+            if (e.target.value === '__new__') {
+              setCreateIn(null)
+              setCreating(true)
+            } else setProject(e.target.value)
           }}
         >
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
+          {/* the tree, indented: a project is listed under the project it lives in */}
+          {tree.map(({ project: p, depth }) => (
+            <option key={p.id} value={p.id}>{' '.repeat(depth)}{depth ? '└ ' : ''}{p.name}</option>
           ))}
           {canWrite && <option value="__new__">＋ New project…</option>}
         </select>
@@ -287,6 +295,22 @@ Switch workspace`}
           <>
             <div className="project-menu-scrim" onClick={() => setProjMenu(false)} />
             <div className="project-menu" role="menu">
+              <button
+                role="menuitem"
+                disabled={!canWrite || !currentProject}
+                title={canWrite ? undefined : 'You can view this board but not change it'}
+                onClick={() => { setProjMenu(false); setCreateIn(currentProject?.id ?? null); setCreating(true) }}
+              >
+                New project inside this one…
+              </button>
+              <button
+                role="menuitem"
+                disabled={!canWrite || !currentProject}
+                title={canWrite ? undefined : 'You can view this board but not change it'}
+                onClick={() => { setProjMenu(false); setMoving(true) }}
+              >
+                Move this project into…
+              </button>
               <button
                 role="menuitem"
                 disabled={!canWrite || !currentProject}
@@ -398,9 +422,12 @@ Switch workspace`}
         <span className="nav-label">Collapse</span>
       </button>
 
+      {moving && currentProject && (
+        <MoveProject project={currentProject} projects={projects} onClose={() => setMoving(false)} />
+      )}
       {creating && (
         <Modal onClose={() => setCreating(false)}>
-          <h2>New project</h2>
+          <h2>{createIn ? `New project inside "${projects.find((p) => p.id === createIn)?.name ?? '…'}"` : 'New project'}</h2>
           <input
             className="input"
             placeholder="Project name"
@@ -416,6 +443,52 @@ Switch workspace`}
         </Modal>
       )}
     </div>
+  )
+}
+
+/**
+ * Nest the current project inside another, or bring it back to the top level.
+ * Its folder travels whole, with every project inside it; its contents and
+ * links do not change. A project cannot go into itself or anything inside it.
+ */
+function MoveProject({ project, projects, onClose }: { project: Project; projects: Project[]; onClose: () => void }): React.JSX.Element {
+  const toast = useStore((s) => s.toast)
+  const [busy, setBusy] = useState(false)
+  const targets = projectTree(projects).filter(({ project: p }) =>
+    p.id !== project.parentId && !isWithinProject(projects, p.id, project.id))
+  const move = async (to: string | null, label: string): Promise<void> => {
+    setBusy(true)
+    try {
+      await rpc('nodes.move', { id: project.id, graphId: to })
+      await useStore.getState().refreshProjects()
+      toast(`"${project.name}" moved into ${label}`, 'info')
+      onClose()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal onClose={onClose}>
+      <h2>Move "{project.name}" into…</h2>
+      <div className="project-move-list">
+        {project.parentId && (
+          <button className="btn sm ghost" disabled={busy} onClick={() => void move(null, 'the top level')}>
+            ↑ the top level
+          </button>
+        )}
+        {targets.map(({ project: p, depth }) => (
+          <button key={p.id} className="btn sm ghost" disabled={busy} style={{ paddingLeft: 10 + depth * 14, justifyContent: 'flex-start' }}
+            onClick={() => void move(p.id, `"${p.name}"`)}>
+            {p.name}
+          </button>
+        ))}
+        {!targets.length && !project.parentId && <div className="empty">no other project to move it into</div>}
+      </div>
+      <div className="actions">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+      </div>
+    </Modal>
   )
 }
 

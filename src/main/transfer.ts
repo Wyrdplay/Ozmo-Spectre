@@ -24,7 +24,7 @@
 import path from 'path'
 import * as db from './db'
 import * as vault from './vault'
-import { ApiError, frontmatterFor } from './services'
+import { ApiError, frontmatterFor, deleteProjectNodeRows, ensureProjectNode } from './services'
 import { emitEvent } from './events'
 import { NODE_TYPES, newId, slugify } from '@shared/types'
 import {
@@ -148,7 +148,9 @@ export function exportProject(opts: ExportOptions, source: BundleSource): Projec
   if (!project) throw new ApiError('project not found', 404)
   const pid = project.id
 
-  const nodeRows = db.all<NodeRow>('SELECT * FROM nodes WHERE project_id = ? ORDER BY id', [pid])
+  // the doors of projects nested inside are THEIR projects, not this one's
+  // contents: a link to one travels as a deferred link, like any other project's node
+  const nodeRows = db.all<NodeRow>("SELECT * FROM nodes WHERE project_id = ? AND type <> 'project' ORDER BY id", [pid])
   const localIds = new Set(nodeRows.map((n) => n.id))
 
   // The subquery form, not an IN list of ids: a project with more nodes than
@@ -461,6 +463,7 @@ function deleteProjectRows(pid: string): void {
   db.run('DELETE FROM skill_installs WHERE node_id IN (SELECT id FROM nodes WHERE project_id = ?)', [pid])
   db.run('DELETE FROM nodes WHERE project_id = ?', [pid])
   db.run('DELETE FROM activity WHERE project_id = ?', [pid])
+  deleteProjectNodeRows(pid)
   db.run('DELETE FROM projects WHERE id = ?', [pid])
 }
 
@@ -519,6 +522,17 @@ export async function importProject(opts: ImportOptions, actor: string): Promise
       projectId: existing.id,
       projectName: existing.name
     })
+  }
+
+  // replacing rewrites the project's folder from the bundle, and the projects
+  // nested inside it live in that folder — they would lose their files
+  if (existing && mode === 'replace') {
+    const nested = db.get<{ c: number }>("SELECT COUNT(*) AS c FROM nodes WHERE project_id = ? AND type = 'project'", [existing.id])?.c ?? 0
+    if (nested) {
+      throw new ApiError(`"${existing.name}" holds ${nested} project${nested === 1 ? '' : 's'} — move ${nested === 1 ? 'it' : 'them'} out before replacing it, or import as a duplicate`, 409, {
+        projectId: existing.id
+      })
+    }
   }
 
   // A type this build does not know would be filed in a folder that does not
@@ -701,7 +715,10 @@ export async function importProject(opts: ImportOptions, actor: string): Promise
     // field silently evaporates. It reads the rows we just wrote, so links
     // resolve against the edges that now exist.
     try {
-      vault.ensureProjectFolders(folder, Object.values(NODE_TYPES).map((m) => m.folder))
+      vault.ensureProjectFolders(folder, Object.values(NODE_TYPES).map((m) => m.folder).filter(Boolean))
+      // an imported project lands as a ROOT project — its folder was chosen at the
+      // vault root above — and is nested by hand, like every migrated project
+      ensureProjectNode(pid, null, actor)
       for (const n of b.nodes) {
         const id = nodeIds.get(n.id)!
         const row = db.get<Record<string, unknown>>('SELECT * FROM nodes WHERE id = ?', [id])

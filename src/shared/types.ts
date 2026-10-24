@@ -1,6 +1,6 @@
 // Shared domain model — imported by main (node) and renderer (browser).
 
-export type NodeType = 'idea' | 'pillar' | 'principle' | 'feature' | 'instance' | 'component' | 'bug' | 'question' | 'warp' | 'area' | 'action' | 'feedback' | 'threat' | 'flaw' | 'skill'
+export type NodeType = 'idea' | 'pillar' | 'principle' | 'feature' | 'instance' | 'component' | 'bug' | 'question' | 'warp' | 'area' | 'action' | 'feedback' | 'threat' | 'flaw' | 'skill' | 'project'
 /** The typed, directed annotations a connection can carry — each at most once per connection. */
 export type RelationshipType = 'derives' | 'class-of' | 'depends' | 'shapes' | 'blocks' | 'member' | 'addresses' | 'leads-to'
 /**
@@ -23,7 +23,17 @@ export interface Project {
   createdAt: number
   updatedAt: number
   nodeCount?: number
+  /** the project this one lives in — null for a ROOT project */
+  parentId?: string | null
 }
+
+/**
+ * The hidden project every ROOT project node lives in. A project is a node
+ * (type `project`, owner ruling 2026-10-24), and a node lives in a project —
+ * so the roots need one too. It is never listed, never opened, never written
+ * to by anything but the project verbs.
+ */
+export const WORKSPACE_ROOT_ID = 'pr_root'
 
 export interface SpecNode {
   id: string
@@ -602,7 +612,7 @@ export const NODE_FAMILIES: NodeFamily[] = ['fog', 'frontier', 'spec', 'policy']
 export const NODE_FAMILY: Record<NodeType, NodeFamily> = {
   question: 'fog', threat: 'fog', flaw: 'fog', bug: 'fog', feedback: 'fog', idea: 'fog',
   action: 'frontier', warp: 'frontier',
-  feature: 'spec', instance: 'spec', component: 'spec', area: 'spec',
+  feature: 'spec', instance: 'spec', component: 'spec', area: 'spec', project: 'spec',
   pillar: 'policy', principle: 'policy', skill: 'policy'
 }
 
@@ -992,10 +1002,16 @@ export const NODE_TYPES: Record<NodeType, NodeTypeMeta> = {
     inner: { glyph: '+', color: '#22d3ee', fill: 'solid' },
     hasProgress: false,
     hint: 'A standing instruction agents follow — authored here, installed to .claude/skills. A prompt is the same node with model invocation disabled.'
+  },
+  project: {
+    // folder '' — a project IS a folder; its own spec is the folder note _index.md
+    label: 'Project', plural: 'Projects', folder: '', color: '#e2e8f0', shape: 'square', radius: 24,
+    hasProgress: false,
+    hint: 'A board of its own. Projects nest inside projects, and every node lives in exactly one.'
   }
 }
 
-export const NODE_TYPE_ORDER: NodeType[] = ['pillar', 'principle', 'feature', 'instance', 'component', 'skill', 'warp', 'area', 'idea', 'question', 'bug', 'threat', 'flaw', 'feedback', 'action']
+export const NODE_TYPE_ORDER: NodeType[] = ['project', 'pillar', 'principle', 'feature', 'instance', 'component', 'skill', 'warp', 'area', 'idea', 'question', 'bug', 'threat', 'flaw', 'feedback', 'action']
 
 export interface EdgeTypeMeta {
   label: string

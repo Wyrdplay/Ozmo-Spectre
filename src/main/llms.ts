@@ -419,7 +419,8 @@ Point at the UI  POST /api/ui/focus                  {"view":"graph|lists|backlo
                                                      (answer / graduate: questions; convert: any node)
 See the screen   GET  /api/debug/screenshot          — PNG of the live window
 
-Projects         GET|POST /api/projects              POST {"name","description?"}
+Projects         GET|POST /api/projects              POST {"name","description?","parentId?"} — projects
+                                                     nest, and every project is also a node (§ Hierarchy)
                  GET|PATCH|DELETE /api/projects/:id  PATCH {"name?","description?"}. DELETE ARCHIVES the
                                                      project (off the list and the commons, nothing inside
                                                      touched; restore from the archive). ?purge=1 is the
@@ -1067,6 +1068,30 @@ place a spec lives) and not action (it is removed when completed). A 400 says so
 
 A sub-graph that still has residents cannot be archived (409 — move them out or demote it first).
 A restored node whose sub-graph was demoted meanwhile lands in the nearest graph above it.
+
+PROJECTS ARE NODES. Every project is also a node of type \`project\`, with the SAME id
+(\`pr_…\`) and a body that is always a graph. Projects NEST: a project lives at the top level (a
+ROOT project) or inside another project — never inside a feature, area or other sub-graph. A
+node's \`projectId\` is the project it lives in, so a nested project's node sits in its PARENT's
+graph as a door (type project) and never in its own. A root project's node lives in
+\`pr_root\`, the hidden workspace root: never listed, never written to.
+
+  GET  /api/projects                       every live project, roots and nested, each with
+                                           \`parentId\` (null = root) — build the tree from it
+  POST /api/projects                       {"name","description?","parentId?"} — parentId nests it
+  POST /api/nodes/PROJECT_ID/move          {"graphId": "<project id>" | null} — NEST a project in
+                                           another, or (null) back to the top level. Its folder
+                                           travels whole, with every project inside it; nothing
+                                           inside is re-owned and no link changes. 400 into itself,
+                                           into its own contents, or into anything not a project.
+
+A project's SPEC is its folder note, \`<folder>/_index.md\` — the node's content and the project's
+description are the same text. Renaming goes through PATCH /api/projects/:id {"name"} (it moves
+the folder and every folder nested in it); PATCHing the node's title is a 400. Archiving or
+purging a project that still holds projects is a 409 — move them out first — and a project inside
+an archived one is restored after it. Never: create a node of type project (use POST
+/api/projects), convert to or from project, promote or demote one, or archive one as a node.
+Moving an ordinary node ACROSS projects is not available yet (400).
 
 SCOPED READS — graph + scope on the graph, node list and fog:
 

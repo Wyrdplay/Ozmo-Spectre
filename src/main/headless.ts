@@ -3,7 +3,7 @@ import path from 'path'
 import { getSettings, updateSettings } from './settings'
 import { openDb, flushDb } from './db'
 import * as vault from './vault'
-import { registerWatcherHandlers } from './services'
+import { registerWatcherHandlers, ensureProjectNodes } from './services'
 import { seedIfEmpty } from './seed'
 import { startServer, stopServer, getPort } from './server'
 import { accounts, setAccountProvider, type IssuedSession } from './account'
@@ -86,6 +86,8 @@ async function main(): Promise<void> {
   // Accounts before the server, for the reason index.ts gives: the first request
   // can arrive the instant it listens, and a gate not yet installed is open.
   setAccountProvider(localAccounts())
+  // every project is a node (the hierarchy's migration — idempotent)
+  ensureProjectNodes()
   seedIfEmpty()
 
   // ---- who owns a served board -------------------------------------------

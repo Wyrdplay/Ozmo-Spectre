@@ -28,6 +28,13 @@ export function useOrderedTypes(): NodeType[] {
   return useMemo(() => orderedNodeTypes(typeOrder), [typeOrder])
 }
 
+/** The types a node can be created as, or converted to — every type but `project`,
+ *  which is made on the project picker because it is a folder as well as a node. */
+export function useCreatableTypes(): NodeType[] {
+  const ordered = useOrderedTypes()
+  return useMemo(() => ordered.filter((t) => t !== 'project'), [ordered])
+}
+
 export function TypeDot({ type, size = 9 }: { type: NodeType; size?: number }): React.JSX.Element {
   const styleOf = useTypeStyles()
   return <span className="type-dot" style={{ background: styleOf(type).color, width: size, height: size }} />

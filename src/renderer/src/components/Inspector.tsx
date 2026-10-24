@@ -7,7 +7,7 @@ import { useStore } from '@/store'
 import { host, rpc } from '@/api'
 import {
   ActorBadge, Confirm, FlagChips, IdChip, Modal, NodePicker, TagsEditor, TypeChip, TypeDot,
-  useCopyFlash, useOrderedTypes, useRelStyles, useTypeStyles
+  useCopyFlash, useCreatableTypes, useOrderedTypes, useRelStyles, useTypeStyles
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
 import { lockedProps, useBoardLock } from './BoardLock'
@@ -392,7 +392,7 @@ function GraduateModal({ detail, onClose }: { detail: NodeDetail; onClose: () =>
 function ConvertModal({ detail, onClose }: { detail: NodeDetail; onClose: () => void }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
   const styleOf = useTypeStyles()
-  const typeOrder = useOrderedTypes()
+  const typeOrder = useCreatableTypes()
   // ideas are seeds: feature is their usual landing (like graduate preselects principle);
   // other types have no obvious destination, so they start unselected
   const [type, setType] = useState<NodeType | null>(detail.type === 'idea' ? 'feature' : null)
@@ -462,6 +462,15 @@ function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null
   const graphNodes = useStore((s) => s.graph.nodes)
   const selectNode = useStore((s) => s.selectNode)
   const setFocusNode = useStore((s) => s.setFocusNode)
+  const projects = useStore((s) => s.projects)
+  if (detail.type === 'project') {
+    const count = projects.find((p) => p.id === detail.id)?.nodeCount
+    return (
+      <span className="chip home-chip" title="A project — a board of its own, living inside this one">
+        ▣ project{count !== undefined ? ` · ${count} inside` : ''}
+      </span>
+    )
+  }
   const inside = detail.bodyKind === 'graph' ? graphNodes.filter((n) => n.graphId === detail.id).length : 0
   const home = detail.graphId ? graphNodes.find((n) => n.id === detail.graphId) : null
   if (detail.bodyKind !== 'graph' && !home) return null
@@ -493,8 +502,17 @@ function HomeChips({ detail }: { detail: NodeDetail }): React.JSX.Element | null
 function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { message: string } | null }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
   const graphNodes = useStore((s) => s.graph.nodes)
+  const setProject = useStore((s) => s.setProject)
   const [picking, setPicking] = useState(false)
   const [confirmDemote, setConfirmDemote] = useState(false)
+  // a project's door opens the project; nesting and archiving it live on the project picker
+  if (detail.type === 'project') {
+    return (
+      <button className="btn sm" title="Open this project (or double-click its node)" onClick={() => void setProject(detail.id)}>
+        open project ›
+      </button>
+    )
+  }
   const canHold = SUBGRAPH_TYPES.includes(detail.type) && detail.bodyKind !== 'reference'
   const residents = graphNodes.filter((n) => n.graphId === detail.id).length
   // a node cannot move into itself or anything inside it
@@ -539,7 +557,7 @@ function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { messa
             autoFocus
             placeholder="move into which sub-graph…"
             exclude={new Set([detail.id, ...(detail.graphId ? [detail.graphId] : [])])}
-            filter={(n) => n.bodyKind === 'graph' && n.projectId === detail.projectId && !within(n.id)}
+            filter={(n) => n.bodyKind === 'graph' && n.type !== 'project' && n.projectId === detail.projectId && !within(n.id)}
             onPick={(n) => { setPicking(false); void run('nodes.move', { id: detail.id, graphId: n.id }, `moved into "${n.title}"`) }}
           />
           <div style={{ display: 'flex', gap: 6 }}>
@@ -824,8 +842,16 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
   }
 
   const commitTitle = (): void => {
-    if (title.trim() && title.trim() !== detail.title) patch({ title: title.trim() })
-    else setTitle(detail.title)
+    if (!title.trim() || title.trim() === detail.title) {
+      setTitle(detail.title)
+      return
+    }
+    // a project's title is its name, and the project verb moves its folder too
+    if (detail.type === 'project') {
+      rpc('projects.update', { id, name: title.trim() })
+        .then(() => useStore.getState().refreshProjects())
+        .catch((e) => { setTitle(detail.title); toast(e instanceof Error ? e.message : String(e)) })
+    } else patch({ title: title.trim() })
   }
 
   const addNote = async (): Promise<void> => {
@@ -1115,7 +1141,9 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
                 <button className="btn sm ghost" onClick={() => setAddingLink(null)}>cancel</button>
               </div>
             )}
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10, display: 'flex', gap: 8 }}>
+            {/* a project is never converted, pruned or archived as a node — the
+                project picker's ⋯ menu archives and nests projects */}
+            {detail.type !== 'project' && <div style={{ borderTop: '1px solid var(--border)', marginTop: 10, paddingTop: 10, display: 'flex', gap: 8 }}>
               <button
                 className="btn sm ghost"
                 title={lock
@@ -1146,7 +1174,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
               >
                 ▢ archive…
               </button>
-            </div>
+            </div>}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
               <HierarchyControls detail={detail} lock={lock} />
             </div>

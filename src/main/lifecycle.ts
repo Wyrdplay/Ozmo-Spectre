@@ -3,7 +3,7 @@ import type { BrowserWindow } from 'electron'
 import { getSettings } from './settings'
 import { openDb, flushDb, closeDb } from './db'
 import * as vault from './vault'
-import { registerWatcherHandlers } from './services'
+import { registerWatcherHandlers, ensureProjectNodes } from './services'
 import { seedIfEmpty } from './seed'
 import { startServer, stopServer, getPort } from './server'
 import { setAppInfoProvider } from './registry'
@@ -100,6 +100,8 @@ export async function openWorkspace(): Promise<void> {
   // index.ts, which cost a boot: `session.current` answered "account provider
   // not installed" and the window rendered nothing behind it.)
   setAccountProvider(localAccounts())
+  // every project is a node (the hierarchy's migration — idempotent)
+  ensureProjectNodes()
   seedIfEmpty()
   vault.startWatcher()
 

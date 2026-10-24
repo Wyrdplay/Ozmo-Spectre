@@ -5,7 +5,7 @@ import {
 } from '@shared/types'
 import { useStore } from '@/store'
 import { rpc } from '@/api'
-import { Modal, TagsEditor, useOrderedTypes, useTypeStyles } from './widgets'
+import { Modal, TagsEditor, useCreatableTypes, useTypeStyles } from './widgets'
 
 interface LinkRow {
   nodeId: string
@@ -27,7 +27,7 @@ export function QuickAdd(): React.JSX.Element {
   const [tags, setTags] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const styleOf = useTypeStyles()
-  const typeOrder = useOrderedTypes()
+  const typeOrder = useCreatableTypes()
 
   const nodeById = useMemo(() => new Map(graphNodes.map((n) => [n.id, n])), [graphNodes])
   const [links, setLinks] = useState<LinkRow[]>(() =>

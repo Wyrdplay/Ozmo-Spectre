@@ -343,7 +343,8 @@ function moveDir(from: string, to: string): void {
 export function trashProjectFolder(projectFolder: string): void {
   const abs = path.join(vaultRoot, projectFolder)
   if (!fs.existsSync(abs)) return
-  const dest = path.join(vaultRoot, '.ozmo', 'trash', `${Date.now()}-${projectFolder}`)
+  // basename: a nested project's folder is a path, and the trash is flat
+  const dest = path.join(vaultRoot, '.ozmo', 'trash', `${Date.now()}-${path.basename(projectFolder)}`)
   moveDir(abs, dest)
 }
 

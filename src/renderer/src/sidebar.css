@@ -147,3 +147,13 @@
 }
 .archived-project .t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .archived-project .t span { color: var(--text-faint); font-size: 11.5px; }
+
+/* Move a project into another: the tree, one button per project, indented by depth */
+.project-move-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin: 8px 0;
+}

@@ -3,7 +3,7 @@ import fs from 'fs'
 import crypto from 'crypto'
 import {
   NODE_TYPES, EDGE_TYPES, RELATIONSHIP_TYPES, STAGE_PROGRESS, WARP_STAGES, warpStageOpen, warpAcceptsFeedback,
-  doneRule, prunedRule, NODE_FAMILY, isNodeFamily, familyOf, SUBGRAPH_TYPES,
+  doneRule, prunedRule, NODE_FAMILY, isNodeFamily, familyOf, SUBGRAPH_TYPES, WORKSPACE_ROOT_ID,
   defaultEdgeFor, newId, slugify,
   type NodeType, type EdgeType, type RelationshipType, type EdgeRelationship, type WarpStage,
   type Project, type SpecNode, type SpecEdge, type Annotation,
@@ -271,78 +271,239 @@ function neighborIds(nodeId: string): string[] {
 
 // ---------------------------------------------------------------------------
 // Projects
+//
+// A PROJECT IS A NODE (owner ruling, 2026-10-24): type `project`, body always a
+// graph, the same id as its `projects` row. The row keeps what only a project
+// has (slug, folder, archive state); the node is how it sits in the hierarchy.
+//
+// A node's project_id is the project it LIVES IN, and that holds for project
+// nodes too: a nested project's node lives in its parent, so the parent's graph
+// shows it as a door and no project ever shows up inside itself. A ROOT
+// project's node lives in WORKSPACE_ROOT_ID, the hidden project nobody lists.
+// Every query that filters on project_id keeps the meaning it had.
 
-export function listProjects(): Project[] {
-  const rows = db.all<{ id: string; name: string; slug: string; folder: string; description: string; created_at: number; updated_at: number; node_count: number }>(
-    `SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count
-     FROM projects p WHERE p.archived_at IS NULL ORDER BY p.created_at`
-  )
-  return rows.map((r) => ({
-    id: r.id, name: r.name, slug: r.slug, description: r.description,
-    createdAt: r.created_at, updatedAt: r.updated_at, nodeCount: r.node_count
-  }))
+/** A project's own spec: the folder note at the root of its folder (Obsidian reads it as the folder's page). */
+const PROJECT_NOTE = '_index.md'
+
+type ProjectRowFull = ReturnType<typeof projectRow>
+
+/** The project a project lives in — null for a ROOT project. */
+function parentProjectOf(projectId: string): string | null {
+  const r = db.get<{ project_id: string }>("SELECT project_id FROM nodes WHERE id = ? AND type = 'project'", [projectId])
+  return r && r.project_id !== WORKSPACE_ROOT_ID ? r.project_id : null
 }
 
-export function createProject(p: { name: string; description?: string }, actor: string): Project {
+/** The projects living directly inside this one (archived ones only when asked). */
+function childProjects(projectId: string, includeArchived = false): { id: string; name: string }[] {
+  return db.all<{ id: string; name: string }>(
+    `SELECT p.id, p.name FROM nodes n JOIN projects p ON p.id = n.id
+     WHERE n.type = 'project' AND n.project_id = ? ${includeArchived ? '' : 'AND p.archived_at IS NULL'}
+     ORDER BY p.created_at`, [projectId])
+}
+
+/**
+ * A project folder free for `want` inside `parentFolder` (vault-relative; '' =
+ * the vault root). Returns the full vault-relative folder. Inside a project the
+ * name must also miss the type folders and any sub-graph folder already on disk.
+ */
+function freeProjectFolder(parentFolder: string, want: string, exceptId = ''): string {
+  const base = vault.sanitizeFileName(want)
+  const typeFolders = new Set(Object.values(NODE_TYPES).map((m) => m.folder.toLowerCase()).filter(Boolean))
+  const taken = (name: string): boolean => {
+    const rel = parentFolder ? path.join(parentFolder, name) : name
+    if (db.get('SELECT 1 AS x FROM projects WHERE folder = ? AND id <> ?', [rel, exceptId])) return true
+    return !!parentFolder && (typeFolders.has(name.toLowerCase()) || fs.existsSync(vault.absPath(rel)))
+  }
+  let name = base
+  let i = 2
+  while (taken(name)) name = `${base} ${i++}`
+  return parentFolder ? path.join(parentFolder, name) : name
+}
+
+/**
+ * A folder moved from `from` to `to`: re-root every stored path under it — live
+ * nodes, archived nodes, and the folders of every project nested inside. Paths
+ * are matched by prefix, never by project, because a nested project's files
+ * live under its parent's folder.
+ */
+function rehomeFolder(from: string, to: string): void {
+  // Either separator: a vault written by the container (POSIX) is also opened
+  // by the desktop app on Windows, and its stored paths keep the `/` they were
+  // written with. Compared on `/`, re-joined in this platform's form.
+  const slash = (s: string): string => s.replace(/\\/g, '/')
+  const fromS = slash(from)
+  const moved = (fp: string): string => {
+    const s = slash(fp)
+    return s === fromS ? to : s.startsWith(fromS + '/') ? path.join(to, ...s.slice(fromS.length + 1).split('/')) : fp
+  }
+  // LIKE is a superset here (case-insensitive, `_` and `%` wild) — the prefix test decides
+  const likes = [`${fromS}/%`, `${fromS.replace(/\//g, '\\')}\\%`]
+  for (const n of db.all<{ id: string; file_path: string }>('SELECT id, file_path FROM nodes WHERE file_path LIKE ? OR file_path LIKE ?', likes)) {
+    const fp = moved(n.file_path)
+    if (fp !== n.file_path) db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [fp, n.id])
+  }
+  for (const a of db.all<{ id: string; file_path: string; row: string }>('SELECT id, file_path, row FROM archived_nodes WHERE file_path LIKE ? OR file_path LIKE ?', likes)) {
+    if (moved(a.file_path) === a.file_path) continue
+    let row: Record<string, unknown> = {}
+    try { row = JSON.parse(a.row) } catch { row = {} }
+    if (typeof row.file_path === 'string') row.file_path = moved(row.file_path)
+    db.run('UPDATE archived_nodes SET file_path = ?, row = ? WHERE id = ?', [moved(a.file_path), JSON.stringify(row), a.id])
+  }
+  for (const p of db.all<{ id: string; folder: string }>('SELECT id, folder FROM projects WHERE folder = ? OR folder LIKE ? OR folder LIKE ?', [from, ...likes])) {
+    const f = moved(p.folder)
+    if (f !== p.folder) db.run('UPDATE projects SET folder = ? WHERE id = ?', [f, p.id])
+  }
+}
+
+/**
+ * Give a project its node: a door in the graph it lives in (`parentId`, or the
+ * workspace root), with the folder note as its spec. A note already on disk is
+ * kept — its words are the spec — and one that is missing is written from the
+ * project's description.
+ */
+function insertProjectNode(p: { id: string; name: string; folder: string; description: string; created_at: number; updated_at: number },
+  parentId: string | null, actor: string): void {
+  const rel = path.join(p.folder, PROJECT_NOTE)
+  const legacy = db.hasLegacyStatusColumn()
+  db.run(
+    `INSERT INTO nodes (id, project_id, type, title, ${legacy ? 'status, ' : ''}file_path, is_graph, created_at, updated_at, created_by)
+     VALUES (?,?,?,?,${legacy ? '?,' : ''}?,1,?,?,?)`,
+    [p.id, parentId ?? WORKSPACE_ROOT_ID, 'project', p.name, ...(legacy ? [''] : []), rel, p.created_at, p.updated_at, actor])
+  if (!fs.existsSync(vault.absPath(rel))) vault.writeBody(rel, p.description ?? '', frontmatterFor(nodeRow(p.id)))
+  recordRevision(p.id, vault.readBody(rel), actor)
+}
+
+/**
+ * Give an existing project its node, in `parentId` (null = a root project) —
+ * for an import, which lands the project's rows first and its files after.
+ * No-op when the node is already there.
+ */
+export function ensureProjectNode(id: string, parentId: string | null, actor: string): void {
+  if (db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [id])) return
+  const live = parentId && db.get('SELECT 1 AS x FROM projects WHERE id = ? AND archived_at IS NULL', [parentId])
+  insertProjectNode(projectRow(id), live ? parentId : null, actor)
+}
+
+/**
+ * A project's node and everything hanging off it: its tags, history, notes and
+ * every connection touching it. The rows a project's OWN contents need are
+ * deleted by whoever removes the project; this is the one row that lives in the
+ * PARENT, so no project-scoped delete ever reaches it.
+ */
+export function deleteProjectNodeRows(id: string): void {
+  db.run(
+    `DELETE FROM annotations WHERE (parent_kind = 'node' AND parent_id = ?)
+        OR (parent_kind = 'edge' AND parent_id IN (SELECT id FROM edges WHERE source_id = ? OR target_id = ?))`, [id, id, id])
+  db.run('DELETE FROM node_revisions WHERE node_id = ?', [id])
+  db.run('DELETE FROM node_tags WHERE node_id = ?', [id])
+  db.run('DELETE FROM edge_relationships WHERE edge_id IN (SELECT id FROM edges WHERE source_id = ? OR target_id = ?)', [id, id])
+  db.run('DELETE FROM edges WHERE source_id = ? OR target_id = ?', [id, id])
+  db.run('DELETE FROM archived_edges WHERE source_id = ? OR target_id = ?', [id, id])
+  db.run("DELETE FROM nodes WHERE id = ? AND type = 'project'", [id])
+}
+
+/**
+ * Every project has its node, and the workspace root exists. Runs at boot, after
+ * the database opens and before the watcher starts; idempotent, so a board that
+ * already has them is untouched. This IS the migration: each existing project
+ * becomes a ROOT project node, every other node keeps its home, and nothing
+ * moves on disk (owner ruling, 2026-10-24).
+ */
+export function ensureProjectNodes(): void {
+  const t = now()
+  if (!db.get('SELECT 1 AS x FROM projects WHERE id = ?', [WORKSPACE_ROOT_ID])) {
+    db.run('INSERT INTO projects (id, name, slug, folder, description, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
+      [WORKSPACE_ROOT_ID, 'Workspace', '_workspace', '', 'Every root project lives here. Never listed, never opened.', t, t])
+  }
+  for (const p of db.all<ProjectRowFull>('SELECT * FROM projects WHERE id <> ? ORDER BY created_at', [WORKSPACE_ROOT_ID])) {
+    if (db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [p.id])) continue
+    insertProjectNode(p, null, 'spectre')
+  }
+}
+
+const toProject = (r: ProjectRowFull & { parent_id?: string | null; node_count?: number }): Project => ({
+  id: r.id, name: r.name, slug: r.slug, description: r.description,
+  createdAt: r.created_at, updatedAt: r.updated_at, nodeCount: r.node_count ?? 0,
+  parentId: r.parent_id && r.parent_id !== WORKSPACE_ROOT_ID ? r.parent_id : null
+})
+
+// a project's own count is its contents — the doors of the projects inside it are not
+const PROJECT_COLUMNS = `p.*, pn.project_id AS parent_id,
+  (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id AND n.type <> 'project') AS node_count`
+
+/** Every live project, roots and nested alike, each naming its parent. */
+export function listProjects(): Project[] {
+  return db.all<ProjectRowFull & { parent_id: string | null; node_count: number }>(
+    `SELECT ${PROJECT_COLUMNS} FROM projects p LEFT JOIN nodes pn ON pn.id = p.id
+     WHERE p.archived_at IS NULL AND p.id <> ? ORDER BY p.created_at`, [WORKSPACE_ROOT_ID]
+  ).map(toProject)
+}
+
+export function createProject(p: { name: string; description?: string; parentId?: string | null }, actor: string): Project {
   need(p?.name?.trim(), 'name is required')
+  need(p.parentId === undefined || p.parentId === null || typeof p.parentId === 'string', 'parentId must be a project id, or null for a root project')
+  const parent = p.parentId ? projectRow(p.parentId) : null
+  need(!parent || parent.id !== WORKSPACE_ROOT_ID, 'the workspace root is not a project — omit parentId for a root project', 400)
+  need(!parent?.archived_at, `"${parent?.name}" is archived — restore it before putting a project inside it`, 409)
   const name = p.name.trim()
   let slug = slugify(name)
   let i = 2
   while (db.get('SELECT 1 FROM projects WHERE slug = ?', [slug])) slug = `${slugify(name)}-${i++}`
-  let folder = vault.sanitizeFileName(name)
-  i = 2
-  while (db.get('SELECT 1 FROM projects WHERE folder = ?', [folder])) folder = `${vault.sanitizeFileName(name)} ${i++}`
+  const folder = freeProjectFolder(parent?.folder ?? '', name)
   const id = newId('pr')
   const t = now()
+  const row = { id, name, slug, folder, description: p.description ?? '', created_at: t, updated_at: t }
   db.run('INSERT INTO projects (id, name, slug, folder, description, created_at, updated_at) VALUES (?,?,?,?,?,?,?)',
-    [id, name, slug, folder, p.description ?? '', t, t])
-  vault.ensureProjectFolders(folder, Object.values(NODE_TYPES).map((m) => m.folder))
-  const proj: Project = { id, name, slug, description: p.description ?? '', createdAt: t, updatedAt: t, nodeCount: 0 }
+    [id, name, slug, folder, row.description, t, t])
+  vault.ensureProjectFolders(folder, Object.values(NODE_TYPES).map((m) => m.folder).filter(Boolean))
+  insertProjectNode(row, parent?.id ?? null, actor)
+  const proj: Project = { id, name, slug, description: row.description, createdAt: t, updatedAt: t, nodeCount: 0, parentId: parent?.id ?? null }
   logActivity(id, actor, 'project.created', 'project', id, `created project "${name}"`)
   emitEvent('project.created', id, proj, actor)
+  if (parent) {
+    logActivity(parent.id, actor, 'node.created', 'node', id, `created project "${name}" inside "${parent.name}"`)
+    emitEvent('node.created', parent.id, loadNode(id), actor)
+  }
   return proj
 }
 
 export function getProject(p: { id: string }): Project {
-  const r = projectRow(p.id)
-  const count = db.get<{ c: number }>('SELECT COUNT(*) AS c FROM nodes WHERE project_id = ?', [p.id])!.c
-  return { id: r.id, name: r.name, slug: r.slug, description: r.description, createdAt: r.created_at, updatedAt: r.updated_at, nodeCount: count }
+  need(p.id !== WORKSPACE_ROOT_ID, 'the workspace root is not a project', 404)
+  projectRow(p.id)
+  return toProject(db.get<ProjectRowFull & { parent_id: string | null; node_count: number }>(
+    `SELECT ${PROJECT_COLUMNS} FROM projects p LEFT JOIN nodes pn ON pn.id = p.id WHERE p.id = ?`, [p.id])!)
 }
 
 export async function updateProject(p: { id: string; name?: string; description?: string }, actor: string): Promise<Project> {
+  need(p.id !== WORKSPACE_ROOT_ID, 'the workspace root is not a project', 404)
   const r = projectRow(p.id)
   const name = p.name?.trim() || r.name
   if (name !== r.name) {
-    let folder = vault.sanitizeFileName(name)
-    let i = 2
-    while (db.get('SELECT 1 FROM projects WHERE folder = ? AND id != ?', [folder, p.id])) folder = `${vault.sanitizeFileName(name)} ${i++}`
+    // a nested project's folder stays inside its parent's
+    const parent = parentProjectOf(p.id)
+    const folder = freeProjectFolder(parent ? projectRow(parent).folder : '', name, p.id)
     await vault.withWatcherPaused(() => vault.renameProjectFolder(r.folder, folder))
-    const prefix = r.folder + path.sep
-    for (const n of db.all<NodeRow>('SELECT * FROM nodes WHERE project_id = ?', [p.id])) {
-      if (n.file_path.startsWith(prefix)) {
-        db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [path.join(folder, n.file_path.slice(prefix.length)), n.id])
-      }
-    }
-    for (const a of db.all<{ id: string; file_path: string; row: string }>('SELECT id, file_path, row FROM archived_nodes WHERE project_id = ?', [p.id])) {
-      const moved = (fp: string): string => (fp.startsWith(prefix) ? path.join(folder, fp.slice(prefix.length)) : fp)
-      let row: Record<string, unknown> = {}
-      try { row = JSON.parse(a.row) } catch { row = {} }
-      if (typeof row.file_path === 'string') row.file_path = moved(row.file_path)
-      db.run('UPDATE archived_nodes SET file_path = ?, row = ? WHERE id = ?', [moved(a.file_path), JSON.stringify(row), a.id])
-    }
-    db.run('UPDATE projects SET folder = ? WHERE id = ?', [folder, p.id])
+    rehomeFolder(r.folder, folder)
   }
-  db.run('UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?',
-    [name, p.description ?? r.description, now(), p.id])
+  const description = p.description ?? r.description
+  db.run('UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ?', [name, description, now(), p.id])
+  // the project's node: its title, and its spec (the folder note) when the description changed
+  db.run("UPDATE nodes SET title = ?, updated_at = ? WHERE id = ? AND type = 'project'", [name, now(), p.id])
+  const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [p.id])
+  if (node && p.description !== undefined && p.description !== vault.readBody(node.file_path)) {
+    vault.writeBody(node.file_path, description, frontmatterFor(node))
+    recordRevision(p.id, vault.readBody(node.file_path), actor)
+  }
   const proj = getProject({ id: p.id })
   logActivity(p.id, actor, 'project.updated', 'project', p.id, `updated project "${proj.name}"`)
   emitEvent('project.updated', p.id, proj, actor)
+  if (node) emitEvent('node.updated', node.project_id, loadNode(p.id), actor)
   return proj
 }
 
 /** Has this board ever had a project — archived ones included? (seeding asks) */
 export function hasAnyProject(): boolean {
-  return !!db.get('SELECT 1 AS x FROM projects LIMIT 1')
+  return !!db.get('SELECT 1 AS x FROM projects WHERE id <> ? LIMIT 1', [WORKSPACE_ROOT_ID])
 }
 
 /**
@@ -353,12 +514,19 @@ export function hasAnyProject(): boolean {
  */
 export async function deleteProject(p: { id: string; purge?: boolean }, actor: string): Promise<{ ok: true; archived?: true }> {
   if (p.purge) return purgeProject(p, actor)
+  need(p.id !== WORKSPACE_ROOT_ID, 'the workspace root is not a project', 404)
   const r = projectRow(p.id)
   need(!r.archived_at, `project "${r.name}" is already archived`, 409)
+  const inside = childProjects(p.id)
+  need(inside.length === 0,
+    `"${r.name}" holds ${inside.length} project${inside.length === 1 ? '' : 's'} (${inside.map((c) => `"${c.name}"`).join(', ')}) — move ${inside.length === 1 ? 'it' : 'them'} out or archive ${inside.length === 1 ? 'it' : 'them'} first`, 409)
   db.run('UPDATE projects SET archived_at = ?, archived_by = ?, updated_at = ? WHERE id = ?', [now(), actor, now(), p.id])
   logActivity(p.id, actor, 'project.archived', 'project', p.id, `archived project "${r.name}"`)
   emitEvent('project.deleted', p.id, { id: p.id, name: r.name, archived: true }, actor)
   emitEvent('project.archived', p.id, { id: p.id, name: r.name }, actor)
+  // its door leaves the parent's graph with it
+  const parent = parentProjectOf(p.id)
+  if (parent) emitEvent('node.deleted', parent, { id: p.id, type: 'project', title: r.name }, actor)
   return { ok: true, archived: true }
 }
 
@@ -366,7 +534,7 @@ export async function deleteProject(p: { id: string; purge?: boolean }, actor: s
 export function listArchivedProjects(): (Project & { archivedAt: number; archivedBy: string })[] {
   return db.all<{ id: string; name: string; slug: string; description: string; created_at: number; updated_at: number
     archived_at: number; archived_by: string; node_count: number }>(
-    `SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id) AS node_count
+    `SELECT p.*, (SELECT COUNT(*) FROM nodes n WHERE n.project_id = p.id AND n.type <> 'project') AS node_count
      FROM projects p WHERE p.archived_at IS NOT NULL ORDER BY p.archived_at DESC`
   ).map((r) => ({
     id: r.id, name: r.name, slug: r.slug, description: r.description, createdAt: r.created_at, updatedAt: r.updated_at,
@@ -378,11 +546,17 @@ export function listArchivedProjects(): (Project & { archivedAt: number; archive
 export function restoreProject(p: { id: string }, actor: string): Project {
   const r = projectRow(p.id)
   need(r.archived_at, `project "${r.name}" is not archived`, 409)
+  const parent = parentProjectOf(p.id)
+  if (parent) {
+    const pr = projectRow(parent)
+    need(!pr.archived_at, `"${r.name}" lives inside "${pr.name}", which is archived — restore "${pr.name}" first`, 409)
+  }
   db.run('UPDATE projects SET archived_at = NULL, archived_by = \'\', updated_at = ? WHERE id = ?', [now(), p.id])
   const proj = getProject({ id: p.id })
   logActivity(p.id, actor, 'project.restored', 'project', p.id, `restored project "${r.name}" from the archive`)
   emitEvent('project.created', p.id, proj, actor)
   emitEvent('project.restored', p.id, proj, actor)
+  if (parent) emitEvent('node.created', parent, loadNode(p.id), actor)
   return proj
 }
 
@@ -391,7 +565,13 @@ export function restoreProject(p: { id: string }, actor: string): Project {
  * archived), its folder to the vault trash. Host-only, and never what DELETE does.
  */
 export async function purgeProject(p: { id: string }, actor: string): Promise<{ ok: true }> {
+  need(p.id !== WORKSPACE_ROOT_ID, 'the workspace root is not a project', 404)
   const r = projectRow(p.id)
+  // nested projects' files live inside this folder, which goes to the trash whole
+  const inside = childProjects(p.id, true)
+  need(inside.length === 0,
+    `"${r.name}" holds ${inside.length} project${inside.length === 1 ? '' : 's'} (${inside.map((c) => `"${c.name}"`).join(', ')}) — move or purge ${inside.length === 1 ? 'it' : 'them'} first`, 409)
+  const parent = parentProjectOf(p.id)
   // Every dependent row is deleted explicitly, children first, in one transaction.
   // ON DELETE CASCADE stays in the schema but must NOT be load-bearing here: the
   // foreign_keys pragma is per-connection and sql.js export() resets it (see
@@ -445,10 +625,13 @@ export async function purgeProject(p: { id: string }, actor: string): Promise<{ 
     db.run('DELETE FROM archived_nodes WHERE project_id = ?', [p.id])
     db.run('DELETE FROM nodes WHERE project_id = ?', [p.id])
     db.run('DELETE FROM activity WHERE project_id = ?', [p.id])
+    // the project's own node lives in its parent, so nothing above reached it
+    deleteProjectNodeRows(p.id)
     db.run('DELETE FROM projects WHERE id = ?', [p.id])
   })
   await vault.withWatcherPaused(() => vault.trashProjectFolder(r.folder))
   emitEvent('project.deleted', p.id, { id: p.id, name: r.name }, actor)
+  if (parent) emitEvent('node.deleted', parent, { id: p.id, type: 'project', title: r.name }, actor)
   return { ok: true }
 }
 
@@ -481,11 +664,14 @@ export interface DecoratedGraph extends GraphPayload {
  * re-implementing them. A second predicate elsewhere is the bug the
  * services/renderer closure audit already found once — do not write one.
  */
+/** SQL over `nodes n`: false for the door of an archived project, which leaves its parent's graph with it. */
+const LIVE_DOOR = "NOT (n.type = 'project' AND EXISTS (SELECT 1 FROM projects ap WHERE ap.id = n.id AND ap.archived_at IS NOT NULL))"
+
 export function graphInternal(projectId: string): DecoratedGraph {
   projectRow(projectId)
   const nodeRows = db.all<NodeRow>(
     `SELECT n.*, (SELECT COUNT(*) FROM annotations a WHERE a.parent_id = n.id) AS annotation_count
-     FROM nodes n WHERE n.project_id = ? ORDER BY n.created_at`, [projectId]
+     FROM nodes n WHERE n.project_id = ? AND ${LIVE_DOOR} ORDER BY n.created_at`, [projectId]
   )
   // A cross-project connection belongs to ONE project's edge rows but is real in
   // BOTH graphs, so the edge query reaches by endpoint as well as by ownership —
@@ -701,7 +887,7 @@ function computeProgress(nodes: SpecNode[], edges: SpecEdge[], done: Set<string>
 export function listNodes(p: { projectId: string; type?: string; family?: string; status?: string; tag?: string; q?: string; unassigned?: boolean; graph?: unknown; scope?: unknown }): SpecNode[] {
   need(p.status === undefined, STATUS_GONE)
   projectRow(p.projectId)
-  const where: string[] = ['n.project_id = ?']
+  const where: string[] = ['n.project_id = ?', LIVE_DOOR]
   const params: unknown[] = [p.projectId]
   const inScope = scopedIds(p.projectId, p.graph, p.scope)
   if (inScope) {
@@ -822,8 +1008,11 @@ export function createNode(
   actor: string
 ): SpecNode {
   need(p.status === undefined, STATUS_GONE)
+  need(p.type !== 'project', 'a project is created with POST /api/projects {"name", "parentId?"} — it is a folder as well as a node')
+  need(p.projectId !== WORKSPACE_ROOT_ID, 'the workspace root holds projects only — create a project with POST /api/projects', 400)
   const proj = projectRow(p.projectId)
-  const home = p.graphId ? String(p.graphId) : null
+  // a project is a graph: naming the project itself is naming its top level
+  const home = p.graphId && p.graphId !== p.projectId ? String(p.graphId) : null
   if (home) {
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [home])
     need(g, `graph "${home}" not found`, 404)
@@ -955,6 +1144,8 @@ export function setContent(p: { id: string; content: string }, actor: string): {
   vault.writeBody(r.file_path, p.content, frontmatterFor(r))
   recordRevision(p.id, vault.readBody(r.file_path), actor)
   db.run('UPDATE nodes SET updated_at = ? WHERE id = ?', [now(), p.id])
+  // a project's spec IS its description: one text, two names for it
+  if (r.type === 'project') db.run('UPDATE projects SET description = ?, updated_at = ? WHERE id = ?', [vault.readBody(r.file_path), now(), p.id])
   logActivity(r.project_id, actor, 'node.content.updated', 'node', p.id, `updated spec of "${r.title}"`)
   emitEvent('node.content.updated', r.project_id, { id: p.id }, actor)
   return { ok: true }
@@ -985,6 +1176,10 @@ export function updateNode(
   let filePath = r.file_path
   let title = r.title
 
+  // a project's title is its name, and renaming one moves its folder and every
+  // folder nested in it — the project verb owns that
+  need(!(r.type === 'project' && p.title !== undefined && p.title.trim() && p.title.trim() !== r.title),
+    `"${r.title}" is a project — rename it with PATCH /api/projects/${r.id} {"name"}`, 400)
   if (p.title !== undefined && p.title.trim() && p.title.trim() !== r.title) {
     title = p.title.trim()
     filePath = vault.renameNodeFile(r.file_path, title)
@@ -1139,6 +1334,7 @@ export type ArchiveVerb = 'archived' | 'deleted' | 'completed' | 'answered' | 'p
 function archiveNode(
   r: NodeRow, actor: string, verb: ArchiveVerb, note: string, why: string, detail: Record<string, unknown> = {}
 ): string[] {
+  need(r.type !== 'project', `"${r.title}" is a project — archive it with DELETE /api/projects/${r.id}`, 400)
   if (r.is_graph) {
     const n = residentCount(r.id)
     need(n === 0, `"${r.title}" is a sub-graph holding ${n} node${n === 1 ? '' : 's'} — move them out or demote it first`, 409)
@@ -1549,6 +1745,7 @@ const residentCount = (graphId: string): number =>
  */
 export function promoteNode(p: { id: string }, actor: string): SpecNode {
   const r = nodeRow(p.id)
+  need(r.type !== 'project', `"${r.title}" is a project — it is already a graph`, 409)
   need(SUBGRAPH_OK.has(r.type as NodeType),
     `a ${r.type} cannot hold a sub-graph — only ${SUBGRAPH_TYPES.join(', ')} can (findings about a spec are never a place a spec lives)`, 400)
   need(!r.references_node_id, `"${r.title}" is a reference to another project's node — promote it where it lives`, 400)
@@ -1615,12 +1812,27 @@ async function moveHome(r: NodeRow, target: string | null, actor: string): Promi
 
 /** Move one node — or several (`ids`) — into a sub-graph, or to the top level (`graphId: null`). */
 export async function moveNodes(p: { id?: string; ids?: unknown; graphId?: unknown }, actor: string): Promise<{ ok: true; moved: string[] }> {
-  need(p.graphId === null || typeof p.graphId === 'string', 'graphId is required — a sub-graph node id, or null for the project top level')
+  need(p.graphId === null || typeof p.graphId === 'string', 'graphId is required — a sub-graph node id, a project id, or null for the top level')
   const ids = p.id ? [p.id] : p.ids
   need(Array.isArray(ids) && ids.length > 0 && ids.every((x) => typeof x === 'string'), 'id, or ids: [node ids], is required')
   const rows = (ids as string[]).map((id) => nodeRow(id))
+  const asked = (p.graphId as string | null) || null
+  // PROJECTS move as projects: into another project, or (null) to the top level
+  const projects = rows.filter((r) => r.type === 'project')
+  if (projects.length) {
+    need(projects.length === rows.length, 'move projects and other nodes in separate calls — a project moves into a project, a node into a graph')
+    for (const r of projects) validateProjectMove(r, asked)
+    const moved: string[] = []
+    for (const r of projects) if (await moveProject(nodeRow(r.id), asked, actor)) moved.push(r.id)
+    return { ok: true, moved }
+  }
+  // a project is a graph: naming a node's own project is naming its top level
+  const target = asked && rows.every((r) => r.project_id === asked) ? null : asked
+  if (target) {
+    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
+    need(!g || g.type !== 'project', `"${g?.title}" is another project — moving a node across projects is not available yet`, 400)
+  }
   // validate every move before any file moves, so a bad batch moves nothing
-  const target = (p.graphId as string | null) || null
   for (const r of rows) {
     if (target) {
       const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
@@ -1644,6 +1856,7 @@ export async function moveNodes(p: { id?: string; ids?: unknown; graphId?: unkno
  */
 export async function demoteNode(p: { id: string }, actor: string): Promise<SpecNode & { movedUp: number }> {
   const r = nodeRow(p.id)
+  need(r.type !== 'project', `"${r.title}" is a project, and a project is always a graph — it cannot be demoted`, 400)
   need(r.is_graph, `"${r.title}" is not a sub-graph`, 409)
   const residents = db.all<NodeRow>('SELECT * FROM nodes WHERE graph_id = ? ORDER BY is_graph DESC, id', [r.id])
   for (const c of residents) await moveHome(nodeRow(c.id), r.graph_id ?? null, actor)
@@ -1657,6 +1870,57 @@ export async function demoteNode(p: { id: string }, actor: string): Promise<Spec
   emitEvent('node.updated', r.project_id, node, actor)
   emitEvent('node.demoted', r.project_id, { id: r.id, title: r.title, movedUp: residents.length }, actor)
   return { ...node, movedUp: residents.length }
+}
+
+/** Refuse a project move that cannot happen, before anything moves. `target` null = a root project. */
+function validateProjectMove(r: NodeRow, target: string | null): void {
+  if (!target) return
+  const t = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
+  need(t, `project "${target}" not found`, 404)
+  need(t!.type === 'project',
+    `"${t!.title}" is a ${t!.type} — a project lives at the top level or inside another project, never inside a ${t!.type}`, 400)
+  need(!projectRow(target).archived_at, `"${t!.title}" is archived — restore it first`, 409)
+  // up the chain of parents from the target: meeting the mover means moving into itself
+  const seen = new Set<string>()
+  for (let cur: string | null = target; cur && !seen.has(cur); cur = parentProjectOf(cur)) {
+    seen.add(cur)
+    need(cur !== r.id, `"${t!.title}" is inside "${r.title}" — a project cannot move into itself or its own contents`, 400)
+  }
+}
+
+/**
+ * NEST — move a project into another project (or to the top level). Its whole
+ * folder travels — every project nested inside it with it — and every stored
+ * path under it is re-rooted. Its contents keep their project: only the door
+ * moves, which is why nothing inside is re-owned and no link changes.
+ */
+async function moveProject(r: NodeRow, target: string | null, actor: string): Promise<boolean> {
+  const dest = target ?? WORKSPACE_ROOT_ID
+  if (r.project_id === dest) return false
+  const proj = projectRow(r.id)
+  const parentFolder = target ? projectRow(target).folder : ''
+  const to = freeProjectFolder(parentFolder, path.basename(proj.folder), r.id)
+  const from = proj.folder
+  await vault.withWatcherPaused(() => vault.moveFolder(from, to))
+  db.tx(() => {
+    rehomeFolder(from, to)
+    db.run('UPDATE nodes SET project_id = ?, graph_id = NULL, updated_at = ? WHERE id = ?', [dest, now(), r.id])
+  })
+  refreshNodeFile(r.id)
+  const fromName = r.project_id === WORKSPACE_ROOT_ID ? 'the top level' : `"${projectRow(r.project_id).name}"`
+  const toName = target ? `"${projectRow(target).name}"` : 'the top level'
+  const summary = `moved project "${proj.name}" from ${fromName} into ${toName}`
+  const detail = { from: r.project_id === WORKSPACE_ROOT_ID ? null : r.project_id, to: target, folder: to }
+  logActivity(r.id, actor, 'project.moved', 'project', r.id, summary, detail)
+  // both parents' graphs change: the door leaves one and arrives in the other
+  if (r.project_id !== WORKSPACE_ROOT_ID) emitEvent('node.deleted', r.project_id, { id: r.id, type: 'project', title: r.title }, actor)
+  if (target) {
+    logActivity(target, actor, 'node.moved', 'node', r.id, summary, detail)
+    emitEvent('node.created', target, loadNode(r.id), actor)
+  }
+  emitEvent('project.updated', r.id, getProject({ id: r.id }), actor)
+  emitEvent('node.moved', dest, { id: r.id, from: detail.from, to: target }, actor)
+  return true
 }
 
 /** Every graph id at or below `root` (null = top level): the `down` scope's homes. */
@@ -1687,7 +1951,8 @@ export function scopedIds(projectId: string, graph: unknown, scope: unknown): Se
   if (graph === undefined || graph === null || graph === '') return null
   need(typeof graph === 'string', 'graph must be a sub-graph node id, or "root"')
   need(scope === undefined || scope === '' || scope === 'local' || scope === 'down', 'scope must be local or down')
-  const root = graph === 'root' ? null : graph as string
+  // the project's own id names its top level, exactly like 'root'
+  const root = graph === 'root' || graph === projectId ? null : graph as string
   if (root) {
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [root])
     need(g, `graph "${root}" not found`, 404)
@@ -2641,6 +2906,9 @@ export async function convertNode(p: { id: string; type?: string }, actor: strin
   const from = r.type as NodeType
   const to = p.type as NodeType
   need(to !== from, `"${r.title}" already is ${from === 'idea' || from === 'action' ? 'an' : 'a'} ${from} — pick a different type to convert to`)
+  // a project is a folder with a row of its own; no other type is, or becomes, one
+  need(from !== 'project', `"${r.title}" is a project — a project is never converted into another type`, 400)
+  need(to !== 'project', 'nothing converts into a project — create one with POST /api/projects, and move what belongs in it', 400)
   need(!r.is_graph || SUBGRAPH_TYPES.includes(to),
     `"${r.title}" is a sub-graph, and a ${to} cannot hold one — demote it first`, 400)
 
@@ -3832,7 +4100,8 @@ export function registerWatcherHandlers(): void {
           updates.push('file_path = ?')
           params.push(change.relPath)
         }
-        if (change.filenameTitle && change.filenameTitle !== vault.sanitizeFileName(r.title) && change.kind === 'add') {
+        // a project's file is its folder note: the folder is its name, never the file
+        if (r.type !== 'project' && change.filenameTitle && change.filenameTitle !== vault.sanitizeFileName(r.title) && change.kind === 'add') {
           updates.push('title = ?')
           params.push(change.filenameTitle)
         }
@@ -3901,6 +4170,7 @@ export function registerWatcherHandlers(): void {
           }
         }
         recordRevision(change.id, vault.readBody(change.relPath), 'obsidian') // no-op when only frontmatter moved
+        if (r.type === 'project') db.run('UPDATE projects SET description = ? WHERE id = ?', [vault.readBody(change.relPath), change.id])
         const node = loadNode(change.id)
         logActivity(r.project_id, 'obsidian', 'node.content.updated', 'node', change.id, `"${node.title}" edited in vault`)
         emitEvent('node.updated', r.project_id, node, 'obsidian')

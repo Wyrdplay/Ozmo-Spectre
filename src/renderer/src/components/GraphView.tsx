@@ -1985,7 +1985,10 @@ export function GraphView(): React.JSX.Element {
     const cy = e.clientY - rect.top
     const { x, y } = toWorld(cx, cy)
     if (hitContainerBadge(cx, cy)) return // fast badge clicks must not spawn quick-add
-    if (!hitNode(x, y)) showQuickAdd(dropPoint(x, y))
+    const hit = hitNode(x, y)
+    // a project's door: double-click goes through it
+    if (hit?.data.type === 'project' && !hit.data.portal) void useStore.getState().setProject(hit.id)
+    else if (!hit) showQuickAdd(dropPoint(x, y))
   }
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>): void => {

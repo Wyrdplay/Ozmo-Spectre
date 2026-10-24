@@ -1009,6 +1009,90 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   await req('DELETE', `/api/projects/${hp}?purge=1`)
 }
 
+// PROJECTS ARE NODES — type `project`, body always a graph. Projects nest inside
+// projects; a project's door sits in the graph it lives in; its folder note is
+// its spec; nesting moves the folder whole and changes nothing inside.
+{
+  const stamp = Date.now()
+  const mkProject = async (name, extra = {}) => (await req('POST', '/api/projects', { name, ...extra }))
+  const P = (await mkProject(`Engine ${stamp}`, { description: 'The engine.' })).json
+  const pn = (await req('GET', `/api/nodes/${P.id}`)).json
+  ok('projects: a project is a node with the same id', pn.id === P.id && pn.type === 'project' && pn.bodyKind === 'graph', JSON.stringify(pn).slice(0, 300))
+  ok('projects: a root project lives in the workspace root, at its top level', pn.projectId === 'pr_root' && pn.graphId === null, `${pn.projectId} ${pn.graphId}`)
+  ok('projects: its spec is the folder note, and it is the description', /_index\.md$/.test(pn.filePath) && pn.content.includes('The engine.'), pn.filePath)
+  const listed = (await req('GET', '/api/projects')).json
+  ok('projects: the list names parents and never shows the workspace root',
+    listed.some((p) => p.id === P.id && p.parentId === null) && !listed.some((p) => p.id === 'pr_root'))
+  ok('projects: the workspace root is not a project', (await req('GET', '/api/projects/pr_root')).status === 404)
+
+  // nesting by creation
+  const C = (await mkProject(`Math ${stamp}`, { parentId: P.id })).json
+  const cn = (await req('GET', `/api/nodes/${C.id}`)).json
+  ok('projects: a project can be created inside a project', C.parentId === P.id && cn.projectId === P.id, JSON.stringify(C))
+  ok("projects: a nested project's folder is inside its parent's", cn.filePath.includes(`Engine ${stamp}`) && cn.filePath.includes(`Math ${stamp}`), cn.filePath)
+  const pg = (await req('GET', `/api/projects/${P.id}/graph`)).json
+  ok("projects: the parent's graph holds the child's door", pg.nodes.some((n) => n.id === C.id && n.type === 'project'))
+  ok('projects: a project never shows up inside itself',
+    !(await req('GET', `/api/projects/${C.id}/graph`)).json.nodes.some((n) => n.id === C.id) && !pg.nodes.some((n) => n.id === P.id))
+  ok("projects: a door is not part of its parent's count", (await req('GET', `/api/projects/${P.id}`)).json.nodeCount === 0)
+  ok('projects: the project id names its own top level', (await req('GET', `/api/projects/${P.id}/graph?graph=${P.id}`)).status === 200)
+
+  // the verbs that do not apply to a project
+  const f = (await req('POST', `/api/projects/${P.id}/nodes`, { type: 'feature', title: 'Renderer' })).json
+  ok('projects: POST a node of type project 400', (await req('POST', `/api/projects/${P.id}/nodes`, { type: 'project', title: 'x' })).status === 400)
+  ok('projects: nothing but projects lives in the workspace root', (await req('POST', '/api/projects/pr_root/nodes', { type: 'feature', title: 'x' })).status === 400)
+  ok('projects: nothing converts into a project', (await req('POST', `/api/nodes/${f.id}/convert`, { type: 'project' })).status === 400)
+  ok('projects: a project converts into nothing', (await req('POST', `/api/nodes/${C.id}/convert`, { type: 'feature' })).status === 400)
+  ok('projects: a project is not archived as a node', (await req('POST', `/api/nodes/${C.id}/archive`, {})).status === 400)
+  ok('projects: a project is already a graph', (await req('POST', `/api/nodes/${C.id}/promote`, {})).status === 409)
+  ok('projects: a project is never demoted', (await req('POST', `/api/nodes/${C.id}/demote`, {})).status === 400)
+  ok('projects: a project is renamed by the project verb', (await req('PATCH', `/api/nodes/${C.id}`, { title: 'x' })).status === 400)
+
+  // nesting by moving
+  const R = (await mkProject(`Audio ${stamp}`)).json
+  const rf = (await req('POST', `/api/projects/${R.id}/nodes`, { type: 'feature', title: 'Mixer', content: 'eight buses' })).json
+  const lk = await req('POST', `/api/projects/${R.id}/edges`, { sourceId: rf.id, targetId: f.id, type: 'depends' })
+  const mv = await req('POST', `/api/nodes/${R.id}/move`, { graphId: P.id })
+  const rf2 = (await req('GET', `/api/nodes/${rf.id}`)).json
+  ok('projects: a project moves into another, its folder whole', mv.status === 200 && rf2.filePath.includes(`Engine ${stamp}`) &&
+    rf2.content.includes('eight buses') && rf2.projectId === R.id, `${mv.status} ${JSON.stringify(mv.json)} ${rf2.filePath}`)
+  ok('projects: nesting changes no link', lk.status < 300 && rf2.edges.some((e) => rels(e).some((r) => r.type === 'depends')))
+  ok('projects: the list says where it went', (await req('GET', '/api/projects')).json.find((p) => p.id === R.id)?.parentId === P.id)
+  ok('projects: a project cannot move into its own contents', (await req('POST', `/api/nodes/${P.id}/move`, { graphId: R.id })).status === 400)
+  ok('projects: a project cannot move into itself', (await req('POST', `/api/nodes/${P.id}/move`, { graphId: P.id })).status === 400)
+  ok('projects: a project never lives inside a feature', (await req('POST', `/api/nodes/${R.id}/move`, { graphId: f.id })).status === 400)
+  ok('projects: projects and nodes move in separate calls',
+    (await req('POST', `/api/projects/${P.id}/nodes/move`, { ids: [R.id, f.id], graphId: null })).status === 400)
+
+  // renaming the parent carries every nested folder
+  const rn = await req('PATCH', `/api/projects/${P.id}`, { name: `Core ${stamp}` })
+  const rf3 = (await req('GET', `/api/nodes/${rf.id}`)).json
+  ok('projects: renaming a parent re-roots the projects inside it', rn.status === 200 &&
+    rf3.filePath.includes(`Core ${stamp}`) && !rf3.filePath.includes(`Engine ${stamp}`) && rf3.content.includes('eight buses'), rf3.filePath)
+  ok("projects: renaming a project renames its node", (await req('GET', `/api/nodes/${P.id}`)).json.title === `Core ${stamp}`)
+  await req('PUT', `/api/nodes/${P.id}/content`, { content: 'The engine, renamed.' })
+  ok("projects: the node's spec IS the project's description", (await req('GET', `/api/projects/${P.id}`)).json.description.includes('renamed'))
+
+  // archive and restore respect the tree
+  ok('projects: archiving a project that holds projects 409', (await req('DELETE', `/api/projects/${P.id}`)).status === 409)
+  await req('DELETE', `/api/projects/${C.id}`)
+  ok("projects: an archived project's door leaves its parent's graph",
+    !(await req('GET', `/api/projects/${P.id}/graph`)).json.nodes.some((n) => n.id === C.id))
+  await req('POST', `/api/nodes/${R.id}/move`, { graphId: null })
+  ok('projects: back to the top level', (await req('GET', `/api/nodes/${R.id}`)).json.projectId === 'pr_root' &&
+    (await req('GET', `/api/nodes/${rf.id}`)).json.content.includes('eight buses'))
+  await req('DELETE', `/api/projects/${P.id}`)
+  ok('projects: restoring a project inside an archived one 409', (await req('POST', `/api/archive/projects/${C.id}/restore`, {})).status === 409)
+  await req('POST', `/api/archive/projects/${P.id}/restore`, {})
+  ok('projects: restored parent first, then the child', (await req('POST', `/api/archive/projects/${C.id}/restore`, {})).status === 200 &&
+    (await req('GET', `/api/projects/${P.id}/graph`)).json.nodes.some((n) => n.id === C.id))
+  ok('projects: purging a project that holds projects 409', (await req('DELETE', `/api/projects/${P.id}?purge=1`)).status === 409)
+  await req('DELETE', `/api/projects/${C.id}?purge=1`)
+  ok("projects: purging a nested project takes its door with it", (await req('GET', `/api/nodes/${C.id}`)).status === 404)
+  await req('DELETE', `/api/projects/${P.id}?purge=1`)
+  await req('DELETE', `/api/projects/${R.id}?purge=1`)
+}
+
 // REFINE — a pass over the fog becomes ONE action the responded items derive
 {
   const rp = (await req('POST', `/api/projects`, { name: `refine-${Date.now()}` })).json.id
