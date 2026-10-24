@@ -49,6 +49,17 @@
 
 .pathbar-fold { display: inline-flex; }
 
+/* ⋯ — the project's own actions, at the end of the path that names it */
+.pathbar-more {
+  background: none; border: 1px solid transparent; border-radius: 6px; color: var(--text-dim);
+  font-size: 14px; line-height: 1; padding: 2px 7px; cursor: pointer; margin-left: 2px;
+}
+.pathbar-more:hover, .pathbar-more.open { background: var(--bg-hover); color: var(--text); }
+.project-menu-scrim { position: fixed; inset: 0; z-index: 40; }
+.pathbar-menu .pathbar-menu-new { color: var(--accent); border-top: 1px solid var(--border); border-radius: 0 0 5px 5px; margin-top: 2px; }
+.pathbar-menu button:disabled { color: var(--text-faint); cursor: default; }
+.pathbar-empty { padding: 4px 6px; color: var(--text-dim); }
+
 .pathbar-note { margin-left: auto; padding-left: 12px; color: var(--text-faint); font-size: 11.5px; white-space: nowrap; }
 .pathbar-note button {
   background: none; border: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0;

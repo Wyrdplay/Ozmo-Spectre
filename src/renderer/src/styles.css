@@ -69,29 +69,6 @@ input, textarea, select { font-family: inherit; color: inherit; }
 .logo svg { flex-shrink: 0; }
 .logo .sub { color: var(--text-faint); font-weight: 500; font-size: 10.5px; display: block; margin-top: 1px; }
 
-.project-select {
-  margin: 0 2px 12px;
-  position: relative;
-}
-.project-select select {
-  width: 100%;
-  appearance: none;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  padding: 7px 26px 7px 10px;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.project-select::after {
-  content: '▾';
-  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
-  color: var(--text-dim); pointer-events: none; font-size: 10px;
-}
-.project-select select:hover { border-color: var(--border-strong); }
-
 .nav-item {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 10px;

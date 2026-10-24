@@ -1,10 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useStore, type View } from '@/store'
-import { rpc } from '@/api'
-import { Confirm, Modal, useCopyFlash } from './widgets'
-import { timeAgo } from '@/lib/markdown'
-import { isWithinProject, projectTree } from '@/lib/projects'
-import { NODE_FAMILY, warpStageOpen, type Project } from '@shared/types'
+import { useCopyFlash } from './widgets'
+import { NODE_FAMILY, warpStageOpen } from '@shared/types'
 import '../sidebar.css'
 
 const COLLAPSED_KEY = 'ozmo.sidebarCollapsed'
@@ -80,33 +77,17 @@ const ICONS: Record<View, React.JSX.Element> = {
 }
 
 export function Sidebar(): React.JSX.Element {
-  const projects = useStore((s) => s.projects)
   const session = useStore((s) => s.session)
-  const canWrite = useStore((s) => s.canWrite())
   const projectId = useStore((s) => s.projectId)
   const workspaces = useStore((s) => s.workspaces)
   const setWorkspaceGate = useStore((s) => s.setWorkspaceGate)
   const activeWorkspace = workspaces?.workspaces.find((w) => w.id === workspaces.activeId) ?? null
-  const setProject = useStore((s) => s.setProject)
   const view = useStore((s) => s.view)
   const setView = useStore((s) => s.setView)
   const info = useStore((s) => s.info)
   const graphNodes = useStore((s) => s.graph.nodes)
   const warps = useStore((s) => s.warps)
   const skills = useStore((s) => s.skills)
-  const toast = useStore((s) => s.toast)
-  const [creating, setCreating] = useState(false)
-  // where a new project goes: the top level, or inside the current one
-  const [createIn, setCreateIn] = useState<string | null>(null)
-  const [moving, setMoving] = useState(false)
-  const tree = useMemo(() => projectTree(projects), [projects])
-  // the project's own actions — archive it, bring an archived one back — sit on
-  // the picker they act on, not in the app-wide Settings
-  const [projMenu, setProjMenu] = useState(false)
-  const [confirmArchive, setConfirmArchive] = useState(false)
-  const [archivedOpen, setArchivedOpen] = useState(false)
-  const currentProject = projects.find((p) => p.id === projectId) ?? null
-  const [name, setName] = useState('')
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === '1')
 
   const toggleCollapsed = (): void => {
@@ -177,19 +158,6 @@ export function Sidebar(): React.JSX.Element {
     : 0
   const liveWarpCount = warps.filter((w) => warpStageOpen(w.warp.stage)).length
 
-  const createProject = async (): Promise<void> => {
-    if (!name.trim()) return
-    try {
-      const p = await rpc<Project>('projects.create', { name: name.trim(), parentId: createIn })
-      setCreating(false)
-      setName('')
-      await useStore.getState().refreshProjects()
-      await setProject(p.id)
-    } catch (e) {
-      toast(String(e instanceof Error ? e.message : e))
-    }
-  }
-
   // null until the main process reports in. Copying "http://127.0.0.1:—" is
   // worse than not copying, so the button stays inert until there is an address.
   const apiBase = info?.apiBase ?? (info?.port ? `http://127.0.0.1:${info.port}` : null)
@@ -213,10 +181,10 @@ export function Sidebar(): React.JSX.Element {
     { key: 'archive', label: 'Archive' },
     { key: 'activity', label: 'Activity' }
   ]
-  // Everything above is scoped to the project picked in the dropdown. These are
+  // Everything above is scoped to where the path bar says you are. These are
   // not: skills install across every project, settings configure the app and
   // the machine, and export is a tool rather than a view of this board. They
-  // sit apart, at the bottom, so the eye learns which half follows the picker.
+  // sit apart, at the bottom, so the eye learns which half follows the path.
   const APP_NAV: { key: View; label: string; badge?: number }[] = [
     { key: 'agentic', label: 'Agentic', badge: driftedCount },
     { key: 'settings', label: 'Settings' }
@@ -262,69 +230,6 @@ Switch workspace`}
             <span className="sub">human + agent canvas</span>
           )}
         </div>
-      </div>
-
-      <div className="project-select">
-        <div className="project-row">
-        <select
-          value={projectId ?? ''}
-          onChange={(e) => {
-            if (e.target.value === '__new__') {
-              setCreateIn(null)
-              setCreating(true)
-            } else setProject(e.target.value)
-          }}
-        >
-          {/* the tree, indented: a project is listed under the project it lives in */}
-          {tree.map(({ project: p, depth }) => (
-            <option key={p.id} value={p.id}>{' '.repeat(depth)}{depth ? '└ ' : ''}{p.name}</option>
-          ))}
-          {canWrite && <option value="__new__">＋ New project…</option>}
-        </select>
-        <button
-          className="project-more"
-          title="Project actions — archive this project, restore an archived one"
-          aria-label="Project actions"
-          aria-expanded={projMenu}
-          onClick={() => setProjMenu((o) => !o)}
-        >
-          ⋯
-        </button>
-        </div>
-        {projMenu && (
-          <>
-            <div className="project-menu-scrim" onClick={() => setProjMenu(false)} />
-            <div className="project-menu" role="menu">
-              <button
-                role="menuitem"
-                disabled={!canWrite || !currentProject}
-                title={canWrite ? undefined : 'You can view this board but not change it'}
-                onClick={() => { setProjMenu(false); setCreateIn(currentProject?.id ?? null); setCreating(true) }}
-              >
-                New project inside this one…
-              </button>
-              <button
-                role="menuitem"
-                disabled={!canWrite || !currentProject}
-                title={canWrite ? undefined : 'You can view this board but not change it'}
-                onClick={() => { setProjMenu(false); setMoving(true) }}
-              >
-                Move this project into…
-              </button>
-              <button
-                role="menuitem"
-                disabled={!canWrite || !currentProject}
-                title={canWrite ? undefined : 'You can view this board but not change it'}
-                onClick={() => { setProjMenu(false); setConfirmArchive(true) }}
-              >
-                Archive this project…
-              </button>
-              <button role="menuitem" onClick={() => { setProjMenu(false); setArchivedOpen(true) }}>
-                Archived projects…
-              </button>
-            </div>
-          </>
-        )}
       </div>
 
       {NAV.map(navButton)}
@@ -385,24 +290,6 @@ Switch workspace`}
         )}
       </div>
 
-      {confirmArchive && currentProject && (
-        <Confirm
-          title={`Archive project "${currentProject.name}"?`}
-          confirmLabel="Archive"
-          body={`It leaves the project list; nothing inside it changes — ${currentProject.nodeCount ?? 0} nodes, their links, files and history stay as they are. Restore it any time from ⋯ → Archived projects.`}
-          onConfirm={async () => {
-            try {
-              await rpc('projects.delete', { id: currentProject.id })
-              toast(`project "${currentProject.name}" archived`, 'info')
-            } catch (e) {
-              toast(e instanceof Error ? e.message : String(e))
-            }
-          }}
-          onClose={() => setConfirmArchive(false)}
-        />
-      )}
-      {archivedOpen && <ArchivedProjects canWrite={canWrite} onClose={() => setArchivedOpen(false)} />}
-
       <button
         className="sidebar-toggle"
         onClick={toggleCollapsed}
@@ -422,127 +309,7 @@ Switch workspace`}
         <span className="nav-label">Collapse</span>
       </button>
 
-      {moving && currentProject && (
-        <MoveProject project={currentProject} projects={projects} onClose={() => setMoving(false)} />
-      )}
-      {creating && (
-        <Modal onClose={() => setCreating(false)}>
-          <h2>{createIn ? `New project inside "${projects.find((p) => p.id === createIn)?.name ?? '…'}"` : 'New project'}</h2>
-          <input
-            className="input"
-            placeholder="Project name"
-            value={name}
-            autoFocus
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && createProject()}
-          />
-          <div className="actions">
-            <button className="btn ghost" onClick={() => setCreating(false)}>Cancel</button>
-            <button className="btn primary" onClick={createProject} disabled={!name.trim()}>Create</button>
-          </div>
-        </Modal>
-      )}
     </div>
   )
 }
 
-/**
- * Nest the current project inside another, or bring it back to the top level.
- * Its folder travels whole, with every project inside it; its contents and
- * links do not change. A project cannot go into itself or anything inside it.
- */
-function MoveProject({ project, projects, onClose }: { project: Project; projects: Project[]; onClose: () => void }): React.JSX.Element {
-  const toast = useStore((s) => s.toast)
-  const [busy, setBusy] = useState(false)
-  const targets = projectTree(projects).filter(({ project: p }) =>
-    p.id !== project.parentId && !isWithinProject(projects, p.id, project.id))
-  const move = async (to: string | null, label: string): Promise<void> => {
-    setBusy(true)
-    try {
-      await rpc('nodes.move', { id: project.id, graphId: to })
-      await useStore.getState().refreshProjects()
-      toast(`"${project.name}" moved into ${label}`, 'info')
-      onClose()
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e))
-      setBusy(false)
-    }
-  }
-  return (
-    <Modal onClose={onClose}>
-      <h2>Move "{project.name}" into…</h2>
-      <div className="project-move-list">
-        {project.parentId && (
-          <button className="btn sm ghost" disabled={busy} onClick={() => void move(null, 'the top level')}>
-            ↑ the top level
-          </button>
-        )}
-        {targets.map(({ project: p, depth }) => (
-          <button key={p.id} className="btn sm ghost" disabled={busy} style={{ paddingLeft: 10 + depth * 14, justifyContent: 'flex-start' }}
-            onClick={() => void move(p.id, `"${p.name}"`)}>
-            {p.name}
-          </button>
-        ))}
-        {!targets.length && !project.parentId && <div className="empty">no other project to move it into</div>}
-      </div>
-      <div className="actions">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
-      </div>
-    </Modal>
-  )
-}
-
-/** Archived projects — the one list that is about no project in particular. */
-function ArchivedProjects({ canWrite, onClose }: { canWrite: boolean; onClose: () => void }): React.JSX.Element {
-  const toast = useStore((s) => s.toast)
-  const setProject = useStore((s) => s.setProject)
-  const [list, setList] = useState<(Project & { archivedAt: number; archivedBy: string })[] | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
-  useEffect(() => {
-    rpc<(Project & { archivedAt: number; archivedBy: string })[]>('archive.projects', {})
-      .then(setList)
-      .catch((e) => { toast(e instanceof Error ? e.message : String(e)); setList([]) })
-  }, [toast])
-  const restore = async (p: Project): Promise<void> => {
-    setBusy(p.id)
-    try {
-      await rpc('archive.restoreProject', { id: p.id })
-      await useStore.getState().refreshProjects()
-      await setProject(p.id)
-      toast(`project "${p.name}" restored`, 'info')
-      onClose()
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e))
-      setBusy(null)
-    }
-  }
-  return (
-    <Modal onClose={onClose} width={520}>
-      <h2>Archived projects</h2>
-      <div style={{ color: 'var(--text-dim)', fontSize: 12.5, lineHeight: 1.55 }}>
-        Archived projects are off the project list, with everything inside them kept exactly as it was.
-        Restoring one puts it back and opens it.
-      </div>
-      {!list && <div style={{ color: 'var(--text-faint)' }}>Looking…</div>}
-      {list && list.length === 0 && <div style={{ color: 'var(--text-dim)' }}>No archived projects.</div>}
-      {list && list.length > 0 && (
-        <div className="archived-projects">
-          {list.map((p) => (
-            <div key={p.id} className="archived-project">
-              <div className="t">
-                <b>{p.name}</b>
-                <span>{p.nodeCount ?? 0} nodes · archived {timeAgo(p.archivedAt)}{p.archivedBy ? ` by ${p.archivedBy}` : ''}</span>
-              </div>
-              <button className="btn sm" disabled={!canWrite || busy !== null} onClick={() => void restore(p)}>
-                {busy === p.id ? 'Restoring…' : 'Restore'}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="actions">
-        <button className="btn ghost" onClick={onClose}>Close</button>
-      </div>
-    </Modal>
-  )
-}

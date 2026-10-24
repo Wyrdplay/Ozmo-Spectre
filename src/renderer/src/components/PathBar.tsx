@@ -5,6 +5,7 @@ import { host } from '@/host'
 import { isDoor, subgraphChain } from '@/lib/hierarchy'
 import { projectPath } from '@/lib/projects'
 import { inTextField, matches } from '@/lib/shortcuts'
+import { CreateProject, ProjectMenu } from './ProjectActions'
 import '../pathbar.css'
 
 /** One place on the path: a project, or a sub-graph inside the current project. */
@@ -42,6 +43,8 @@ export function PathBar(): React.JSX.Element | null {
   const hiddenFlags = useStore((s) => s.hiddenFlags)
   const hiddenTags = useStore((s) => s.hiddenTags)
   const [open, setOpen] = useState<number | null>(null)
+  const [creatingRoot, setCreatingRoot] = useState(false)
+  const canWrite = useStore((s) => s.canWrite())
 
   // the keys that move through the hierarchy from ANY view
   useEffect(() => {
@@ -122,7 +125,17 @@ export function PathBar(): React.JSX.Element | null {
   }, [open])
 
   // the app-wide pages are about no place in particular
-  if (!projectId || view === 'settings' || view === 'agentic' || !segments.length) return null
+  if (view === 'settings' || view === 'agentic') return null
+  // a board with no projects yet: the bar is where the first one is made
+  if (!projectId || !segments.length) {
+    return (
+      <nav className="pathbar" aria-label="Where you are">
+        <span className="pathbar-empty">No projects yet ·</span>
+        <button className="pathbar-seg" disabled={!canWrite} onClick={() => setCreatingRoot(true)}>＋ New project</button>
+        {creatingRoot && <CreateProject parentId={null} onClose={() => setCreatingRoot(false)} />}
+      </nav>
+    )
+  }
 
   // sibling titles that collide are told apart by where they sit in the list
   const sep = (i: number, items: { id: string; title: string; go: () => void }[], currentId: string | null): React.JSX.Element => (
@@ -145,6 +158,13 @@ export function PathBar(): React.JSX.Element | null {
               {s.title}
             </button>
           ))}
+          {/* the root list is the project list: making one belongs there too */}
+          {i === 0 && (
+            <button role="menuitem" className="pathbar-menu-new" disabled={!canWrite}
+              onClick={() => { setOpen(null); setCreatingRoot(true) }}>
+              ＋ New project…
+            </button>
+          )}
         </div>
       )}
     </span>
@@ -186,6 +206,8 @@ export function PathBar(): React.JSX.Element | null {
         )
       })}
       {sep(segments.length, below, null)}
+      <ProjectMenu />
+      {creatingRoot && <CreateProject parentId={null} onClose={() => setCreatingRoot(false)} />}
       {filtered > 0 && view === 'graph' && (
         <span className="pathbar-note" title="Some nodes on this level are hidden by the filters on the canvas">
           {filtered} filter{filtered === 1 ? '' : 's'} hiding nodes ·{' '}
