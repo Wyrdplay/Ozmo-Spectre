@@ -1763,50 +1763,141 @@ export function promoteNode(p: { id: string }, actor: string): SpecNode {
   return node
 }
 
+/** Every node living inside a sub-graph, at any depth (not the sub-graph itself). */
+function subtreeIds(rootId: string): string[] {
+  const out: string[] = []
+  const queue = [rootId]
+  const seen = new Set<string>(queue)
+  while (queue.length) {
+    for (const c of db.all<{ id: string; is_graph: number }>('SELECT id, is_graph FROM nodes WHERE graph_id = ?', [queue.shift()!])) {
+      if (seen.has(c.id)) continue
+      seen.add(c.id)
+      out.push(c.id)
+      if (c.is_graph) queue.push(c.id)
+    }
+  }
+  return out
+}
+
+/** Run `fn` over `ids` in slices small enough for any driver's bound-variable limit. */
+function inSlices(ids: string[], fn: (slice: string[], ph: string) => void): void {
+  for (let i = 0; i < ids.length; i += 400) {
+    const slice = ids.slice(i, i + 400)
+    fn(slice, slice.map(() => '?').join(','))
+  }
+}
+
+/**
+ * Refuse a move ACROSS projects that would leave scheduling pointing over the
+ * boundary. `member` and `addresses` may not cross a project (see
+ * validateRelationship), so a node cannot leave a warp or area behind, nor take
+ * one's member with it — unless both ends move together. A reference stays
+ * with the project that made it, and a skill's slug must be free where it lands.
+ */
+function validateCrossing(rows: NodeRow[], destProject: string): void {
+  const dest = projectRow(destProject)
+  const moving = new Set<string>()
+  for (const r of rows) {
+    need(!r.references_node_id, `"${r.title}" is a reference — it is this project's record of another project's node, and stays with it`, 400)
+    moving.add(r.id)
+    if (r.is_graph) for (const id of subtreeIds(r.id)) moving.add(id)
+  }
+  const offenders: string[] = []
+  const ids = [...moving]
+  inSlices(ids, (slice, ph) => {
+    for (const x of db.all<{ type: string; source_id: string; target_id: string; s_title: string; t_title: string; s_project: string; t_project: string }>(
+      `SELECT r.type, r.source_id, r.target_id, s.title AS s_title, t.title AS t_title, s.project_id AS s_project, t.project_id AS t_project
+       FROM edge_relationships r JOIN nodes s ON s.id = r.source_id JOIN nodes t ON t.id = r.target_id
+       WHERE r.type IN ('member','addresses') AND (r.source_id IN (${ph}) OR r.target_id IN (${ph}))`, [...slice, ...slice])) {
+      const sProj = moving.has(x.source_id) ? destProject : x.s_project
+      const tProj = moving.has(x.target_id) ? destProject : x.t_project
+      if (sProj !== tProj) offenders.push(`"${x.s_title}" —${x.type}→ "${x.t_title}"`)
+    }
+    for (const s of db.all<{ title: string; slug: string }>(
+      `SELECT title, slug FROM nodes WHERE id IN (${ph}) AND type = 'skill' AND slug IS NOT NULL`, slice)) {
+      need(!db.get("SELECT 1 AS x FROM nodes WHERE project_id = ? AND type = 'skill' AND slug = ?", [destProject, s.slug]),
+        `"${dest.name}" already has a skill with the slug "${s.slug}" — re-slug "${s.title}" before moving it`, 409)
+    }
+  })
+  const uniq = [...new Set(offenders)]
+  need(uniq.length === 0,
+    `moving into "${dest.name}" would leave ${uniq.length} membership${uniq.length === 1 ? '' : 's'} crossing a project boundary: ` +
+    `${uniq.slice(0, 5).join('; ')}${uniq.length > 5 ? `; and ${uniq.length - 5} more` : ''} — a warp or area holds only its own ` +
+    "project's nodes. Remove those links, or move the warp or area along in the same call", 400)
+}
+
 /**
  * MOVE — change a node's HOME. Its file moves to the target graph's folder (a
  * sub-graph node brings its whole folder, and every file under it, along).
  * Links never move and never break: the database owns them, at any depth.
- * `graphId: null` = the project's top level.
+ * `target: null` = the top level of `destProject` (default: the node's own).
+ * Into ANOTHER project, everything that moves is re-owned by it, and so is
+ * every connection whose source moved (a connection belongs to its source's
+ * project) — the caller has already run validateCrossing.
  */
-async function moveHome(r: NodeRow, target: string | null, actor: string): Promise<{ moved: boolean; filePath: string }> {
-  if ((r.graph_id ?? null) === target) return { moved: false, filePath: r.file_path }
+async function moveHome(r: NodeRow, target: string | null, actor: string, destProject = r.project_id): Promise<{ moved: boolean; filePath: string }> {
+  const crossing = destProject !== r.project_id
+  if (!crossing && (r.graph_id ?? null) === target) return { moved: false, filePath: r.file_path }
   if (target) {
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
     need(g, `graph "${target}" not found`, 404)
     need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
-    need(g!.project_id === r.project_id, `"${g!.title}" is in another project — a node moves within its project`, 400)
+    need(g!.project_id === destProject, `"${g!.title}" is not in the project this move lands in`, 400)
     need(target !== r.id, 'a node cannot live inside itself', 400)
     need(!isWithin(g!.graph_id ?? null, r.id),
       `"${g!.title}" is inside "${r.title}" — a sub-graph cannot move into its own contents`, 400)
   }
   const proj = projectRow(r.project_id)
+  const destRow = crossing ? projectRow(destProject) : proj
   const meta = NODE_TYPES[r.type as NodeType]
-  const toFolder = graphFolder(proj.folder, target)
+  const toFolder = graphFolder(destRow.folder, target)
+  const inside = r.is_graph ? subtreeIds(r.id) : []
   let filePath = r.file_path
   await vault.withWatcherPaused(() => {
     if (r.is_graph && r.subfolder) {
       // the whole folder travels, then every path under it is re-rooted
       const fromDir = path.join(graphFolder(proj.folder, r.graph_id), r.subfolder)
-      const sub = freeSubfolder(toFolder, target, r.project_id, r.subfolder, r.id)
+      const sub = freeSubfolder(toFolder, target, destProject, r.subfolder, r.id)
       const toDir = path.join(toFolder, sub)
       vault.moveFolder(fromDir, toDir)
-      const prefix = fromDir + path.sep
-      for (const d of db.all<{ id: string; file_path: string }>('SELECT id, file_path FROM nodes WHERE project_id = ? AND file_path LIKE ?',
-        [r.project_id, `${fromDir}${path.sep}%`])) {
-        if (d.file_path.startsWith(prefix)) db.run('UPDATE nodes SET file_path = ? WHERE id = ?', [path.join(toDir, d.file_path.slice(prefix.length)), d.id])
-      }
+      rehomeFolder(fromDir, toDir)
       db.run('UPDATE nodes SET subfolder = ? WHERE id = ?', [sub, r.id])
     }
     filePath = vault.moveNodeFile(r.file_path, toFolder, meta.folder, r.title)
     db.run('UPDATE nodes SET graph_id = ?, file_path = ?, updated_at = ? WHERE id = ?', [target, filePath, now(), r.id])
   })
+  const moved = [r.id, ...inside]
+  if (crossing) {
+    db.tx(() => inSlices(moved, (slice, ph) => {
+      db.run(`UPDATE nodes SET project_id = ? WHERE id IN (${ph})`, [destProject, ...slice])
+      db.run(`UPDATE edges SET project_id = (SELECT n.project_id FROM nodes n WHERE n.id = edges.source_id)
+              WHERE source_id IN (${ph}) OR target_id IN (${ph})`, [...slice, ...slice])
+    }))
+  }
   refreshNodeFile(r.id)
-  const where = target ? `"${db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [target])?.title}"` : 'the project top level'
-  logActivity(r.project_id, actor, 'node.moved', 'node', r.id, `moved ${r.type} "${r.title}" into ${where}`,
-    { from: r.graph_id ?? null, to: target })
-  emitEvent('node.updated', r.project_id, loadNode(r.id), actor)
-  emitEvent('node.moved', r.project_id, { id: r.id, from: r.graph_id ?? null, to: target }, actor)
+  // a link's written form depends on whether it crosses a project (frontmatterFor),
+  // so every file on either end of a moved node's links is rewritten
+  if (crossing) {
+    const touched = new Set<string>(inside)
+    for (const id of moved) for (const n of neighborIds(id)) touched.add(n)
+    touched.delete(r.id)
+    for (const id of touched) refreshNodeFile(id)
+  }
+  const where = target ? `"${db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [target])?.title}"`
+    : crossing ? `the top level of "${destRow.name}"` : 'the project top level'
+  const detail = { from: r.graph_id ?? null, to: target, ...(crossing ? { fromProject: r.project_id, toProject: destProject, carried: inside.length } : {}) }
+  const summary = `moved ${r.type} "${r.title}"${inside.length ? ` (and the ${inside.length} inside it)` : ''} into ${where}`
+  logActivity(destProject, actor, 'node.moved', 'node', r.id, summary, detail)
+  const node = loadNode(r.id)
+  if (crossing) {
+    // it left one project's graph and arrived in another's: both boards hear it
+    logActivity(r.project_id, actor, 'node.moved', 'node', r.id, `${summary} — another project`, detail)
+    emitEvent('node.deleted', r.project_id, { id: r.id, type: r.type, title: r.title, movedTo: destProject }, actor)
+    emitEvent('node.created', destProject, node, actor)
+  } else {
+    emitEvent('node.updated', r.project_id, node, actor)
+  }
+  emitEvent('node.moved', destProject, { id: r.id, ...detail }, actor)
   return { moved: true, filePath }
 }
 
@@ -1826,26 +1917,34 @@ export async function moveNodes(p: { id?: string; ids?: unknown; graphId?: unkno
     for (const r of projects) if (await moveProject(nodeRow(r.id), asked, actor)) moved.push(r.id)
     return { ok: true, moved }
   }
-  // a project is a graph: naming a node's own project is naming its top level
-  const target = asked && rows.every((r) => r.project_id === asked) ? null : asked
-  if (target) {
-    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
-    need(!g || g.type !== 'project', `"${g?.title}" is another project — moving a node across projects is not available yet`, 400)
+  // WHERE the batch lands: a sub-graph (in whichever project holds it), a
+  // project's top level (the project's own id), or null — each node's own top level
+  let destProject: string | null = null
+  let destGraph: string | null = null
+  if (asked) {
+    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [asked])
+    need(g, `graph "${asked}" not found`, 404)
+    if (g!.type === 'project') {
+      need(!projectRow(g!.id).archived_at, `"${g!.title}" is archived — restore it first`, 409)
+      destProject = g!.id
+    } else {
+      need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+      destProject = g!.project_id
+      destGraph = g!.id
+    }
   }
   // validate every move before any file moves, so a bad batch moves nothing
   for (const r of rows) {
-    if (target) {
-      const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
-      need(g, `graph "${target}" not found`, 404)
-      need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
-      need(g!.project_id === r.project_id, `"${r.title}" and "${g!.title}" are in different projects`, 400)
-      need(target !== r.id && !isWithin(g!.graph_id ?? null, r.id), `"${r.title}" cannot move into itself or its own contents`, 400)
-    }
+    if (destGraph) need(destGraph !== r.id && !isWithin(destGraph, r.id), `"${r.title}" cannot move into itself or its own contents`, 400)
   }
+  // crossing projects (owner ruling, 2026-10-24: moves cross freely)
+  const crossers = destProject ? rows.filter((r) => r.project_id !== destProject) : []
+  if (crossers.length) validateCrossing(crossers, destProject!)
   const moved: string[] = []
   for (const r of rows) {
     // re-read: an earlier move in this batch may have re-rooted this node's path
-    if ((await moveHome(nodeRow(r.id), target, actor)).moved) moved.push(r.id)
+    const cur = nodeRow(r.id)
+    if ((await moveHome(cur, destGraph, actor, destProject ?? cur.project_id)).moved) moved.push(r.id)
   }
   return { ok: true, moved }
 }

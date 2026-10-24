@@ -1055,11 +1055,13 @@ place a spec lives) and not action (it is removed when completed). A 400 says so
 
   POST /api/nodes/:id/promote              the node's body becomes a graph (it gets a folder).
                                            NOTHING MOVES IN — choose what does, with move.
-  POST /api/nodes/:id/move                 {"graphId": "<sub-graph id>" | null} — change HOME.
-                                           Its file follows; a sub-graph brings its whole folder
-                                           and everything under it. null = the project top level.
-                                           400 into itself, into its own contents, into a node
-                                           that is not a sub-graph, or into another project.
+  POST /api/nodes/:id/move                 {"graphId": "<sub-graph id>" | "<project id>" | null}
+                                           — change HOME. Its file follows; a sub-graph brings its
+                                           whole folder and everything under it. null (or its own
+                                           project's id) = the project top level; another project's
+                                           id or sub-graph = across projects (see MOVES CROSS PROJECTS).
+                                           400 into itself, into its own contents, or into a node
+                                           that is not a sub-graph.
   POST /api/projects/:id/nodes/move        {"ids":[...], "graphId": ...} — several at once;
                                            validated first, so a bad batch moves nothing
   POST /api/nodes/:id/demote               back to a plain node: every resident moves up ONE
@@ -1091,7 +1093,14 @@ the folder and every folder nested in it); PATCHing the node's title is a 400. A
 purging a project that still holds projects is a 409 — move them out first — and a project inside
 an archived one is restored after it. Never: create a node of type project (use POST
 /api/projects), convert to or from project, promote or demote one, or archive one as a node.
-Moving an ordinary node ACROSS projects is not available yet (400).
+
+MOVES CROSS PROJECTS. graphId may name a sub-graph in ANOTHER project, or another project's id
+(its top level): the node — a sub-graph with everything inside it — is re-owned by that project,
+its files move into that project's folder, and every connection whose source moved now belongs
+to the new project. Links themselves never change. Refused (400, naming the links): a move that
+would leave a \`member\` or \`addresses\` crossing a project — a warp or area holds only its own
+project's nodes, so move the warp or area along in the same call, or remove the link. A
+reference stays with the project that made it; a skill whose slug is taken where it lands is 409.
 
 SCOPED READS — graph + scope on the graph, node list and fog:
 

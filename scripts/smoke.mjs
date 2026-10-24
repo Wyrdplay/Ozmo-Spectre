@@ -1064,6 +1064,32 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   ok('projects: projects and nodes move in separate calls',
     (await req('POST', `/api/projects/${P.id}/nodes/move`, { ids: [R.id, f.id], graphId: null })).status === 400)
 
+  // crossing projects: a node (and a whole sub-graph) changes project
+  const X = (await mkProject(`Tools ${stamp}`)).json
+  const xs = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'feature', title: 'Profiler', content: 'flame graphs' })).json
+  await req('POST', `/api/nodes/${xs.id}/promote`, {})
+  const xq = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'question', title: 'Sampling or tracing?', graphId: xs.id })).json
+  const xw = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'warp', title: 'Ship the profiler' })).json
+  await req('POST', `/api/projects/${X.id}/edges`, { sourceId: xs.id, targetId: xw.id, type: 'member' })
+  const xd = await req('POST', `/api/projects/${X.id}/edges`, { sourceId: xq.id, targetId: rf.id, type: 'depends' })
+  const lone = await req('POST', `/api/nodes/${xs.id}/move`, { graphId: P.id })
+  ok('projects: a move that would strand a warp membership across projects 400', lone.status === 400 && /member/.test(JSON.stringify(lone.json)), JSON.stringify(lone.json))
+  const both = await req('POST', `/api/projects/${X.id}/nodes/move`, { ids: [xs.id, xw.id], graphId: P.id })
+  const xs2 = (await req('GET', `/api/nodes/${xs.id}`)).json
+  const xq2 = (await req('GET', `/api/nodes/${xq.id}`)).json
+  ok('projects: a sub-graph and its warp cross together, everything inside re-owned', both.status === 200 &&
+    xs2.projectId === P.id && xq2.projectId === P.id && (await req('GET', `/api/nodes/${xw.id}`)).json.projectId === P.id &&
+    xq2.graphId === xs.id && xq2.filePath.includes(`Engine ${stamp}`) && xs2.content.includes('flame graphs'), `${both.status} ${JSON.stringify(both.json)} ${xq2.filePath}`)
+  ok('projects: the old project no longer holds them, the new one does',
+    !(await req('GET', `/api/projects/${X.id}/graph`)).json.nodes.some((n) => [xs.id, xq.id, xw.id].includes(n.id) && n.projectId === X.id) &&
+    (await req('GET', `/api/projects/${P.id}/nodes`)).json.filter((n) => [xs.id, xq.id, xw.id].includes(n.id)).length === 3)
+  ok('projects: a connection belongs to its source\'s new project, and still holds',
+    xd.status < 300 && xq2.edges.some((e) => e.projectId === P.id && rels(e).some((r) => r.type === 'depends')))
+  const home = await req('POST', `/api/projects/${P.id}/nodes/move`, { ids: [xs.id, xw.id], graphId: X.id })
+  ok('projects: and back again, to the other project\'s top level', home.status === 200 &&
+    (await req('GET', `/api/nodes/${xq.id}`)).json.projectId === X.id && (await req('GET', `/api/nodes/${xs.id}`)).json.graphId === null)
+  await req('DELETE', `/api/projects/${X.id}?purge=1`)
+
   // renaming the parent carries every nested folder
   const rn = await req('PATCH', `/api/projects/${P.id}`, { name: `Core ${stamp}` })
   const rf3 = (await req('GET', `/api/nodes/${rf.id}`)).json
