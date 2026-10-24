@@ -51,7 +51,8 @@ export function PathBar(): React.JSX.Element | null {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (inTextField(e)) return
-      if (matches('ascend', e)) {
+      // Backspace comes up a level, as in a file manager (owner, 2026-10-24)
+      if (matches('ascend', e) || matches('ascend-back', e)) {
         e.preventDefault()
         void useStore.getState().ascend()
       } else if (matches('back', e) || matches('back-alt', e)) {

@@ -603,14 +603,17 @@ export type NodeFamily = 'fog' | 'frontier' | 'spec' | 'policy'
 export type BodyKind = 'document' | 'reference' | 'graph'
 
 /**
- * Which types may carry a sub-graph body. Owner ruling (2026-09-22): any
- * non-fog type — findings about a spec (bug, flaw, threat, question, feedback)
- * are never a place a spec lives. `action` is excluded too (desk
- * recommendation): completing one removes it, which would orphan its folder.
- * `idea` is fog by family but explicitly allowed by the ruling. Reaffirmed
- * 2026-10-24: depth is unlimited, the type list stands.
+ * Which types may carry a sub-graph body: the SPEC and POLICY families (owner
+ * ruling 2026-10-24, superseding 2026-09-22). Never fog — "No Idea should not be
+ * a graph" — and never frontier (action, warp): "Frontier isnt a node type - Its
+ * a class of node types, and they are not graphs either." Depth is unlimited.
+ * Projects are graphs too, always (see holdsGraph).
  */
-export const SUBGRAPH_TYPES: NodeType[] = ['area', 'feature', 'component', 'instance', 'warp', 'pillar', 'principle', 'idea', 'skill']
+export const SUBGRAPH_TYPES: NodeType[] = ['area', 'feature', 'component', 'instance', 'pillar', 'principle', 'skill']
+
+/** Can a node of this type be gone into? Every node that can, behaves as if it
+ *  already holds an (empty) graph — the folder model (owner, 2026-10-24). */
+export const holdsGraph = (type: NodeType): boolean => type === 'project' || SUBGRAPH_TYPES.includes(type)
 
 /** Read scope over the hierarchy: this graph only, or it and every sub-graph below it. */
 export type GraphScope = 'local' | 'down'

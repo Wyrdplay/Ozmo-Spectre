@@ -1019,16 +1019,16 @@ export function createNode(
     const parent = nodeRow(String(p.inside))
     need(parent.project_id === p.projectId, `"${parent.title}" is in another project — create the child there`, 400)
     // a parent that cannot hold a graph (fog, an action) is decomposed by link alone
-    if (!parent.is_graph && SUBGRAPH_OK.has(parent.type as NodeType) && !parent.references_node_id) promoteNode({ id: parent.id }, actor)
-    if (nodeRow(parent.id).is_graph) p.graphId = parent.id
+    if (parent.is_graph || (SUBGRAPH_OK.has(parent.type as NodeType) && !parent.references_node_id)) p.graphId = parent.id
   }
   // a project is a graph: naming the project itself is naming its top level
   const home = p.graphId && p.graphId !== p.projectId ? String(p.graphId) : null
+  const homeRow = home ? db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [home]) : null
   if (home) {
-    const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [home])
-    need(g, `graph "${home}" not found`, 404)
-    need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
-    need(g!.project_id === p.projectId, `graph "${home}" belongs to another project`, 400)
+    need(homeRow, `graph "${home}" not found`, 404)
+    need(homeRow!.project_id === p.projectId, `graph "${home}" belongs to another project`, 400)
+    need(homeRow!.is_graph || (SUBGRAPH_OK.has(homeRow!.type as NodeType) && !homeRow!.references_node_id),
+      `"${homeRow!.title}" is a ${homeRow!.type}, and a ${homeRow!.type} never holds anything — only ${SUBGRAPH_TYPES.join(', ')} and projects do`, 400)
   }
   const meta = NODE_TYPES[p.type]
   need(meta, `invalid node type "${p.type}"`)
@@ -1067,6 +1067,9 @@ export function createNode(
     if (l.outgoing !== undefined) need(typeof l.outgoing === 'boolean', 'linkTo outgoing must be a boolean')
     linkTargets.set(l.nodeId, other!)
   }
+  // the folder model: making something inside is what makes the graph — only
+  // now, once nothing above can refuse, so a failed create leaves no husk
+  if (homeRow) openGraph(homeRow, actor)
 
   const id = newId('nd')
   const t = now()
@@ -1388,6 +1391,38 @@ function archiveNode(
   return neighbors
 }
 
+/**
+ * DELETING A FOLDER DELETES WHAT IS IN IT. Before a node holding a graph leaves
+ * the board, everything inside it — at every depth — goes to the archive first,
+ * deepest first, each marked with the node it went with (`archivedWith`), so
+ * restoring that node brings the whole subtree back where it was. Then every
+ * folder it emptied is removed from the vault. Nothing is left behind: no rows,
+ * no links, no files, no folders. Refused, before anything moves, when a review
+ * still owns some feedback inside.
+ * Returns the live neighbours whose frontmatter the caller refreshes.
+ */
+function archiveContents(r: NodeRow, actor: string, verb: ArchiveVerb, note: string): string[] {
+  if (!r.is_graph) return []
+  const ids = subtreeIds(r.id) // top-down, level by level
+  if (!ids.length) return []
+  const held = reviewHeldIds(r.project_id)
+  const owned = ids.find((id) => held.has(id) && nodeRow(id).type === 'feedback')
+  need(!owned, `"${r.title}" holds feedback a warp IN REVIEW still owns ("${owned ? nodeRow(owned).title : ''}") — ` +
+    'settle the review first, or move that feedback out', 409)
+  const dir = r.subfolder ? path.join(graphFolder(projectRow(r.project_id).folder, r.graph_id), r.subfolder) : null
+  const touched: string[] = []
+  for (const id of [...ids].reverse()) { // deepest first: a door is empty by the time its own turn comes
+    const n = nodeRow(id)
+    touched.push(...archiveNode(n, actor, verb, note, `"${n.title}" went to the archive with "${r.title}"`, { archivedWith: r.id }))
+    emitEvent('node.deleted', n.project_id, { id: n.id, type: n.type, title: n.title }, actor)
+    emitEvent('node.archived', n.project_id, { id: n.id, type: n.type, title: n.title, verb, archivedWith: r.id }, actor)
+  }
+  if (dir) vault.removeEmptyFolder(dir) // the whole emptied tree of folders, in one
+  logActivity(r.project_id, actor, 'node.archived', 'node', r.id,
+    `${ids.length} node${ids.length === 1 ? '' : 's'} inside "${r.title}" went to the archive with it`, { verb, archivedWith: r.id, count: ids.length })
+  return touched
+}
+
 /** Refresh the files of neighbours that still exist after a removal. */
 function refreshSurvivors(ids: Iterable<string>): void {
   for (const nid of new Set(ids)) {
@@ -1403,8 +1438,11 @@ function refreshSurvivors(ids: Iterable<string>): void {
 export function deleteNode(p: { id: string; note?: string }, actor: string): { ok: true; archived: true } {
   const r = nodeRow(p.id)
   const note = typeof p.note === 'string' ? p.note.trim() : ''
-  const neighbors = archiveNode(r, actor, 'deleted', note, `"${r.title}" was deleted by its owning project`)
-  for (const nid of neighbors) refreshNodeFile(nid)
+  need(r.type !== 'project', `"${r.title}" is a project — archive it with DELETE /api/projects/${r.id}`, 400)
+  const inner = archiveContents(r, actor, 'deleted', note)
+  const neighbors = archiveNode(nodeRow(r.id), actor, 'deleted', note, `"${r.title}" was deleted by its owning project`)
+  refreshSurvivors([...inner, ...neighbors])
+  settleGraph(r.graph_id ?? null, actor)
   logActivity(r.project_id, actor, 'node.deleted', 'node', p.id, `deleted ${r.type} "${r.title}" (archived)`)
   emitEvent('node.deleted', r.project_id, { id: p.id, type: r.type, title: r.title }, actor)
   emitEvent('node.archived', r.project_id, { id: p.id, type: r.type, title: r.title, verb: 'deleted' }, actor)
@@ -1423,8 +1461,11 @@ export function archiveNodeVerb(p: { id: string; note?: string }, actor: string)
   const note = typeof p.note === 'string' ? p.note.trim() : ''
   need(!(r.type === 'feedback' && reviewHeldIds(r.project_id).has(r.id)),
     `"${r.title}" is feedback in a warp that is IN REVIEW — the review room owns it until the review closes`, 409)
-  const neighbors = archiveNode(r, actor, 'archived', note, `"${r.title}" was archived by its owning project`)
-  refreshSurvivors(neighbors)
+  need(r.type !== 'project', `"${r.title}" is a project — archive it with DELETE /api/projects/${r.id}`, 400)
+  const inner = archiveContents(r, actor, 'archived', note)
+  const neighbors = archiveNode(nodeRow(r.id), actor, 'archived', note, `"${r.title}" was archived by its owning project`)
+  refreshSurvivors([...inner, ...neighbors])
+  settleGraph(r.graph_id ?? null, actor)
   logActivity(r.project_id, actor, 'node.archived', 'node', r.id,
     `archived ${r.type} "${r.title}"${note ? ` — ${note}` : ''}`, { verb: 'archived', note: note || undefined })
   emitEvent('node.deleted', r.project_id, { id: r.id, type: r.type, title: r.title }, actor)
@@ -1685,6 +1726,20 @@ export function restoreNode(p: { id: string }, actor: string): NodeDetail & { re
   const node = loadNode(a.id)
   emitEvent('node.created', a.project_id, node, actor)
   emitEvent('node.restored', a.project_id, { id: a.id, title: a.title, restoredEdges: back.length }, actor)
+  // a node that went to the archive holding a graph brings its subtree back:
+  // everything archived WITH it, top-down, so each child finds its home live
+  if (!parseJson<Record<string, unknown>>(a.detail ?? '', {}).archivedWith) {
+    const withIt = (): ArchivedNodeRow[] => db.all<ArchivedNodeRow>('SELECT * FROM archived_nodes WHERE detail LIKE ?', [`%"archivedWith":"${a.id}"%`])
+    for (let left = withIt(); left.length;) {
+      const ready = left.filter((x) => {
+        const h = parseJson<Record<string, unknown>>(x.row, {}).graph_id
+        return typeof h === 'string' && !!db.get('SELECT 1 AS x FROM nodes WHERE id = ?', [h])
+      })
+      if (!ready.length) break // anything whose home is still away comes back by its own restore
+      for (const x of ready) restoreNode({ id: x.id }, actor)
+      left = withIt()
+    }
+  }
   return { ...getNode({ id: a.id }), restoredEdges: back.length }
 }
 
@@ -1853,11 +1908,13 @@ async function moveHome(r: NodeRow, target: string | null, actor: string, destPr
   if (target) {
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [target])
     need(g, `graph "${target}" not found`, 404)
-    need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+    need(SUBGRAPH_OK.has(g!.type as NodeType) && !g!.references_node_id,
+      `"${g!.title}" is a ${g!.type}, and a ${g!.type} never holds anything — only ${SUBGRAPH_TYPES.join(', ')} and projects do`, 400)
     need(g!.project_id === destProject, `"${g!.title}" is not in the project this move lands in`, 400)
     need(target !== r.id, 'a node cannot live inside itself', 400)
     need(!isWithin(g!.graph_id ?? null, r.id),
       `"${g!.title}" is inside "${r.title}" — a sub-graph cannot move into its own contents`, 400)
+    openGraph(g!, actor) // putting something inside is what makes the graph
   }
   const proj = projectRow(r.project_id)
   const destRow = crossing ? projectRow(destProject) : proj
@@ -1910,7 +1967,34 @@ async function moveHome(r: NodeRow, target: string | null, actor: string, destPr
     emitEvent('node.updated', r.project_id, node, actor)
   }
   emitEvent('node.moved', destProject, { id: r.id, ...detail }, actor)
+  // the graph it left may be empty now — and an empty graph is a plain node again
+  settleGraph(r.graph_id ?? null, actor)
   return { moved: true, filePath }
+}
+
+/**
+ * THE FOLDER MODEL (owner, 2026-10-24): every node of a graph-holding type
+ * behaves as if it already holds an (empty) graph. Nobody ever "makes" one —
+ * putting something inside is what does it, here, unseen; a type that never
+ * holds anything (fog, frontier) is refused.
+ */
+function openGraph(g: NodeRow, actor: string): NodeRow {
+  if (g.is_graph) return g
+  need(SUBGRAPH_OK.has(g.type as NodeType) && !g.references_node_id,
+    `"${g.title}" is a ${g.type}, and a ${g.type} never holds anything — only ${SUBGRAPH_TYPES.join(', ')} and projects do`, 400)
+  promoteNode({ id: g.id }, actor)
+  return nodeRow(g.id)
+}
+
+/** …and the other half: a graph nothing lives in any more is a plain node again —
+ *  its empty folder goes with it, so emptying never leaves a husk behind. */
+function settleGraph(id: string | null, actor: string): void {
+  if (!id) return
+  const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [id])
+  if (!g || !g.is_graph || g.type === 'project' || residentCount(id) > 0) return
+  if (g.subfolder) vault.removeEmptyFolder(path.join(graphFolder(projectRow(g.project_id).folder, g.graph_id), g.subfolder))
+  db.run('UPDATE nodes SET is_graph = 0, subfolder = NULL, updated_at = ? WHERE id = ?', [now(), id])
+  emitEvent('node.updated', g.project_id, loadNode(id), actor)
 }
 
 /** Move one node — or several (`ids`) — into a sub-graph, or to the top level (`graphId: null`). */
@@ -1940,7 +2024,8 @@ export async function moveNodes(p: { id?: string; ids?: unknown; graphId?: unkno
       need(!projectRow(g!.id).archived_at, `"${g!.title}" is archived — restore it first`, 409)
       destProject = g!.id
     } else {
-      need(g!.is_graph, `"${g!.title}" is not a sub-graph — promote it first`, 400)
+      need(SUBGRAPH_OK.has(g!.type as NodeType) && !g!.references_node_id,
+        `"${g!.title}" is a ${g!.type}, and a ${g!.type} never holds anything — only ${SUBGRAPH_TYPES.join(', ')} and projects do`, 400)
       destProject = g!.project_id
       destGraph = g!.id
     }
@@ -2068,7 +2153,8 @@ export function scopedIds(projectId: string, graph: unknown, scope: unknown): Se
     const g = db.get<NodeRow>('SELECT * FROM nodes WHERE id = ?', [root])
     need(g, `graph "${root}" not found`, 404)
     need(g!.project_id === projectId, `graph "${root}" belongs to another project`, 400)
-    need(g!.is_graph, `"${g!.title}" is not a sub-graph`, 400)
+    // the folder model: any graph-holding node reads as a level — empty until something goes in
+    need(g!.is_graph || SUBGRAPH_OK.has(g!.type as NodeType), `"${g!.title}" is a ${g!.type}, and a ${g!.type} never holds anything`, 400)
   }
   const homes = (scope ?? 'local') === 'down' ? graphClosure(projectId, root) : new Set<string | null>([root])
   const out = new Set<string>()
@@ -2141,6 +2227,7 @@ type ClearVerb = 'completed' | 'answered' | 'pruned' | 'waived' | 'actioned' | '
  */
 function clearFogNode(r: NodeRow, actor: string, verb: ClearVerb, note: string, detail: Record<string, unknown> = {}): string[] {
   const neighbors = archiveNode(r, actor, verb, note, `"${r.title}" was resolved and cleared from the fog`, detail)
+  settleGraph(r.graph_id ?? null, actor) // the room it left may be empty now
   logActivity(r.project_id, actor, 'fog.cleared', 'node', r.id,
     `cleared ${r.type} "${r.title}" (${verb})${note ? ` — ${note}` : ''}`,
     { verb, note: note || undefined, type: r.type, title: r.title, ...detail })
@@ -2226,6 +2313,7 @@ export function completeAction(p: { id: string; note?: string; keep?: unknown },
   }
 
   const linkedNodeIds = archiveNode(r, actor, 'completed', note, `"${r.title}" was completed`, {})
+  settleGraph(r.graph_id ?? null, actor) // the room it left may be empty now
   const touched: string[] = [...linkedNodeIds]
   for (const f of toClear) {
     touched.push(...clearFogNode(f, actor, 'actioned', note, { by: r.id, byTitle: r.title }))

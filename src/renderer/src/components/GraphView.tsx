@@ -32,7 +32,7 @@ import {
 import { HelpPanel } from './HelpPanel'
 import { inTextField, matches } from '@/lib/shortcuts'
 import {
-  PEEK_MAX, canvasGraph, homePath, isDoor, isGroupGhost, peekedDoors, setPeeked, setUnfolded, unfoldedGroups
+  PEEK_MAX, canEnter, canvasGraph, deleteBody, homePath, isDoor, isGroupGhost, peekedDoors, setPeeked, setUnfolded, unfoldedGroups
 } from '@/lib/hierarchy'
 
 interface SimNode extends SimulationNodeDatum {
@@ -226,6 +226,13 @@ function placePortals(nodes: SimNode[]): void {
 /** The camera each level was left at, for this session: going back up lands you
  *  on the view you left, not on a fresh fit. Keyed `project|sub-graph`. */
 const viewportMemory = new Map<string, Transform>()
+/** Remember a level's camera — the least recently left level is forgotten past
+ *  200, so a long session wandering a deep board does not grow without end. */
+const rememberViewport = (key: string, t: Transform): void => {
+  viewportMemory.delete(key)
+  viewportMemory.set(key, t)
+  if (viewportMemory.size > 200) viewportMemory.delete(viewportMemory.keys().next().value as string)
+}
 
 const reducedMotion = (): boolean =>
   typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -801,7 +808,7 @@ export function GraphView(): React.JSX.Element {
     // ARRIVING on a level: the view you left it at, if you have been here
     // before; otherwise grow out of the door you came through into a fit
     if (fittedProjectRef.current !== levelKey && graph.nodes.length) {
-      if (fittedProjectRef.current && !leavingSavedRef.current) viewportMemory.set(fittedProjectRef.current, { ...transformRef.current })
+      if (fittedProjectRef.current && !leavingSavedRef.current) rememberViewport(fittedProjectRef.current, { ...transformRef.current })
       leavingSavedRef.current = false
       fittedProjectRef.current = levelKey
       const saved = viewportMemory.get(levelKey)
@@ -2302,15 +2309,19 @@ export function GraphView(): React.JSX.Element {
 
   // ── going through doors ─────────────────────────────────────────────────
 
-  /** The door under a world point, ignoring what is being dragged. Generous —
-   *  1.25× the radius — because a drop target you have to hit exactly is not one. */
+  /** The node a drag would drop INTO, ignoring what is being dragged. Every node
+   *  that can hold a graph is a folder (the folder model), so any of them takes a
+   *  drop; a door that already holds something is generous (1.25× its radius) and
+   *  an empty one asks for the pointer on the node itself, so rearranging nodes
+   *  near each other never files one inside another by accident. */
   const doorUnder = (wx: number, wy: number, except: Set<string>): SimNode | null => {
     let best: SimNode | null = null
     let bestD = Infinity
     for (const n of visibleNodes()) {
-      if (except.has(n.id) || n.data.portal || !isDoor(n.data)) continue
+      if (except.has(n.id) || !canEnter(n.data) || n.data.peekOf) continue
       const d = Math.hypot(px(n) - wx, py(n) - wy)
-      if (d <= stylesRef.current.node[n.data.type].radius * 1.25 + 6 && d < bestD) {
+      const r = stylesRef.current.node[n.data.type].radius
+      if (d <= (isDoor(n.data) ? r * 1.25 + 6 : r) && d < bestD) {
         best = n
         bestD = d
       }
@@ -2356,7 +2367,7 @@ export function GraphView(): React.JSX.Element {
    *  being left is remembered BEFORE the dive, so coming back up lands on it. */
   const enterDoor = (n: SimNode): void => {
     const canvas = canvasRef.current
-    if (fittedProjectRef.current) viewportMemory.set(fittedProjectRef.current, { ...transformRef.current })
+    if (fittedProjectRef.current) rememberViewport(fittedProjectRef.current, { ...transformRef.current })
     leavingSavedRef.current = true
     if (canvas && !reducedMotion()) {
       const k = Math.min(3.2, Math.max(transformRef.current.k * 2.6, 1.6))
@@ -2423,7 +2434,7 @@ export function GraphView(): React.JSX.Element {
     // a door: go through it · a portal or a peeked resident: go to where it lives ·
     // nothing: a new node here
     if (hit?.data.portal || hit?.data.peekOf) followPortal(hit)
-    else if (hit && isDoor(hit.data)) enterDoor(hit)
+    else if (hit && canEnter(hit.data)) enterDoor(hit)
     else if (!hit) showQuickAdd(dropPoint(x, y))
   }
 
@@ -2481,7 +2492,7 @@ export function GraphView(): React.JSX.Element {
             followPortal(n)
             return
           }
-          if (n && !n.data.portal && isDoor(n.data)) {
+          if (n && canEnter(n.data)) {
             e.preventDefault()
             enterDoor(n)
             return
@@ -3008,7 +3019,7 @@ export function GraphView(): React.JSX.Element {
             // an empty ROOM, not an empty board: say how things get in, and how to get out
             <>
               <h3>Nothing lives in “{fullGraph.nodes.find((n) => n.id === graphRoot)?.title ?? 'this sub-graph'}” yet</h3>
-              <div>Double-click to add a node here, or drag nodes onto its door from the level above.<br />Ctrl+↑ goes back up.</div>
+              <div>Double-click to add a node here, or drag nodes onto it from the level above.<br />Backspace goes back up.</div>
             </>
           ) : (
             <>
@@ -3072,6 +3083,26 @@ export function GraphView(): React.JSX.Element {
 
       {ctxMenu && !ctxSelIds && ctxNode && (
         <div ref={ctxMenuRef} className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onMouseLeave={() => setCtxMenu(null)}>
+          {/* every spec, policy or project node is a folder: go inside it, empty or not */}
+          {canEnter(ctxNode) && (
+            <button className="ctx-primary" title="Go inside — Enter, or double-click; Backspace comes back up"
+              onClick={() => {
+                setCtxMenu(null)
+                const n = nodesRef.current.find((x) => x.id === ctxMenu.nodeId)
+                if (n) enterDoor(n)
+              }}>
+              Open <span className="ctx-key">↵</span>
+            </button>
+          )}
+          {(ctxNode.portal || ctxNode.peekOf) && (
+            <button className="ctx-primary" onClick={() => {
+              setCtxMenu(null)
+              const n = nodesRef.current.find((x) => x.id === ctxMenu.nodeId)
+              if (n) followPortal(n)
+            }}>
+              Go to where it lives <span className="ctx-key">↵</span>
+            </button>
+          )}
           <button onClick={() => { selectNode(ctxMenu.nodeId); setCtxMenu(null) }}>Open spec</button>
           <button onClick={() => { setLinkingFrom(ctxMenu.nodeId); setCtxMenu(null) }}>Link to…</button>
           <button
@@ -3245,7 +3276,7 @@ export function GraphView(): React.JSX.Element {
           title={confirmDel.kind === 'node' ? `Delete "${confirmDel.title}"?` : 'Delete this connection?'}
           body={
             confirmDel.kind === 'node'
-              ? 'It moves to the Archive with its links, notes and history — searchable and restorable.'
+              ? deleteBody(fullGraph.nodes, confirmDel.id)
               : 'It moves to the Archive with its relationships and notes — restorable while both ends are live.'
           }
           onConfirm={async () => {

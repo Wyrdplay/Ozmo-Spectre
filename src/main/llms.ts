@@ -230,6 +230,7 @@ Choose the verb:
 - prune     (POST /api/nodes/:id/prune, any non-warp)    — dead. FOG: removed, the why (+ supersededBy) in the
                                                            activity. Spec/policy: kept, dimmed, with the why
 - archive   (POST /api/nodes/:id/archive, ANY node)      — out of the live graph, into the archive. {note?}
+                                                           Everything inside it goes with it (§ HOME).
                                                            Fog is archived constantly (every verb above
                                                            does it); spec/policy/frontier when they stop
                                                            being true and should not stay dimmed on canvas
@@ -1065,27 +1066,34 @@ owns a sub-folder, and its residents' files live under it. MEMBERSHIP is separat
 \`member\` (a warp in time, an area in space) never moves a file. And LINKS never care about home:
 the database owns them, so a connection may join nodes at any depth.
 
-Which types may hold a sub-graph: area, feature, component, instance, warp, pillar, principle,
-idea, skill. NEVER bug, flaw, threat, question, feedback (findings about a spec are never a
-place a spec lives) and not action (it is removed when completed). A 400 says so.
+EVERY NODE IS A FOLDER. Spec and policy nodes — area, feature, component, instance, pillar,
+principle, skill — and projects behave as if they already hold a graph: empty until something
+goes in. There is NO step to make one. Create a node inside one (graphId / inside) or move a node
+into one and it opens silently; take the last resident out (move, archive, complete) and it
+closes again, its folder removed. NEVER fog (bug, flaw, threat, question, feedback, idea) and
+never frontier (action, warp): findings and work are never a place a spec lives. A 400 says so.
 
-  POST /api/nodes/:id/promote              the node's body becomes a graph (it gets a folder).
-                                           NOTHING MOVES IN — choose what does, with move.
+  POST /api/nodes/:id/promote              open it explicitly (rarely needed — moving or creating
+                                           into it does this). 400 for fog and frontier types.
   POST /api/nodes/:id/move                 {"graphId": "<sub-graph id>" | "<project id>" | null}
                                            — change HOME. Its file follows; a sub-graph brings its
                                            whole folder and everything under it. null (or its own
                                            project's id) = the project top level; another project's
                                            id or sub-graph = across projects (see MOVES CROSS PROJECTS).
                                            400 into itself, into its own contents, or into a node
-                                           that is not a sub-graph.
+                                           that cannot hold one (fog, frontier).
   POST /api/projects/:id/nodes/move        {"ids":[...], "graphId": ...} — several at once;
                                            validated first, so a bad batch moves nothing
-  POST /api/nodes/:id/demote               back to a plain node: every resident moves up ONE
-                                           level (links untouched), the folder goes
+  POST /api/nodes/:id/demote               move everything inside up ONE level (links untouched);
+                                           the node is left empty, the folder goes
   POST /api/projects/:id/nodes             accepts "graphId" — create the node inside a sub-graph
 
-A sub-graph that still has residents cannot be archived (409 — move them out or demote it first).
-A restored node whose sub-graph was demoted meanwhile lands in the nearest graph above it.
+Archiving or deleting a node takes EVERYTHING inside it with it, deepest first — each archived
+row's activity detail names the root (\`archivedWith\`), and the emptied folders go: no live
+leftovers, no orphaned files. Restoring that root brings the whole subtree back, nested as it
+was (a node archived on its own earlier is not dragged back). 409 if a review still holds
+feedback inside it. A project is never archived this way — archive it from the project list.
+A restored node whose sub-graph was emptied meanwhile lands in the nearest graph above it.
 
 PROJECTS ARE NODES. Every project is also a node of type \`project\`, with the SAME id
 (\`pr_…\`) and a body that is always a graph. Projects NEST: a project lives at the top level (a
@@ -1173,7 +1181,9 @@ it had to things that are now archived.
                                            carried that relationship (derives, blocks, member…)
   POST /api/archive/:id/restore            back to the live graph: row, tags, installs and file
                                            restored; every archived link whose far end is LIVE
-                                           comes back; the rest wait for their far end. 409 if a
+                                           comes back; the rest wait for their far end. What was
+                                           archived WITH it (its contents) comes back too, nested
+                                           as before. 409 if a
                                            live skill took its slug, or its project is gone.
 
 GET /api/nodes/:id on an archived id is a 404 whose message (and \`archived: true\`) points here.

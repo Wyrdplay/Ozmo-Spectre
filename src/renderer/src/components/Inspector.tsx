@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, SUBGRAPH_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships, warpStageOpen,
+  NODE_TYPES, NODE_FAMILY, EDGE_TYPES, RELATIONSHIP_TYPES, WARP_STAGES, WARP_STAGE_META, edgeRelationships, warpStageOpen,
   type NodeDetail, type EdgeWithTitles, type Annotation, type EdgeType, type NodeType, type RelationshipType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
@@ -11,7 +11,7 @@ import {
 } from './widgets'
 import { MarkdownEditor } from './MarkdownEditor'
 import { lockedProps, useBoardLock } from './BoardLock'
-import { livesWithin } from '@/lib/hierarchy'
+import { canEnter, deleteBody, livesWithin } from '@/lib/hierarchy'
 import { timeAgo } from '@/lib/markdown'
 
 /** Confirm dialog for the complete verb: optional note, then the node is removed.
@@ -560,9 +560,10 @@ function DoorDashboard({ detail }: { detail: NodeDetail }): React.JSX.Element {
 }
 
 /**
- * The hierarchy verbs for one node: make it a sub-graph (nothing moves in —
- * you choose what does), demote it (its residents move up a level), and move
- * it into a sub-graph or back to the top level. Its links never move.
+ * The hierarchy verbs for one node: open it (every spec or policy node is a
+ * folder — there is no "make a sub-graph" step), move what is inside it up a
+ * level, and move it into another node or back to the top level. Its links
+ * never move.
  */
 function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { message: string } | null }): React.JSX.Element {
   const toast = useStore((s) => s.toast)
@@ -578,7 +579,6 @@ function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { messa
       </button>
     )
   }
-  const canHold = SUBGRAPH_TYPES.includes(detail.type) && detail.bodyKind !== 'reference'
   const residents = graphNodes.filter((n) => n.graphId === detail.id).length
   // a node cannot move into itself or anything inside it
   const within = (graphId: string | null | undefined): boolean => {
@@ -602,33 +602,26 @@ function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { messa
   }
   return (
     <>
-      {detail.bodyKind === 'graph' && (
-        <button className="btn sm" title="Go inside (or double-click its node, or press Enter)"
+      {canEnter(detail) && (
+        <button className="btn sm" title="Go inside, like opening a folder (or double-click its node, or press Enter)"
           onClick={() => void useStore.getState().descend(detail.id)}>
           open ›
         </button>
       )}
-      {detail.bodyKind !== 'graph' && canHold && (
+      {detail.bodyKind === 'graph' && residents > 0 && (
         <button className="btn sm ghost" disabled={!!lock}
-          title={locked ?? 'Give this node a graph of its own. Nothing moves in — choose what does with "move into…"'}
-          onClick={() => void run('nodes.promote', { id: detail.id }, `"${detail.title}" is now a sub-graph — move nodes into it`)}>
-          ▣ make sub-graph
-        </button>
-      )}
-      {detail.bodyKind === 'graph' && (
-        <button className="btn sm ghost" disabled={!!lock}
-          title={locked ?? `Back to a plain node: the ${residents} node${residents === 1 ? '' : 's'} inside move up one level, links untouched`}
+          title={locked ?? `The ${residents} node${residents === 1 ? '' : 's'} inside move up one level beside it, links untouched`}
           onClick={() => setConfirmDemote(true)}>
-          demote…
+          move everything up a level…
         </button>
       )}
       {picking ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
           <NodePicker
             autoFocus
-            placeholder="move into which sub-graph…"
+            placeholder="move into which node…"
             exclude={new Set([detail.id, ...(detail.graphId ? [detail.graphId] : [])])}
-            filter={(n) => n.bodyKind === 'graph' && n.type !== 'project' && n.projectId === detail.projectId && !within(n.id)}
+            filter={(n) => canEnter(n) && n.type !== 'project' && n.projectId === detail.projectId && !within(n.id)}
             onPick={(n) => { setPicking(false); void run('nodes.move', { id: detail.id, graphId: n.id }, `moved into "${n.title}"`) }}
           />
           <div style={{ display: 'flex', gap: 6 }}>
@@ -649,10 +642,10 @@ function HierarchyControls({ detail, lock }: { detail: NodeDetail; lock: { messa
       )}
       {confirmDemote && (
         <Confirm
-          title={`Demote "${detail.title}"?`}
-          confirmLabel="Demote"
-          body={`It stops being a sub-graph. The ${residents} node${residents === 1 ? '' : 's'} inside move up one level; every link stays exactly as it is.`}
-          onConfirm={() => void run('nodes.demote', { id: detail.id }, `"${detail.title}" demoted`)}
+          title={`Move everything in "${detail.title}" up a level?`}
+          confirmLabel="Move up"
+          body={`The ${residents} node${residents === 1 ? '' : 's'} inside move up one level, beside it; every link stays exactly as it is. "${detail.title}" is left empty.`}
+          onConfirm={() => void run('nodes.demote', { id: detail.id }, `"${detail.title}" emptied — its nodes moved up a level`)}
           onClose={() => setConfirmDemote(false)}
         />
       )}
@@ -1276,7 +1269,7 @@ function NodeInspector({ id }: { id: string }): React.JSX.Element | null {
       {confirmDel && (
         <Confirm
           title={`Delete "${detail.title}"?`}
-          body="It moves to the Archive with its links, notes and history — searchable, and restorable from there."
+          body={deleteBody(useStore.getState().graph.nodes, id)}
           onConfirm={async () => {
             try {
               await rpc('nodes.delete', { id })

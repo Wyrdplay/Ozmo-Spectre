@@ -39,13 +39,14 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'zoom', group: 'navigation', gesture: 'wheel', what: 'zoom' },
   { id: 'palette', group: 'navigation', keys: 'ctrl+k', what: 'search every project — enter lands on it in its own level' },
   // the hierarchy: doors (projects, sub-graphs) are gone through, never dug into
-  { id: 'enter-door', group: 'navigation', gesture: 'double-click a door', what: 'go into a project or sub-graph (its node wears a ▣ stack)' },
+  { id: 'enter-door', group: 'navigation', gesture: 'double-click a node', what: 'go inside it, like opening a folder — any spec, policy or project node, empty or not' },
   { id: 'follow-portal', group: 'navigation', gesture: 'double-click a portal', what: 'go to where a ghosted node really lives' },
-  { id: 'descend-enter', group: 'navigation', keys: 'enter', what: 'go into the selected door · go to the selected portal' },
-  { id: 'descend', group: 'navigation', keys: 'ctrl+arrowdown', what: 'go into the selected door' },
+  { id: 'descend-enter', group: 'navigation', keys: 'enter', what: 'go inside the selected node · go to the selected portal' },
+  { id: 'ascend-back', group: 'navigation', keys: 'backspace', what: 'up one level — back out through the node you came in by' },
+  { id: 'descend', group: 'navigation', keys: 'ctrl+arrowdown', what: 'go inside the selected node (alias for enter)' },
   { id: 'peek', group: 'navigation', keys: 'shift+enter', what: 'open the selected sub-graph in place (peek) — again to shut it' },
   { id: 'peek-badge', group: 'navigation', gesture: 'click a door’s ▣ count', what: 'peek: its residents, in place, inside a hull round it' },
-  { id: 'ascend', group: 'navigation', keys: 'ctrl+arrowup', what: 'up one level — back out through the door you came in by' },
+  { id: 'ascend', group: 'navigation', keys: 'ctrl+arrowup', what: 'up one level (alias for backspace)' },
   { id: 'back', group: 'navigation', keys: 'alt+arrowleft', what: 'back — retrace the last move through the hierarchy' },
   { id: 'forward', group: 'navigation', keys: 'alt+arrowright', what: 'forward' },
   { id: 'back-alt', group: 'navigation', keys: 'ctrl+[', what: 'back (the macOS chord)' },
@@ -99,7 +100,7 @@ export function matches(id: string, e: KeyboardEvent): boolean {
   if (e.shiftKey !== want.shift) return false
   if (e.altKey !== want.alt) return false
   const pressed = e.key.toLowerCase()
-  const named: Record<string, string> = { esc: 'escape', del: 'delete', enter: 'enter' }
+  const named: Record<string, string> = { esc: 'escape', del: 'delete', enter: 'enter', backspace: 'backspace' }
   return pressed === (named[key] ?? key)
 }
 

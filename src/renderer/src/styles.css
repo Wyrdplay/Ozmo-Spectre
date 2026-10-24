@@ -464,6 +464,9 @@ select.input { cursor: pointer; }
 }
 .ctx-menu button:hover { background: var(--bg-active); }
 .ctx-menu button.danger { color: var(--danger); }
+/* the folder verbs lead the menu: going in is what a node is for */
+.ctx-menu button.ctx-primary { font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.ctx-menu .ctx-key { color: var(--text-faint); font-weight: 400; font-size: 11px; }
 .ctx-menu .sep { height: 1px; background: var(--border); margin: 4px 6px; }
 .ctx-menu .group-label { font-size: 10px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.6px; padding: 6px 10px 2px; }
 

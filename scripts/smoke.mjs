@@ -937,7 +937,9 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   // create inside, and move in
   const H = await mk('component', 'Shadow map', { graphId: F.id, content: 'cascaded, 4 splits' })
   ok('hierarchy: a node can be created inside a sub-graph', H.graphId === F.id && H.filePath.includes('Rendering'), JSON.stringify(H))
-  ok('hierarchy: creating inside a non-graph 400', (await req('POST', `/api/projects/${hp}/nodes`, { type: 'feature', title: 'x', graphId: G.id })).status === 400)
+  ok('hierarchy: creating inside a bug 400 — fog never holds anything', (await req('POST', `/api/projects/${hp}/nodes`, { type: 'feature', title: 'x', graphId: B.id })).status === 400)
+  ok('hierarchy: a refused create opens nothing', (await req('POST', `/api/projects/${hp}/nodes`, { type: 'nonsense', title: 'x', graphId: G.id })).status === 400 &&
+    (await req('GET', `/api/nodes/${G.id}`)).json.bodyKind === 'document')
   const mv = await req('POST', `/api/nodes/${G.id}/move`, { graphId: F.id })
   const g1 = (await req('GET', `/api/nodes/${G.id}`)).json
   ok('hierarchy: move changes home and the file follows', mv.status === 200 && mv.json.moved.includes(G.id) &&
@@ -948,11 +950,11 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   ok('hierarchy: sub-graphs nest — a file two levels down', Q.graphId === G.id && /Rendering[\\/]Shadows/.test(Q.filePath), Q.filePath)
   ok('hierarchy: a sub-graph cannot move into itself', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: F.id })).status === 400)
   ok('hierarchy: …nor into its own contents', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: G.id })).status === 400)
-  ok('hierarchy: …nor into a node that is not a graph', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: A.id })).status === 400)
-  // a whole sub-graph moves, folder and all
-  await req('POST', `/api/nodes/${A.id}/promote`, {})
+  ok('hierarchy: …nor into an action', (await req('POST', `/api/nodes/${F.id}/move`, { graphId: X.id })).status === 400)
+  // a whole sub-graph moves, folder and all — into an area nobody "made" a graph of
   const mf = await req('POST', `/api/nodes/${F.id}/move`, { graphId: A.id })
   const q2 = (await req('GET', `/api/nodes/${Q.id}`)).json
+  ok('hierarchy: moving into a plain area opens it, silently', mf.status === 200 && (await req('GET', `/api/nodes/${A.id}`)).json.bodyKind === 'graph')
   ok('hierarchy: moving a sub-graph re-roots everything beneath it', mf.status === 200 &&
     /Engine Core[\\/]Rendering[\\/]Shadows/.test(q2.filePath), q2.filePath)
   ok('hierarchy: files are still readable after the folder moved',
@@ -977,8 +979,6 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
     fogIds(fogDown).includes(Q.id) && !fogIds(fogDown).includes(B.id), JSON.stringify(fogIds(fogDown)))
   ok('hierarchy: fog scoped to the top level finds the bug, not the question',
     fogIds(fogRoot).includes(B.id) && !fogIds(fogRoot).includes(Q.id), JSON.stringify(fogIds(fogRoot)))
-  // a sub-graph with residents cannot be archived out from under them
-  ok('hierarchy: archiving a sub-graph with residents 409', (await req('POST', `/api/nodes/${F.id}/archive`, {})).status === 409)
   // export/import keeps the hierarchy
   const bundle = (await req('GET', `/api/projects/${hp}/export`)).json
   const imp = await req('POST', `/api/projects/import?onConflict=duplicate`, bundle)
@@ -999,7 +999,7 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   await req('POST', `/api/nodes/${H.id}/archive`, {})
   await req('POST', `/api/nodes/${Q.id}/move`, { graphId: null })
   await req('POST', `/api/nodes/${G.id}/move`, { graphId: null })
-  await req('POST', `/api/nodes/${F.id}/demote`, {})
+  ok('hierarchy: a graph emptied by moves is a plain node again', (await req('GET', `/api/nodes/${F.id}`)).json.bodyKind === 'document')
   const rh = await req('POST', `/api/archive/${H.id}/restore`, {})
   ok('hierarchy: restoring into a graph that is gone lands at its parent level', rh.status === 200 && rh.json.graphId === A.id &&
     (await req('GET', `/api/nodes/${H.id}/content`)).json.content?.includes('cascaded'), JSON.stringify(rh.json).slice(0, 300))
@@ -1025,17 +1025,69 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   const under = await mk('question', 'Which writes race?', { inside: bug.id })
   ok('decomposition: the type rule stands — a bug is never a door, its child stays beside it',
     (await req('GET', `/api/nodes/${bug.id}`)).json.bodyKind === 'document' && under.graphId === null)
-  // an idea is fog by family but may hold a graph: never cleared out from under its residents
-  const idea = await mk('idea', 'Cloud saves', { tags: ['done'] })
-  await mk('feature', 'Cloud slot sync', { inside: idea.id })
-  const dry = (await req('POST', `/api/projects/${dp}/fog/clear-resolved`, { apply: false })).json
-  ok('decomposition: the sweep skips an idea that holds residents', !dry.candidates.some((c) => c.id === idea.id), JSON.stringify(dry.candidates))
-  const act = await mk('action', 'Ship cloud saves', { linkTo: [{ nodeId: idea.id, type: 'derives', outgoing: false }] })
-  const done = await req('POST', `/api/nodes/${act.id}/complete`, {})
-  ok('decomposition: completing an action keeps the idea it came from while the idea holds residents',
-    done.status === 200 && (done.json.kept ?? []).includes(idea.id) && (await req('GET', `/api/nodes/${idea.id}`)).status === 200,
-    JSON.stringify(done.json).slice(0, 200))
+  // ideas are fog and warps are frontier: neither is ever a place (owner ruling, 2026-10-24)
+  const idea = await mk('idea', 'Cloud saves')
+  const sync = await mk('feature', 'Cloud slot sync', { inside: idea.id })
+  ok('decomposition: an idea never holds a graph — its child stays beside it',
+    (await req('GET', `/api/nodes/${idea.id}`)).json.bodyKind === 'document' && sync.graphId === null)
+  ok('decomposition: an idea cannot be promoted', (await req('POST', `/api/nodes/${idea.id}/promote`, {})).status === 400)
+  const warp = await mk('warp', 'Cloud saves warp')
+  ok('decomposition: a warp cannot be promoted', (await req('POST', `/api/nodes/${warp.id}/promote`, {})).status === 400)
+  ok('decomposition: …nor have a node moved into it', (await req('POST', `/api/nodes/${sync.id}/move`, { graphId: warp.id })).status === 400)
   await req('DELETE', `/api/projects/${dp}?purge=1`)
+}
+
+// EVERY NODE IS A FOLDER — emptied, it closes and its folder goes; deleted or
+// archived, everything inside goes with it, deepest first, with no live row or
+// file left behind; restored, the whole subtree comes back nested as it was
+{
+  const cp = (await req('POST', '/api/projects', { name: `cascade-${Date.now()}` })).json.id
+  const mk = async (type, title, extra = {}) => (await req('POST', `/api/projects/${cp}/nodes`, { type, title, ...extra })).json
+  const vaultPath = String((await req('GET', '/api/settings')).json?.vaultPath ?? '')
+  const abs = (fp) => path.join(vaultPath, fp)
+  // emptied → a plain node, folder gone
+  const box = await mk('feature', 'Toolbox')
+  const tool = await mk('component', 'Hammer', { graphId: box.id })
+  const boxOpen = (await req('GET', `/api/nodes/${box.id}`)).json
+  const boxFolder = path.dirname(abs(tool.filePath))
+  ok('folders: creating inside a plain feature opens it', boxOpen.bodyKind === 'graph' && fs.existsSync(boxFolder), boxFolder)
+  await req('POST', `/api/nodes/${tool.id}/move`, { graphId: null })
+  ok('folders: taking the last one out closes it and removes the empty folder',
+    (await req('GET', `/api/nodes/${box.id}`)).json.bodyKind === 'document' && !fs.existsSync(boxFolder), boxFolder)
+  // a three-deep tree, with a link out and a finding inside
+  const root = await mk('area', 'Physics')
+  const mid = await mk('feature', 'Collision', { graphId: root.id })
+  const leaf = await mk('component', 'Broadphase', { graphId: mid.id, content: 'sweep and prune' })
+  const bug = await mk('bug', 'Tunnelling', { graphId: mid.id })
+  const outside = await mk('feature', 'Rendering', { linkTo: [{ nodeId: leaf.id, type: 'depends', outgoing: true }] })
+  const lone = await mk('question', 'Fixed step?', { graphId: root.id })
+  await req('POST', `/api/nodes/${lone.id}/archive`, {}) // archived on its own, before the root
+  // where everything lives NOW (opening a graph may have moved a file)
+  const files = []
+  for (const n of [root, mid, leaf, bug]) files.push(abs((await req('GET', `/api/nodes/${n.id}`)).json.filePath))
+  const rootFolder = path.dirname(files[1])
+  const del = await req('DELETE', `/api/nodes/${root.id}`)
+  const live = (await req('GET', `/api/projects/${cp}/nodes`)).json.map((n) => n.id)
+  ok('cascade: deleting a node archives everything inside it', del.status === 200 &&
+    [root, mid, leaf, bug].every((n) => !live.includes(n.id)), JSON.stringify(live))
+  ok('cascade: no live file is left behind', files.every((f) => !fs.existsSync(f)) && !fs.existsSync(rootFolder), JSON.stringify(files.filter((f) => fs.existsSync(f))))
+  const arch = (await req('GET', `/api/archive?projectId=${cp}`)).json
+  const archIds = arch.items.map((a) => a.id)
+  ok('cascade: …each one is in the archive, restorable', [root, mid, leaf, bug].every((n) => archIds.includes(n.id)), JSON.stringify(archIds))
+  ok('cascade: the outside node survives, its link archived', live.includes(outside.id))
+  const rr = await req('POST', `/api/archive/${root.id}/restore`, {})
+  const m2 = (await req('GET', `/api/nodes/${mid.id}`)).json
+  const l2 = (await req('GET', `/api/nodes/${leaf.id}`)).json
+  ok('cascade: restoring the root brings the subtree back nested', rr.status === 200 && m2.graphId === root.id && l2.graphId === mid.id &&
+    (await req('GET', `/api/nodes/${bug.id}`)).json.graphId === mid.id, JSON.stringify([m2.graphId, l2.graphId]))
+  ok('cascade: …files and links too', (await req('GET', `/api/nodes/${leaf.id}/content`)).json.content?.includes('sweep and prune') &&
+    l2.edges.some((e) => rels(e).some((r) => r.type === 'depends')))
+  ok('cascade: …but not what was archived on its own', (await req('GET', `/api/nodes/${lone.id}`)).status === 404)
+  // archive takes the subtree too, and a nested delete closes its emptied parent
+  await req('DELETE', `/api/nodes/${mid.id}`)
+  ok('cascade: deleting the only resident closes its parent', (await req('GET', `/api/nodes/${root.id}`)).json.bodyKind === 'document')
+  ok('cascade: a project is never deleted as a node', (await req('DELETE', `/api/nodes/${cp}`)).status === 400)
+  await req('DELETE', `/api/projects/${cp}?purge=1`)
 }
 
 // PROJECTS ARE NODES — type `project`, body always a graph. Projects nest inside

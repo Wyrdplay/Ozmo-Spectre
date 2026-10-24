@@ -12,7 +12,7 @@
 // a read-only ghost, there so the edge has something to land on. Nothing here
 // fetches or writes; it is a pure function of the payload and the location.
 
-import type { GraphPayload, Project, SpecNode } from '@shared/types'
+import { holdsGraph, type GraphPayload, type Project, type SpecNode } from '@shared/types'
 
 /** Where the canvas stands: a project, and a sub-graph inside it (null = its top level). */
 export interface Location {
@@ -20,8 +20,15 @@ export interface Location {
   graphId: string | null
 }
 
-/** Is this node a door — something the canvas can go through? */
+/** Is this node a door — does something already live inside it? (It wears the door mark.) */
 export const isDoor = (n: Pick<SpecNode, 'bodyKind' | 'type'>): boolean => n.type === 'project' || n.bodyKind === 'graph'
+
+/** Can the canvas go into this node? THE FOLDER MODEL (owner, 2026-10-24): every
+ *  spec, policy or project node behaves as if it already holds a graph — empty
+ *  until something goes in, and nobody ever has to "make" one. Fog and frontier
+ *  never hold anything; a portal or a reference is gone into where it lives. */
+export const canEnter = (n: Pick<SpecNode, 'bodyKind' | 'type' | 'portal' | 'referencesNodeId'>): boolean =>
+  !n.portal && !n.referencesNodeId && (isDoor(n) || holdsGraph(n.type))
 
 /** Connections from a node on this level to things living BEHIND a door on this
  *  level, gathered onto the door: one line per (node, door), with how many
@@ -230,6 +237,20 @@ export function livesWithin(n: Pick<SpecNode, 'graphId'>, graphId: string | null
     seen.add(g)
   }
   return false
+}
+
+/** How many nodes live inside `id`, at any depth — what deleting it takes with it. */
+export function insideCount(nodes: SpecNode[], id: string): number {
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  return nodes.filter((n) => !n.portal && n.id !== id && livesWithin(n, id, byId)).length
+}
+
+/** The delete confirmation's body: the archive keeps it, and everything inside goes with it. */
+export function deleteBody(nodes: SpecNode[], id: string): string {
+  const k = insideCount(nodes, id)
+  return k
+    ? `It moves to the Archive with its links, notes and history — and the ${k} node${k === 1 ? '' : 's'} inside it ${k === 1 ? 'goes' : 'go'} with it. Restoring it brings them all back.`
+    : 'It moves to the Archive with its links, notes and history — searchable and restorable.'
 }
 
 /** The sub-graphs from the project's top level down to `graphId`, outermost first. */

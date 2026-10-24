@@ -8,7 +8,7 @@ import {
 } from '@shared/types'
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
-import { formatAddress, isDoor, parseAddress, setPeeked, setUnfolded, type Address } from './lib/hierarchy'
+import { canEnter, formatAddress, parseAddress, setPeeked, setUnfolded, type Address } from './lib/hierarchy'
 import { RpcError, rpc } from './api'
 import { host, type LinkStatus } from './host'
 
@@ -706,7 +706,7 @@ export const useStore = create<OzmoState>((set, get) => ({
     }
     const { graph } = get()
     // a level that is not a door of this project (gone, demoted, never was) is its top level
-    const door = to.graphId ? graph.nodes.find((n) => n.id === to.graphId && n.projectId === to.projectId && n.type !== 'project' && isDoor(n)) : null
+    const door = to.graphId ? graph.nodes.find((n) => n.id === to.graphId && n.projectId === to.projectId && n.type !== 'project' && canEnter(n)) : null
     const graphId = door ? door.id : null
     // a node to land on: it decides the level when the caller did not, because
     // a node is only ever shown where it lives
@@ -748,7 +748,7 @@ export const useStore = create<OzmoState>((set, get) => ({
   descend: async (doorId) => {
     const { graph, projectId } = get()
     const door = graph.nodes.find((n) => n.id === doorId)
-    if (!door || !projectId || !isDoor(door) || door.portal) return
+    if (!door || !projectId || !canEnter(door)) return
     if (door.type === 'project') await get().go({ projectId: door.id, graphId: null })
     else await get().go({ projectId: door.projectId, graphId: door.id })
   },
