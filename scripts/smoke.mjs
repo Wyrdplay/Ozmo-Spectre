@@ -1069,15 +1069,23 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   const xs = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'feature', title: 'Profiler', content: 'flame graphs' })).json
   await req('POST', `/api/nodes/${xs.id}/promote`, {})
   const xq = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'question', title: 'Sampling or tracing?', graphId: xs.id })).json
-  const xw = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'warp', title: 'Ship the profiler' })).json
+  const xw = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'area', title: 'Profiling' })).json
   await req('POST', `/api/projects/${X.id}/edges`, { sourceId: xs.id, targetId: xw.id, type: 'member' })
   const xd = await req('POST', `/api/projects/${X.id}/edges`, { sourceId: xq.id, targetId: rf.id, type: 'depends' })
   const lone = await req('POST', `/api/nodes/${xs.id}/move`, { graphId: P.id })
-  ok('projects: a move that would strand a warp membership across projects 400', lone.status === 400 && /member/.test(JSON.stringify(lone.json)), JSON.stringify(lone.json))
+  ok('projects: a move that would strand an area membership across projects 400', lone.status === 400 && /member/.test(JSON.stringify(lone.json)), JSON.stringify(lone.json))
+  // a warp may hold any project's node, so a warp member moves alone
+  const xWarp = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'warp', title: 'Ship the profiler' })).json
+  const xTask = (await req('POST', `/api/projects/${X.id}/nodes`, { type: 'feature', title: 'Sampler' })).json
+  await req('POST', `/api/projects/${X.id}/edges`, { sourceId: xTask.id, targetId: xWarp.id, type: 'member' })
+  const xTaskMv = await req('POST', `/api/nodes/${xTask.id}/move`, { graphId: P.id })
+  ok('projects: a warp member moves to another project alone, and stays in its warp', xTaskMv.status === 200 &&
+    (await req('GET', `/api/nodes/${xTask.id}`)).json.edges.some((e) => e.relationships.some((r) => r.type === 'member' && r.targetId === xWarp.id)),
+    JSON.stringify(xTaskMv.json))
   const both = await req('POST', `/api/projects/${X.id}/nodes/move`, { ids: [xs.id, xw.id], graphId: P.id })
   const xs2 = (await req('GET', `/api/nodes/${xs.id}`)).json
   const xq2 = (await req('GET', `/api/nodes/${xq.id}`)).json
-  ok('projects: a sub-graph and its warp cross together, everything inside re-owned', both.status === 200 &&
+  ok('projects: a sub-graph and its area cross together, everything inside re-owned', both.status === 200 &&
     xs2.projectId === P.id && xq2.projectId === P.id && (await req('GET', `/api/nodes/${xw.id}`)).json.projectId === P.id &&
     xq2.graphId === xs.id && xq2.filePath.includes(`Engine ${stamp}`) && xs2.content.includes('flame graphs'), `${both.status} ${JSON.stringify(both.json)} ${xq2.filePath}`)
   ok('projects: the old project no longer holds them, the new one does',
@@ -2980,15 +2988,27 @@ ok('settings.updated event emitted on PATCH', events.includes('settings.updated'
   ok('cross-project: impact across the boundary answers', xImp.status === 200, JSON.stringify(xImp.json).slice(0, 160))
   ok('cross-project: impact names the foreign requirer', JSON.stringify(xImp.json).includes(xaN.json.id))
 
-  // SCHEDULING must not cross — a foreign member would feed a roll-up with work
-  // the project cannot finish, and addresses aims a warp at a goal it owns
+  // A WARP MAY CROSS PROJECTS (owner ruling, 2026-10-24) — an increment spans
+  // what it touches. PLACEMENT may not: an area is one project's geography.
+  const xArea = await req('POST', `/api/projects/${xaId}/nodes`, { type: 'area', title: 'XA area' })
+  const xAreaMem = await req('POST', `/api/projects/${xaId}/edges`, { sourceId: xbN.json.id, targetId: xArea.json.id, type: 'member' })
+  ok('cross-project: member into an area is refused', xAreaMem.status === 400)
+  ok('cross-project: the area refusal explains why', /only a warp may hold/i.test(JSON.stringify(xAreaMem.json)), JSON.stringify(xAreaMem.json))
   const xMem = await req('POST', `/api/projects/${xaId}/edges`, { sourceId: xbN.json.id, targetId: xaWarp.json.id, type: 'member' })
-  ok('cross-project: member is refused', xMem.status === 400)
-  ok('cross-project: member refusal explains why', /cannot cross a project boundary/.test(JSON.stringify(xMem.json)))
+  ok('cross-project: a warp may hold another project\'s node', xMem.status === 200 && hasRel(xMem.json, 'member'), JSON.stringify(xMem.json).slice(0, 200))
   const xAddr = await req('POST', `/api/projects/${xaId}/edges`, { sourceId: xaWarp.json.id, targetId: xbN.json.id, type: 'addresses' })
-  ok('cross-project: addresses is refused', xAddr.status === 400)
+  ok('cross-project: a warp may address another project\'s node', xAddr.status === 200)
   const xLocalMem = await req('POST', `/api/projects/${xaId}/edges`, { sourceId: xaN.json.id, targetId: xaWarp.json.id, type: 'member' })
   ok('cross-project: same-project member still works', xLocalMem.status === 200 && hasRel(xLocalMem.json, 'member'))
+  const xBoard = (await req('GET', `/api/projects/${xaId}/warps`)).json
+  ok('cross-project: the warp\'s board lists its foreign member',
+    (xBoard.find((w) => w.warp.id === xaWarp.json.id)?.members ?? []).some((m) => m.id === xbN.json.id))
+  // the GATE reads the foreign member: it must be covered like any other
+  await req('PATCH', `/api/nodes/${xaWarp.json.id}`, { stage: 'review' })
+  const xShip = await req('PATCH', `/api/nodes/${xaWarp.json.id}`, { stage: 'ship' })
+  ok('cross-project: the gate holds a warp back for a foreign member nobody reviewed', xShip.status === 409 &&
+    JSON.stringify(xShip.json).includes(xbN.json.id), `${xShip.status} ${JSON.stringify(xShip.json).slice(0, 300)}`)
+  await req('PATCH', `/api/nodes/${xaWarp.json.id}`, { stage: 'concept' })
 
   // a foreign node must not leak into project-scoped views. graphInternal now
   // computes flags/progress over the union but returns foreign nodes SEPARATELY

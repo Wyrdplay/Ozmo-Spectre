@@ -1114,9 +1114,15 @@ MOVES CROSS PROJECTS. graphId may name a sub-graph in ANOTHER project, or anothe
 (its top level): the node — a sub-graph with everything inside it — is re-owned by that project,
 its files move into that project's folder, and every connection whose source moved now belongs
 to the new project. Links themselves never change. Refused (400, naming the links): a move that
-would leave a \`member\` or \`addresses\` crossing a project — a warp or area holds only its own
-project's nodes, so move the warp or area along in the same call, or remove the link. A
-reference stays with the project that made it; a skill whose slug is taken where it lands is 409.
+would leave an AREA membership crossing a project — an area holds only its own project's nodes,
+so move the area along in the same call, or remove the link. A reference stays with the project
+that made it; a skill whose slug is taken where it lands is 409.
+
+WARPS CROSS PROJECTS. A warp may \`member\` nodes in any project and \`addresses\` goals in any
+project — an increment spans what it touches. Its board (/api/projects/:id/warps) lists foreign
+members, its progress rolls them up, and its ship gate reads every project its members live in:
+a foreign member must be covered, its feedback designated and its actions settled, exactly like
+a local one. Membership into anything but a warp (an area) never crosses a project.
 
 SCOPED READS — graph + scope on the graph, node list and fog:
 

@@ -1788,10 +1788,11 @@ function inSlices(ids: string[], fn: (slice: string[], ph: string) => void): voi
 }
 
 /**
- * Refuse a move ACROSS projects that would leave scheduling pointing over the
- * boundary. `member` and `addresses` may not cross a project (see
- * validateRelationship), so a node cannot leave a warp or area behind, nor take
- * one's member with it — unless both ends move together. A reference stays
+ * Refuse a move ACROSS projects that would leave PLACEMENT pointing over the
+ * boundary. A warp may hold nodes from any project, but membership into
+ * anything else — an area, or what a feedback reviews — stays inside one
+ * (see validateRelationship), so a node cannot leave its area behind, nor take
+ * an area's member with it, unless both ends move together. A reference stays
  * with the project that made it, and a skill's slug must be free where it lands.
  */
 function validateCrossing(rows: NodeRow[], destProject: string): void {
@@ -1808,7 +1809,7 @@ function validateCrossing(rows: NodeRow[], destProject: string): void {
     for (const x of db.all<{ type: string; source_id: string; target_id: string; s_title: string; t_title: string; s_project: string; t_project: string }>(
       `SELECT r.type, r.source_id, r.target_id, s.title AS s_title, t.title AS t_title, s.project_id AS s_project, t.project_id AS t_project
        FROM edge_relationships r JOIN nodes s ON s.id = r.source_id JOIN nodes t ON t.id = r.target_id
-       WHERE r.type IN ('member','addresses') AND (r.source_id IN (${ph}) OR r.target_id IN (${ph}))`, [...slice, ...slice])) {
+       WHERE r.type = 'member' AND t.type <> 'warp' AND (r.source_id IN (${ph}) OR r.target_id IN (${ph}))`, [...slice, ...slice])) {
       const sProj = moving.has(x.source_id) ? destProject : x.s_project
       const tProj = moving.has(x.target_id) ? destProject : x.t_project
       if (sProj !== tProj) offenders.push(`"${x.s_title}" —${x.type}→ "${x.t_title}"`)
@@ -1822,8 +1823,8 @@ function validateCrossing(rows: NodeRow[], destProject: string): void {
   const uniq = [...new Set(offenders)]
   need(uniq.length === 0,
     `moving into "${dest.name}" would leave ${uniq.length} membership${uniq.length === 1 ? '' : 's'} crossing a project boundary: ` +
-    `${uniq.slice(0, 5).join('; ')}${uniq.length > 5 ? `; and ${uniq.length - 5} more` : ''} — a warp or area holds only its own ` +
-    "project's nodes. Remove those links, or move the warp or area along in the same call", 400)
+    `${uniq.slice(0, 5).join('; ')}${uniq.length > 5 ? `; and ${uniq.length - 5} more` : ''} — an area holds only its own ` +
+    "project's nodes (a warp may hold any project's). Remove those links, or move the area along in the same call", 400)
 }
 
 /**
@@ -2091,8 +2092,12 @@ const typesOfFamily = (f: string): NodeType[] =>
  * `inReview` reads it too.
  */
 export function reviewHeldIds(projectId: string): Set<string> {
+  // EVERY warp in review, not only this project's: a warp may hold nodes from
+  // any project, so a review elsewhere can be what holds this project's feedback.
+  // (projectId stays in the signature — callers ask about one project's nodes.)
+  void projectId
   const roots = db.all<{ id: string }>(
-    "SELECT id FROM nodes WHERE project_id = ? AND type = 'warp' AND stage = 'review'", [projectId]
+    "SELECT id FROM nodes WHERE type = 'warp' AND stage = 'review'"
   ).map((x) => x.id)
   const out = new Set<string>()
   const seen = new Set<string>(roots)
@@ -3220,24 +3225,24 @@ function validateRelationship(type: RelationshipType, s: NodeRow, t: NodeRow, ex
     need(s.type === 'warp', 'addresses relationships must start at a warp')
     need(t.type !== 'warp', 'addresses relationships must target a non-warp node')
   }
-  // DESCRIBING may cross a project boundary; SCHEDULING may not. `member` is
-  // containment — a warp schedules in time, an area places in space — and
-  // `addresses` aims a warp at a goal. Both are statements about work the owning
-  // project controls, so neither may reach into another project: you cannot put
-  // someone else's node in your warp, and a foreign member would feed your
-  // roll-up with work you cannot finish. Everything else (depends, blocks,
-  // shapes, class-of, derives, leads-to, and the bare connection) describes, and
-  // describing across projects is the whole point of cross-project sharing.
+  // A WARP MAY CROSS PROJECTS (owner ruling, 2026-10-24): an increment can span
+  // the projects it touches, so a warp may member nodes in any project and aim
+  // (addresses) at a goal in any project. Its gate and its roll-up read every
+  // project its members live in (warpClosure, listWarps). What may NOT cross is
+  // PLACEMENT: an area is one project's geography, and feedback members what it
+  // reviews only where that review lives — membership into anything but a warp
+  // stays inside a project. Everything else (depends, blocks, shapes, class-of,
+  // derives, leads-to, the bare connection) describes, and always could cross.
   if (type === 'member' && s.references_node_id) {
     need(false,
       `"${s.title}" is a reference — it cannot join a warp or an area, because it is not this project's ` +
       'work to schedule or to place. Link a local node to it with depends instead, or fork it')
   }
-  if (s.project_id !== t.project_id) {
-    need(type !== 'member' && type !== 'addresses',
-      `"${type}" cannot cross a project boundary — "${s.title}" and "${t.title}" belong to different ` +
-      'projects, and membership/addressing are scheduling, not description. Reference or fork the node, ' +
-      'or link a local node to it with depends/blocks/relates instead')
+  if (s.project_id !== t.project_id && type === 'member') {
+    need(t.type === 'warp',
+      `member into a ${t.type} cannot cross a project boundary — "${s.title}" and "${t.title}" belong to different ` +
+      'projects, and an area is one project\'s geography. Only a warp may hold nodes from other projects. ' +
+      'Reference or fork the node, or link a local node to it with depends/blocks/relates instead')
   }
   // class-of allows any node types on both ends and multiple classification —
   // only the per-type hierarchy guard applies (class hierarchies stay DAGs)
@@ -3469,8 +3474,9 @@ export function addEdgeAnnotation(p: { id: string; body: string }, actor: string
 // Warps
 
 export function listWarps(p: { projectId: string }): WarpSummary[] {
-  const { nodes, edges } = graphInternal(p.projectId)
-  const byId = new Map(nodes.map((n) => [n.id, n]))
+  const { nodes, edges, foreignNodes } = graphInternal(p.projectId)
+  // a warp's members may live in other projects — they are its members all the same
+  const byId = new Map([...nodes, ...foreignNodes].map((n) => [n.id, n]))
   const membersOf = new Map<string, SpecNode[]>()
   for (const e of edges) {
     for (const r of e.relationships) {
@@ -3842,6 +3848,32 @@ const COMPLETABLE_TYPES = new Set<NodeType>(
  * requirement 4 holds the ship until they are resolved. The lens mirrors all of
  * this to paint the meter; the 409 is the truth.
  */
+/**
+ * The graph a warp's gate reads: its own project's, plus the project of every
+ * node it holds — a warp may member nodes in any project, and the feedback,
+ * actions and derived work that decide whether a foreign member is done live
+ * beside that member, not beside the warp. Without this a foreign member would
+ * be invisible to the gate, and an increment could ship with it unfinished.
+ */
+function closureGraph(warpId: string, projectId: string): { nodes: SpecNode[]; edges: SpecEdge[]; resolved: Set<string> } {
+  const base = graphInternal(projectId)
+  const others = db.all<{ project_id: string }>(
+    `SELECT DISTINCT n.project_id FROM edge_relationships r JOIN nodes n ON n.id = r.source_id
+     WHERE r.type = 'member' AND r.target_id = ? AND n.project_id <> ?`, [warpId, projectId]
+  ).map((r) => r.project_id)
+  if (!others.length) return base
+  const nodes = new Map(base.nodes.map((n) => [n.id, n]))
+  const edges = new Map(base.edges.map((e) => [e.id, e]))
+  const resolved = new Set(base.resolved)
+  for (const pid of others) {
+    const g = graphInternal(pid)
+    for (const n of g.nodes) if (!nodes.has(n.id)) nodes.set(n.id, n)
+    for (const e of g.edges) if (!edges.has(e.id)) edges.set(e.id, e)
+    for (const id of g.resolved) resolved.add(id)
+  }
+  return { nodes: [...nodes.values()], edges: [...edges.values()], resolved }
+}
+
 export function warpClosure(warpId: string, projectId: string): {
   fullyActioned: boolean
   feedbackCount: number
@@ -3851,7 +3883,7 @@ export function warpClosure(warpId: string, projectId: string): {
   completion: { total: number; complete: number }
   offenders: ClosureOffenders
 } {
-  const { nodes, edges, resolved } = graphInternal(projectId)
+  const { nodes, edges, resolved } = closureGraph(warpId, projectId)
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const feedback: SpecNode[] = []
   const work: SpecNode[] = []
