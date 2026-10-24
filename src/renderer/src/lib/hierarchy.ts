@@ -189,6 +189,18 @@ export function canvasGraph(graph: GraphPayload, projectId: string | null, graph
   return out
 }
 
+/** Does `n` live at `graphId` or anywhere beneath it? `graphId` null = the
+ *  project's top level, which holds everything in the project. */
+export function livesWithin(n: Pick<SpecNode, 'graphId'>, graphId: string | null, byId: Map<string, Pick<SpecNode, 'graphId'>>): boolean {
+  if (graphId === null) return true
+  const seen = new Set<string>()
+  for (let g = n.graphId ?? null; g && !seen.has(g); g = byId.get(g)?.graphId ?? null) {
+    if (g === graphId) return true
+    seen.add(g)
+  }
+  return false
+}
+
 /** The sub-graphs from the project's top level down to `graphId`, outermost first. */
 export function subgraphChain(nodes: SpecNode[], graphId: string | null): SpecNode[] {
   const byId = new Map(nodes.map((n) => [n.id, n]))

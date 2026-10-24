@@ -8,6 +8,8 @@ import {
 } from './widgets'
 import { useBoardLock } from './BoardLock'
 import { timeAgo } from '@/lib/markdown'
+import { useLevelScope } from '@/lib/level'
+import { ScopeNote } from './ScopeNote'
 
 /** Fractional ranks are renormalized to integers once midpoints collapse below this. */
 const MIN_GAP = 1e-6
@@ -61,16 +63,19 @@ export function BacklogView(): React.JSX.Element {
   }, [])
 
   const needle = q.trim().toLowerCase()
+  // standing in a sub-graph: its backlog and everything beneath it (lib/level.ts)
+  const scope = useLevelScope()
   const rows = useMemo(
     () => backlog
+      .filter(scope.keeps)
       .filter((n) => !needle || n.title.toLowerCase().includes(needle) || n.tags.some((t) => t.includes(needle)) ||
         (n.flags ?? []).some((f) => f.toLowerCase().includes(needle)))
       .filter((n) => nodeMatchesFlagFilter(n.flags, flagHidden)),
-    [backlog, needle, flagHidden]
+    [backlog, needle, flagHidden, scope]
   )
-  // any active filter (text or flag) flattens the tree and disables drag-reorder —
-  // reordering a partial view would scramble the hidden rows' ranks
-  const filtered = needle.length > 0 || flagHidden.size > 0
+  // any active filter (text, flag or level) flattens the tree and disables
+  // drag-reorder — reordering a partial view would scramble the hidden rows' ranks
+  const filtered = needle.length > 0 || flagHidden.size > 0 || scope.narrowed
 
   /** oldest incoming derives relationship decides a node's canonical parent (matches Lists) */
   const parentOf = useMemo(() => {
@@ -208,6 +213,7 @@ export function BacklogView(): React.JSX.Element {
         <div className="spacer" />
         <button className="btn primary" onClick={() => showQuickAdd()}>+ New node</button>
       </div>
+      <ScopeNote scope={scope} shown={backlog.filter(scope.keeps).length} total={backlog.length} />
       <div className="view-body">
         <div className="lists">
           {displayRows.length === 0 ? (

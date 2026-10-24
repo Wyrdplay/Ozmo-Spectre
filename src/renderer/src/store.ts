@@ -382,6 +382,8 @@ interface OzmoState {
    *  canvas shows one level (lib/hierarchy.ts); every other view still reads
    *  the whole project. */
   graphRoot: string | null
+  /** what the LISTS show while standing in a sub-graph: it and below (here), or the whole project */
+  levelScope: 'here' | 'project'
   /** a door to pulse once on the canvas — set by ascend, consumed by the canvas */
   navPulseId: string | null
 
@@ -527,6 +529,7 @@ export const useStore = create<OzmoState>((set, get) => ({
   graph: { nodes: [], edges: [] },
   graphVersion: 0,
   graphRoot: null,
+  levelScope: 'here',
   navPulseId: null,
   backlog: [],
   warps: [],
@@ -713,8 +716,9 @@ export const useStore = create<OzmoState>((set, get) => ({
     if (level !== get().graphRoot) setUnfolded([])
     set({
       graphRoot: level,
-      // a new level starts with nothing selected and nothing being found
-      ...(level !== get().graphRoot ? { selection: null, findQuery: null } : {}),
+      // a new level starts with nothing selected, nothing being found, and its
+      // lists scoped to it again
+      ...(level !== get().graphRoot ? { selection: null, findQuery: null, levelScope: 'here' as const } : {}),
       navPulseId: opts.pulse ?? null
     })
     // a node asked for is centred; a door selected on the way back up is not —

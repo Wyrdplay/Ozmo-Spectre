@@ -6,6 +6,8 @@ import {
   hiddenFlagNames, flagDecor, flagRowStyle, nodeMatchesFlagFilter, undimFlagNames, useFlagRules, useOrderedTypes, useTypeStyles
 } from './widgets'
 import { timeAgo } from '@/lib/markdown'
+import { useLevelScope } from '@/lib/level'
+import { ScopeNote } from './ScopeNote'
 
 /** Cycles are rejected by the API; the cap is pure defence for pre-guard data. */
 const MAX_TREE_DEPTH = 8
@@ -17,7 +19,14 @@ interface TreeEntry {
 }
 
 export function ListsView(): React.JSX.Element {
-  const graph = useStore((s) => s.graph)
+  const fullGraph = useStore((s) => s.graph)
+  const projectId = useStore((s) => s.projectId)
+  // standing in a sub-graph: that level and everything beneath it (lib/level.ts)
+  const scope = useLevelScope()
+  const graph = useMemo(
+    () => scope.narrowed ? { ...fullGraph, nodes: fullGraph.nodes.filter(scope.keeps) } : fullGraph,
+    [fullGraph, scope]
+  )
   const selection = useStore((s) => s.selection)
   const select = useStore((s) => s.select)
   const selectNode = useStore((s) => s.selectNode)
@@ -209,6 +218,8 @@ export function ListsView(): React.JSX.Element {
         <div className="spacer" />
         <button className="btn primary" onClick={() => showQuickAdd()}>+ New node</button>
       </div>
+      <ScopeNote scope={scope} shown={graph.nodes.filter((n) => n.projectId === projectId).length}
+        total={fullGraph.nodes.filter((n) => n.projectId === projectId).length} />
       <div className="view-body">
         <div className="lists">
           {sections.map(({ t, items, rows }) => {

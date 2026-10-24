@@ -44,6 +44,7 @@ export function PathBar(): React.JSX.Element | null {
   const hiddenTags = useStore((s) => s.hiddenTags)
   const [open, setOpen] = useState<number | null>(null)
   const [creatingRoot, setCreatingRoot] = useState(false)
+  const levelScope = useStore((s) => s.levelScope)
   const canWrite = useStore((s) => s.canWrite())
 
   // the keys that move through the hierarchy from ANY view
@@ -208,6 +209,21 @@ export function PathBar(): React.JSX.Element | null {
       {sep(segments.length, below, null)}
       <ProjectMenu />
       {creatingRoot && <CreateProject parentId={null} onClose={() => setCreatingRoot(false)} />}
+      {/* ONE scope control, obeyed by every list — shown where a list is, inside a sub-graph */}
+      {graphRoot && (view === 'lists' || view === 'backlog' || view === 'refine') && (
+        <span className="pathbar-scope" role="group" aria-label="What the list shows">
+          <button className={levelScope === 'here' ? 'on' : ''} aria-pressed={levelScope === 'here'}
+            onClick={() => useStore.setState({ levelScope: 'here' })}
+            title="This sub-graph and everything inside it">
+            this level & below
+          </button>
+          <button className={levelScope === 'project' ? 'on' : ''} aria-pressed={levelScope === 'project'}
+            onClick={() => useStore.setState({ levelScope: 'project' })}
+            title="Everything in the project, wherever it lives">
+            whole project
+          </button>
+        </span>
+      )}
       {filtered > 0 && view === 'graph' && (
         <span className="pathbar-note" title="Some nodes on this level are hidden by the filters on the canvas">
           {filtered} filter{filtered === 1 ? '' : 's'} hiding nodes ·{' '}

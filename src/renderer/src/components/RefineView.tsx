@@ -10,6 +10,8 @@ import {
 } from '@/lib/refine'
 import { Modal, TypeChip, TypeDot } from './widgets'
 import '../refine.css'
+import { useLevelScope } from '@/lib/level'
+import { ScopeNote } from './ScopeNote'
 
 /**
  * REFINE WORKS THE FOG.
@@ -70,17 +72,31 @@ export function RefineView(): React.JSX.Element {
     [graphNodes, projectId]
   )
 
+  // standing in a sub-graph: the fog of that level and everything beneath it
+  const scope = useLevelScope()
+  const graphRoot = useStore((s) => s.graphRoot)
   const fetchReport = useCallback(async (): Promise<FogReport | null> => {
     if (!projectId) return null
     try {
-      const r = await rpc<FogReport>('fog.get', { projectId, bodies: true })
+      const r = await rpc<FogReport>('fog.get', {
+        projectId, bodies: true, ...(scope.narrowed && graphRoot ? { graph: graphRoot, scope: 'down' } : {})
+      })
       setReport(r)
       return r
     } catch (e) {
       toast(`fog report failed: ${e instanceof Error ? e.message : e}`)
       return null
     }
-  }, [projectId, toast])
+  }, [projectId, toast, scope.narrowed, graphRoot])
+  // the scope changed while Refine is open (a level, or the path bar's control): re-read
+  const firstScope = useRef(true)
+  useEffect(() => {
+    if (firstScope.current) {
+      firstScope.current = false
+      return
+    }
+    void fetchReport()
+  }, [scope.narrowed, graphRoot]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // open: fetch the fog, then offer the draft back if there is one worth resuming
   useEffect(() => {
@@ -266,6 +282,7 @@ export function RefineView(): React.JSX.Element {
   })
 
   const header = (
+    <>
     <div className="view-header">
       <h1>Refine</h1>
       <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>
@@ -288,6 +305,8 @@ export function RefineView(): React.JSX.Element {
         Clear resolved…
       </button>
     </div>
+    <ScopeNote scope={scope} shown={0} total={0} />
+    </>
   )
 
   if (!projectId) {
