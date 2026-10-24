@@ -31,7 +31,9 @@ import {
 } from './widgets'
 import { HelpPanel } from './HelpPanel'
 import { inTextField, matches } from '@/lib/shortcuts'
-import { canvasGraph, homePath, isDoor, isGroupGhost, setUnfolded, unfoldedGroups } from '@/lib/hierarchy'
+import {
+  PEEK_MAX, canvasGraph, homePath, isDoor, isGroupGhost, peekedDoors, setPeeked, setUnfolded, unfoldedGroups
+} from '@/lib/hierarchy'
 
 interface SimNode extends SimulationNodeDatum {
   id: string
@@ -401,6 +403,9 @@ export function GraphView(): React.JSX.Element {
         }
       }
     }
+    // a PEEKED door holds its residents inside a hull, drawn exactly like an
+    // area's district — the same geography, for a room opened in place
+    for (const n of graph.nodes) if (n.peekOf) push(areaMembers, n.peekOf, n.id)
     const collapsed = new Set(collapsedContainerIds.filter((id) => (membersOf.get(id)?.length ?? 0) > 0))
     const hidden = new Set<string>()
     const hiddenBy = new Map<string, string>()
@@ -619,6 +624,21 @@ export function GraphView(): React.JSX.Element {
       .force('link', forceLink<SimNode, SimLink>([]).id((n) => n.id)
         .distance((l) => connectionDistance(l.data))
         .strength(0.35))
+      // a peeked door's residents gather round it — they are its room, shown in place
+      .force('peek', (alpha: number) => {
+        const nodes = nodesRef.current
+        let doors: Map<string, SimNode> | null = null
+        for (const n of nodes) {
+          if (!n.data.peekOf) continue
+          doors ??= new Map(nodes.map((d) => [d.id, d]))
+          const d = doors.get(n.data.peekOf)
+          if (!d || d.x == null || n.x == null) continue
+          // strong enough to out-pull a resident's links to the rest of the board:
+          // a peeked room stays a room beside its door, not a scatter across it
+          n.vx = (n.vx ?? 0) + (d.x - n.x) * 0.4 * alpha
+          n.vy = (n.vy ?? 0) + ((d.y ?? 0) - (n.y ?? 0)) * 0.4 * alpha
+        }
+      })
       .alphaDecay(0.035)
       .velocityDecay(0.35)
     simRef.current = sim
@@ -720,8 +740,14 @@ export function GraphView(): React.JSX.Element {
           }
         }
         ex.data = g
-        // a portal keeps the rim seat placePortals gave it
+        // a portal keeps the rim seat placePortals gave it; a peeked resident
+        // floats in its door's room and is never pinned here
         if (g.portal) return ex
+        if (g.peekOf) {
+          ex.fx = null
+          ex.fy = null
+          return ex
+        }
         if (g.pinned && g.x != null && dragRef.current?.node !== ex) {
           ex.fx = g.x
           ex.fy = g.y
@@ -732,6 +758,12 @@ export function GraphView(): React.JSX.Element {
         return ex
       }
       const jitter = (): number => (Math.random() - 0.5) * 60
+      // a peeked resident opens beside its door: its stored position is its own
+      // level's map, and means nothing here
+      if (g.peekOf) {
+        const door = prev.get(g.peekOf)
+        return { id: g.id, data: g, x: (door?.x ?? 0) + jitter() * 1.6, y: (door?.y ?? 0) + jitter() * 1.6 }
+      }
       const saved = hiddenPosRef.current.get(g.id)
       if (saved) hiddenPosRef.current.delete(g.id)
       const n: SimNode = { id: g.id, data: g, x: saved?.x ?? g.x ?? jitter(), y: saved?.y ?? g.y ?? jitter() }
@@ -1811,7 +1843,7 @@ export function GraphView(): React.JSX.Element {
         // how much lives behind a door — a quiet ▣ count at the lower right
         if (door && t.k > 0.35) {
           const count = doorInfoRef.current.counts.get(n.id) ?? 0
-          const text = `▣ ${count}`
+          const text = `${peekedDoors().includes(n.id) ? '▾' : '▣'} ${count}`
           ctx.font = '600 9px Inter, system-ui, sans-serif'
           const bw = ctx.measureText(text).width + 9
           const bx = cx + r * 0.75
@@ -2020,6 +2052,22 @@ export function GraphView(): React.JSX.Element {
       return
     }
 
+    // a door's ▣ count opens it IN PLACE (peek) — or shuts it again
+    if (e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey && !linkingFromRef.current) {
+      const door = hitDoorBadge(cx, cy)
+      if (door) {
+        togglePeek(door)
+        return
+      }
+    }
+
+    // a peeked resident is selected, never dragged: where it sits is its door's
+    // room shown in place, and writing that back would scramble its own level's map
+    if (node?.data.peekOf) {
+      selectNode(node.id)
+      return
+    }
+
     // a portal is selected (the inspector shows it, read where it lives) but
     // never dragged: its seat on the rim is this view's, not a position
     if (node?.data.portal) {
@@ -2050,7 +2098,7 @@ export function GraphView(): React.JSX.Element {
       // pointer-down on a member of a 2+ selection drags the whole selection
       const group =
         !frozen && sel?.kind === 'nodes' && sel.ids.length >= 2 && sel.ids.includes(node.id)
-          ? nodesRef.current.filter((n) => sel.ids.includes(n.id) && !n.data.portal).map((n) => ({ n, x0: n.x ?? 0, y0: n.y ?? 0 }))
+          ? nodesRef.current.filter((n) => sel.ids.includes(n.id) && !n.data.portal && !n.data.peekOf).map((n) => ({ n, x0: n.x ?? 0, y0: n.y ?? 0 }))
           : null
       dragRef.current = { node, moved: false, group, wx0: wx, wy0: wy, frozen }
       e.currentTarget.setPointerCapture(e.pointerId)
@@ -2319,6 +2367,46 @@ export function GraphView(): React.JSX.Element {
     }
   }
 
+  /** The door whose ▣ count badge is under a screen point — the geometry the draw
+   *  loop paints it with (lower right of the door). Sub-graph doors only: a
+   *  project's contents are another board, never shown in place. */
+  const hitDoorBadge = (cx: number, cy: number): SimNode | null => {
+    const t = transformRef.current
+    if (t.k <= 0.35) return null
+    for (const n of visibleNodes()) {
+      if (n.data.portal || n.data.type === 'project' || !isDoor(n.data)) continue
+      const r = stylesRef.current.node[n.data.type].radius * t.k
+      const count = doorInfoRef.current.counts.get(n.id) ?? 0
+      const bw = 9 + 6 * (2 + String(count).length)
+      const bx = px(n) * t.k + t.x + r * 0.75 - 2
+      const by = py(n) * t.k + t.y + r * 0.75
+      if (cx >= bx - 2 && cx <= bx + bw + 2 && Math.abs(cy - by) <= CONTAINER_BADGE_H / 2 + 2) return n
+    }
+    return null
+  }
+
+  /** PEEK — open a sub-graph door in place, or shut it. A room too big to read
+   *  on someone else's canvas is gone into instead. */
+  const togglePeek = (n: SimNode): void => {
+    const open = peekedDoors()
+    if (open.includes(n.id)) {
+      setPeeked(open.filter((x) => x !== n.id))
+    } else {
+      const count = doorInfoRef.current.counts.get(n.id) ?? 0
+      if (!count) {
+        toast(`nothing lives in "${n.data.title}" yet`, 'info')
+        return
+      }
+      if (count > PEEK_MAX) {
+        toast(`"${n.data.title}" holds ${count} — too many to show in place, so going in`, 'info')
+        enterDoor(n)
+        return
+      }
+      setPeeked([...open, n.id])
+    }
+    useStore.setState((s) => ({ graphVersion: s.graphVersion + 1 }))
+  }
+
   /** A portal's node, where it lives: its level, it focused (a side-step). */
   const followPortal = (n: SimNode): void => {
     void useStore.getState().go({ projectId: n.data.projectId, graphId: n.data.graphId ?? null, nodeId: isGroupGhost(n.id) ? null : n.id })
@@ -2331,8 +2419,10 @@ export function GraphView(): React.JSX.Element {
     const { x, y } = toWorld(cx, cy)
     if (hitContainerBadge(cx, cy)) return // fast badge clicks must not spawn quick-add
     const hit = hitNode(x, y)
-    // a door: go through it · a portal: go to where it lives · nothing: a new node here
-    if (hit?.data.portal) followPortal(hit)
+    if (hitDoorBadge(cx, cy)) return // the peek badge's own clicks must not go through the door
+    // a door: go through it · a portal or a peeked resident: go to where it lives ·
+    // nothing: a new node here
+    if (hit?.data.portal || hit?.data.peekOf) followPortal(hit)
     else if (hit && isDoor(hit.data)) enterDoor(hit)
     else if (!hit) showQuickAdd(dropPoint(x, y))
   }
@@ -2373,11 +2463,20 @@ export function GraphView(): React.JSX.Element {
       // Enter / Ctrl+↓ on ONE selected door goes through it; Enter on a portal
       // goes to where it lives. (Ctrl+↑, back and forward live on the path bar:
       // they work from every view, not only the canvas.)
+      if (matches('peek', e)) {
+        const sel = selectionRef.current
+        const n = sel?.kind === 'nodes' && sel.ids.length === 1 ? nodesRef.current.find((x) => x.id === sel.ids[0]) : undefined
+        if (n && !n.data.portal && n.data.type !== 'project' && isDoor(n.data)) {
+          e.preventDefault()
+          togglePeek(n)
+          return
+        }
+      }
       if (matches('descend', e) || matches('descend-enter', e)) {
         const sel = selectionRef.current
         if (sel?.kind === 'nodes' && sel.ids.length === 1) {
           const n = nodesRef.current.find((x) => x.id === sel.ids[0])
-          if (n?.data.portal && matches('descend-enter', e)) {
+          if ((n?.data.portal || n?.data.peekOf) && matches('descend-enter', e)) {
             e.preventDefault()
             followPortal(n)
             return

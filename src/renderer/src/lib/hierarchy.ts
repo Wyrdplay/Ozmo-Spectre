@@ -54,20 +54,34 @@ export function scopeGraph(graph: GraphPayload, projectId: string | null, graphI
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
   const parentOf = new Map(projects.map((p) => [p.id, p.parentId ?? null]))
 
-  /** the door on this level that `n` lives behind, if any */
+  // PEEK: a sub-graph door opened in place shows the nodes living directly in
+  // it, on this level, inside a hull round the door — real nodes with real links,
+  // marked with the door they belong to
+  const peekOf = new Map<string, string>()
+  for (const d of peeked) {
+    const door = byId.get(d)
+    if (!door || !inScope.has(d) || door.type === 'project' || door.bodyKind !== 'graph') continue
+    for (const n of graph.nodes) if (n.graphId === d && n.projectId === projectId && !n.portal) peekOf.set(n.id, d)
+  }
+  const shown = new Set([...inScope, ...peekOf.keys()])
+
+  /** the door on this level that `n` lives behind, if any — or, behind a PEEKED
+   *  door, the door one level further in, since the peeked door's residents are
+   *  on show */
   const doorFor = (n: SpecNode): string | null => {
     if (n.projectId === projectId) {
-      // up its chain of homes until the level we stand on: the last step is the door
-      let prev: string | null = null
+      // up its chain of homes until the level we stand on, remembering the steps
+      const steps: string[] = []
       let g = n.graphId ?? null
       const seen = new Set<string>()
       while (g !== graphId) {
         if (g === null || seen.has(g)) return null // it lives above or beside us
         seen.add(g)
-        prev = g
+        steps.unshift(g)
         g = byId.get(g)?.graphId ?? null
       }
-      return prev
+      const door = steps[0] ?? null
+      return door && peekOf.size && steps.length > 1 && peeked.includes(door) ? steps[1] : door
     }
     // another project: behind a door here only if that project sits inside this
     // one, and a project's door stands on its parent's TOP level
@@ -84,8 +98,8 @@ export function scopeGraph(graph: GraphPayload, projectId: string | null, graphI
   const portals = new Map<string, SpecNode>()
   const gathered = new Map<string, DoorLink>()
   for (const e of graph.edges) {
-    const s = inScope.has(e.sourceId)
-    const t = inScope.has(e.targetId)
+    const s = shown.has(e.sourceId)
+    const t = shown.has(e.targetId)
     if (!s && !t) continue
     if (s && t) {
       edges.push(e)
@@ -95,8 +109,9 @@ export function scopeGraph(graph: GraphPayload, projectId: string | null, graphI
     const near = s ? e.sourceId : e.targetId
     if (!far) continue
     // a link to the room you are standing in (an area's members, now living
-    // inside it) says nothing here: you are already in it
-    if (far.id === graphId) continue
+    // inside it) says nothing here: you are already in it — nor does a peeked
+    // resident's link to the door it is drawn inside
+    if (far.id === graphId || peekOf.get(near) === far.id) continue
     const door = doorFor(far)
     if (door) {
       if (door === near) continue // a door's own line to what lives inside it
@@ -155,11 +170,27 @@ export function scopeGraph(graph: GraphPayload, projectId: string | null, graphI
     g.aggregate = (g.aggregate ?? 0) + 1
   }
   return {
-    nodes: [...graph.nodes.filter((n) => inScope.has(n.id)), ...[...portals.values()].filter((p) => !folded.has(p.id)), ...ghosts],
+    nodes: [
+      ...graph.nodes.filter((n) => inScope.has(n.id)),
+      ...graph.nodes.filter((n) => peekOf.has(n.id)).map((n) => ({ ...n, peekOf: peekOf.get(n.id) })),
+      ...[...portals.values()].filter((p) => !folded.has(p.id)),
+      ...ghosts
+    ],
     edges: kept,
     doorLinks: [...gathered.values()]
   }
 }
+
+/** More residents than this and a door is gone through instead of peeked. */
+export const PEEK_MAX = 40
+
+let peeked: string[] = []
+/** The doors open in place on this level — canvas view state, like unfolding. */
+export function setPeeked(ids: string[]): void {
+  peeked = ids
+  cache = null
+}
+export const peekedDoors = (): string[] => peeked
 
 /** Portals in one place beyond this many fold into one ghost for the place. */
 export const PORTAL_FOLD = 5

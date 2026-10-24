@@ -43,6 +43,8 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'follow-portal', group: 'navigation', gesture: 'double-click a portal', what: 'go to where a ghosted node really lives' },
   { id: 'descend-enter', group: 'navigation', keys: 'enter', what: 'go into the selected door · go to the selected portal' },
   { id: 'descend', group: 'navigation', keys: 'ctrl+arrowdown', what: 'go into the selected door' },
+  { id: 'peek', group: 'navigation', keys: 'shift+enter', what: 'open the selected sub-graph in place (peek) — again to shut it' },
+  { id: 'peek-badge', group: 'navigation', gesture: 'click a door’s ▣ count', what: 'peek: its residents, in place, inside a hull round it' },
   { id: 'ascend', group: 'navigation', keys: 'ctrl+arrowup', what: 'up one level — back out through the door you came in by' },
   { id: 'back', group: 'navigation', keys: 'alt+arrowleft', what: 'back — retrace the last move through the hierarchy' },
   { id: 'forward', group: 'navigation', keys: 'alt+arrowright', what: 'forward' },

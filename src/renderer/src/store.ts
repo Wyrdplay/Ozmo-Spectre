@@ -8,7 +8,7 @@ import {
 } from '@shared/types'
 import { FOG_CLASSES } from './lib/fog'
 import { LENSES, type LensId } from './lib/lens'
-import { formatAddress, isDoor, parseAddress, setUnfolded, type Address } from './lib/hierarchy'
+import { formatAddress, isDoor, parseAddress, setPeeked, setUnfolded, type Address } from './lib/hierarchy'
 import { RpcError, rpc } from './api'
 import { host, type LinkStatus } from './host'
 
@@ -712,8 +712,11 @@ export const useStore = create<OzmoState>((set, get) => ({
     // a node is only ever shown where it lives
     const node = to.nodeId ? graph.nodes.find((n) => n.id === to.nodeId && n.projectId === to.projectId) : null
     const level = node && !to.graphId ? node.graphId ?? null : graphId
-    // a new level starts with every group of portals folded
-    if (level !== get().graphRoot) setUnfolded([])
+    // a new level starts with every group of portals folded and every door shut
+    if (level !== get().graphRoot) {
+      setUnfolded([])
+      setPeeked([])
+    }
     set({
       graphRoot: level,
       // a new level starts with nothing selected, nothing being found, and its

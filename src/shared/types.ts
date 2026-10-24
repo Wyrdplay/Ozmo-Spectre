@@ -85,6 +85,9 @@ export interface SpecNode {
    *  level they all live in, and the number is how many connections lead there.
    *  The core never sends it; the canvas makes it (renderer lib/hierarchy). */
   aggregate?: number
+  /** CLIENT-SIDE ONLY: drawn on its parent's level because the sub-graph it
+   *  lives in is PEEKED (opened in place) — the id of that door. */
+  peekOf?: string
   /** effective progress (manual, rolled up, or Done-flag-implied) — computed, never stored */
   progressComputed?: number
   /** names of the flag rules (settings) this node currently matches, in rule order — computed, never stored */
