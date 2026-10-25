@@ -63,6 +63,8 @@ const COLLAPSED_SCALE = 1.35
 
 /** container count badge geometry (screen-space) — shared by draw + hit-testing */
 const CONTAINER_BADGE_H = 15
+/** The smallest a node is to grab, in screen pixels, at any zoom (the radius of its hit ring). */
+const MIN_HIT_PX = 12
 const containerBadgeWidth = (count: number): number => 22 + String(count).length * 6
 
 /** hull padding around an expanded area's members, in world units */
@@ -294,6 +296,9 @@ export function GraphView(): React.JSX.Element {
   /** shift-press on a node, still ambiguous: >3px of movement = link rubber band,
    *  release in place = toggle selection membership */
   const shiftPressRef = useRef<{ nodeId: string; sx: number; sy: number } | null>(null)
+  /** a press on something that is never dragged here (a portal, a peeked node) —
+   *  watched so a drag attempt gets told why, instead of nothing happening */
+  const refusedPressRef = useRef<{ node: SimNode; sx: number; sy: number } | null>(null)
   /** graph payload arrived while a drag was live — merged once on drop/cancel, never under the pointer */
   const pendingMergeRef = useRef(false)
   /** drop guard: id → position PATCHed at drag end. Merges keep that fx/fy/pinned until the
@@ -686,10 +691,15 @@ export function GraphView(): React.JSX.Element {
 
   const fitView = useCallback((): void => {
     const canvas = canvasRef.current
-    const nodes = nodesRef.current.filter(
+    const shown = nodesRef.current.filter(
       (n) => filtersRef.current[n.data.type] && nodeMatchesFlagFilter(n.data.flags, flagFilterRef.current.hidden) &&
         nodeMatchesTagFilter(n.data.tags, tagFilterRef.current)
     )
+    // frame the level's OWN nodes: portals sit on a wide rim around them, and
+    // fitting the rim shrank a busy level until every node was a dot too small
+    // to grab. The rim stays a pan away; a level of nothing but portals still fits them
+    const own = shown.filter((n) => !n.data.portal)
+    const nodes = own.length ? own : shown
     if (!canvas || !nodes.length) return
     // fit what is ON SCREEN — under a displacing lens that is the rings, not
     // the home layout hiding behind them
@@ -957,7 +967,13 @@ export function GraphView(): React.JSX.Element {
   const hitNode = (wx: number, wy: number): SimNode | null => {
     const { tree, order, maxR } = hitIndex()
     const styles = stylesRef.current
-    const R = maxR + 6
+    // zoomed out, a small node is a few pixels across: grabbing it is a lottery,
+    // and a miss pans the canvas, which reads as "this one will not drag". So
+    // every node is at least MIN_HIT_PX to grab, wherever the camera is
+    const grace = MIN_HIT_PX / Math.max(transformRef.current.k, 0.01)
+    const R = Math.max(maxR + 6, grace)
+    let near: SimNode | null = null
+    let nearD = Infinity
     let best: SimNode | null = null
     let bestIdx = -1
     tree.visit((node, x0, y0, x1, y1) => {
@@ -969,19 +985,25 @@ export function GraphView(): React.JSX.Element {
           const r = styles.node[n.data.type].radius + 6
           const dx = px(n) - wx
           const dy = py(n) - wy
-          if (dx * dx + dy * dy <= r * r) {
+          const d2 = dx * dx + dy * dy
+          if (d2 <= r * r) {
             const idx = order.get(n) ?? -1
             if (idx > bestIdx) {
               bestIdx = idx
               best = n
             }
+          } else if (d2 <= grace * grace && d2 < nearD) {
+            nearD = d2
+            near = n
           }
           leaf = leaf.next
         }
       }
       return false
     })
-    return best
+    // a real hit keeps the original rule (own radius, last drawn wins); the
+    // grace ring only answers when nothing is under the pointer at all
+    return best ?? near
   }
 
   const hitEdge = (cx: number, cy: number): SimLink | null => {
@@ -1027,6 +1049,8 @@ export function GraphView(): React.JSX.Element {
       const bw = containerBadgeWidth(count)
       const bx = px(n) * t.k + t.x + r + bw / 2 + 4
       const by = py(n) * t.k + t.y - r - 8
+      // the node's own body wins where the badge overlaps it (see hitDoorBadge)
+      if (Math.hypot(cx - (px(n) * t.k + t.x), cy - (py(n) * t.k + t.y)) <= r) continue
       if (Math.abs(cx - bx) <= bw / 2 + 2 && Math.abs(cy - by) <= CONTAINER_BADGE_H / 2 + 2) return n
     }
     return null
@@ -2072,6 +2096,7 @@ export function GraphView(): React.JSX.Element {
     // room shown in place, and writing that back would scramble its own level's map
     if (node?.data.peekOf) {
       selectNode(node.id)
+      refusedPressRef.current = { node, sx: cx, sy: cy }
       return
     }
 
@@ -2082,7 +2107,10 @@ export function GraphView(): React.JSX.Element {
       if (isGroupGhost(node.id)) {
         setUnfolded([...unfoldedGroups(), node.id.slice(1)])
         useStore.setState((s) => ({ graphVersion: s.graphVersion + 1 }))
-      } else selectNode(node.id)
+      } else {
+        selectNode(node.id)
+        refusedPressRef.current = { node, sx: cx, sy: cy }
+      }
       return
     }
 
@@ -2122,6 +2150,21 @@ export function GraphView(): React.JSX.Element {
     const cy = e.clientY - rect.top
     const { x: wx, y: wy } = toWorld(cx, cy)
 
+    // a press on a portal or a peeked node that turns into a drag: those never
+    // move here, so say why, once, instead of letting it look broken
+    const refused = refusedPressRef.current
+    if (refused) {
+      if (Math.abs(cx - refused.sx) + Math.abs(cy - refused.sy) > 6) {
+        refusedPressRef.current = null
+        const d = refused.node.data
+        const door = d.peekOf ? nodesRef.current.find((n) => n.id === d.peekOf)?.data.title : null
+        toast(door
+          ? `"${d.title}" is shown in place from "${door}" — go into "${door}" to move it`
+          : `"${d.title}" lives in ${doorInfoRef.current.paths.get(refused.node.id) ?? 'another level'} — it is shown here because something on this level links to it. Double-click to go there.`,
+        'info')
+      }
+      return
+    }
     // ambiguous shift-press resolves on movement: >3px promotes to the link rubber band
     const sp = shiftPressRef.current
     if (sp) {
@@ -2217,6 +2260,7 @@ export function GraphView(): React.JSX.Element {
     const cy = e.clientY - rect.top
     const { x: wx, y: wy } = toWorld(cx, cy)
 
+    refusedPressRef.current = null
     // shift-press released in place: toggle membership (movement would have
     // promoted it to a link rubber band already)
     const sp = shiftPressRef.current
@@ -2295,6 +2339,7 @@ export function GraphView(): React.JSX.Element {
   // an interrupted capture (OS gesture, window switch) must not strand the drag:
   // before this, a cancelled drag left alphaTarget hot forever — permanent jitter
   const onPointerCancel = (): void => {
+    refusedPressRef.current = null
     shiftPressRef.current = null
     linkDragRef.current = null
     panRef.current = null
@@ -2389,8 +2434,13 @@ export function GraphView(): React.JSX.Element {
       const r = stylesRef.current.node[n.data.type].radius * t.k
       const count = doorInfoRef.current.counts.get(n.id) ?? 0
       const bw = 9 + 6 * (2 + String(count).length)
-      const bx = px(n) * t.k + t.x + r * 0.75 - 2
-      const by = py(n) * t.k + t.y + r * 0.75
+      const sx = px(n) * t.k + t.x
+      const sy = py(n) * t.k + t.y
+      const bx = sx + r * 0.75 - 2
+      const by = sy + r * 0.75
+      // the door's own body wins where the badge overlaps it — zoomed out the
+      // badge covers half the node, and a press meant to drag it must not peek
+      if (Math.hypot(cx - sx, cy - sy) <= r) continue
       if (cx >= bx - 2 && cx <= bx + bw + 2 && Math.abs(cy - by) <= CONTAINER_BADGE_H / 2 + 2) return n
     }
     return null
