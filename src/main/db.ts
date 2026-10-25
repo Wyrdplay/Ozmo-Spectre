@@ -284,6 +284,15 @@ function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_archived_edges_project ON archived_edges(project_id, archived_at);
     CREATE INDEX IF NOT EXISTS idx_archived_edges_source ON archived_edges(source_id);
     CREATE INDEX IF NOT EXISTS idx_archived_edges_target ON archived_edges(target_id);
+    -- Pairs a person said are NOT duplicates, so the duplicate check never asks
+    -- about them again. Stored once per pair, smaller id first.
+    CREATE TABLE IF NOT EXISTS duplicate_dismissals (
+      a          TEXT NOT NULL,
+      b          TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      created_by TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (a, b)
+    );
   `)
   // ROLE, added after accounts shipped without one. Guarded, and BACKFILLED by
   // what each row could already do: an approved non-owner had full write, so

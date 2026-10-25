@@ -461,6 +461,34 @@ Search everywhere GET /api/search/all?q=<text>&from=<id>&limit=<n>&doors=1
                                                      nodes and archived projects are not searched. Use
                                                      this to find anything; the per-project search below
                                                      is the older, project-bound form.
+Duplicates       GET  /api/duplicates?title=<text>&projectId=<id>&exclude=<id,id>&limit=<n>
+                                                     — what ALREADY SAYS this title, anywhere on the board:
+                                                     { candidates: [ {id, title, type, projectId,
+                                                       projectName, graphId, path, reason: "same title" |
+                                                       "similar title", score} ] }, this project first.
+                                                     ASK BEFORE YOU CREATE. A match in another project is
+                                                     REFERENCED (share + POST /references), not copied; a
+                                                     match here is the node to edit or link, not to re-file.
+                                                     Every create answers with the same list as
+                                                     \`possibleDuplicates\` when there is one (the nodes you
+                                                     linked it to are left out). If it is a duplicate after
+                                                     all, merge it (below) rather than leave two.
+                 GET  /api/duplicates/clusters?projectId=<id>
+                                                     — every group of live nodes that say the same thing,
+                                                     touching that project (or the board, without it).
+                                                     Never listed: references, forks, a feedback and what
+                                                     was designated from it, instances of one class, and
+                                                     pairs someone marked not-a-duplicate.
+                 POST /api/duplicates/dismiss        {"ids":[...]} — "these are not duplicates", remembered
+                 POST /api/nodes/:keepId/merge       {"duplicateId"} — keep :keepId; the duplicate goes to
+                                                     the archive and EVERY link it had moves onto the node
+                                                     kept. Across projects, when the duplicate's project
+                                                     still links to it from its own nodes, that project
+                                                     gets a REFERENCE where the copy lived and those links
+                                                     move onto it; warp/area links go to the node kept
+                                                     (an area link across projects is dropped — reported
+                                                     in \`dropped\`). Text only the copy had is appended,
+                                                     marked. 409 if the duplicate still holds nodes.
 Search           GET  /api/search?projectId=<id>&q=<text>   — titles, tags, and spec content.
                                                      TWO LISTS, not one, and both are CAPPED SILENTLY:
                                                      { nodes: [ ...full SpecNode rows whose TITLE or a

@@ -2558,6 +2558,98 @@ export function addReference(
 }
 
 /**
+ * MERGE A DUPLICATE — one node says it; the copy goes (owner, 2026-10-25: "remove
+ * duplicates, put the node in the most sensible place and then link to it as
+ * references where needed").
+ *
+ * `keepId` stays. `dupId` goes to the archive (restorable, as everything is), and
+ * nothing it was connected to loses the connection:
+ *   - same project: every link of the copy is re-made on the node kept;
+ *   - another project, which still links to the copy from its own nodes: that
+ *     project gets a REFERENCE to the node kept, where the copy lived, and the
+ *     links move onto the reference. A warp or area link goes to the node kept
+ *     itself, because a reference never joins a warp or an area — and an area
+ *     link across projects is dropped (areas hold their own project's nodes),
+ *     which the result reports;
+ *   - text the copy has that the node kept lacks is appended to it, marked.
+ * A copy that still holds nodes is refused — move them first, so nothing is
+ * archived along with it by surprise.
+ */
+export async function mergeDuplicate(
+  p: { keepId: string; dupId: string },
+  actor: string
+): Promise<{ ok: true; keptId: string; archivedId: string; referenceId: string | null; linksMoved: number; dropped: string[]; merged: boolean }> {
+  need(typeof p.keepId === 'string' && typeof p.dupId === 'string' && p.keepId !== p.dupId, 'keepId and dupId: two different nodes')
+  const keep = nodeRow(p.keepId)
+  const dup = nodeRow(p.dupId)
+  need(keep.type !== 'project' && dup.type !== 'project', 'projects are not merged as nodes')
+  need(!keep.references_node_id, `"${keep.title}" is a reference — keep the node it points at`, 400)
+  need(!dup.references_node_id, `"${dup.title}" is a reference, not a copy — delete it if it is not wanted`, 400)
+  need(residentCount(dup.id) === 0, `"${dup.title}" still holds nodes — move them out first, so nothing goes to the archive with it`, 409)
+
+  const crossing = keep.project_id !== dup.project_id
+  const conns = db.all<EdgeRow>('SELECT * FROM edges WHERE source_id = ? OR target_id = ?', [dup.id, dup.id])
+  const rels = (edgeId: string): { type: string; source_id: string; target_id: string }[] =>
+    db.all('SELECT type, source_id, target_id FROM edge_relationships WHERE edge_id = ?', [edgeId])
+  const typeOf = (id: string): string => db.get<{ type: string }>('SELECT type FROM nodes WHERE id = ?', [id])?.type ?? ''
+  const projectOf = (id: string): string => db.get<{ project_id: string }>('SELECT project_id FROM nodes WHERE id = ?', [id])?.project_id ?? ''
+  const isGroup = (id: string): boolean => ['warp', 'area'].includes(typeOf(id))
+
+  // does the copy's project still need the node? only its own nodes' links say so
+  const localLinks = conns.filter((c) => {
+    const other = c.source_id === dup.id ? c.target_id : c.source_id
+    return other !== keep.id && projectOf(other) === dup.project_id && !isGroup(other)
+  })
+  let referenceId: string | null = null
+  if (crossing && localLinks.length && keep.type !== 'warp') {
+    shareNode({ id: keep.id }, actor)
+    referenceId = addReference({ nodeId: keep.id, projectId: dup.project_id, x: dup.x ?? undefined, y: dup.y ?? undefined }, actor).id
+    if ((dup.graph_id ?? null) !== null) await moveNodes({ id: referenceId, graphId: dup.graph_id }, actor)
+  }
+
+  let linksMoved = 0
+  const dropped: string[] = []
+  for (const c of conns) {
+    const other = c.source_id === dup.id ? c.target_id : c.source_id
+    if (other === keep.id || other === referenceId) continue
+    // where this link lands: the reference for the copy's own project, the node kept otherwise
+    const onto = referenceId && projectOf(other) === dup.project_id && !isGroup(other) ? referenceId : keep.id
+    const rs = rels(c.id)
+    const attempts = rs.length ? rs.map((r) => ({
+      type: r.type as EdgeType,
+      sourceId: r.source_id === dup.id ? onto : r.source_id,
+      targetId: r.target_id === dup.id ? onto : r.target_id
+    })) : [{ type: 'relates' as EdgeType, sourceId: c.source_id === dup.id ? onto : c.source_id, targetId: c.target_id === dup.id ? onto : c.target_id }]
+    for (const a of attempts) {
+      try {
+        createEdge({ ...a, label: c.label || undefined }, actor)
+        linksMoved++
+      } catch (e) {
+        // already there is fine; anything else (an area across projects, a cycle) is reported
+        if (!(e instanceof ApiError && e.status === 409)) dropped.push(`${a.type} ${db.get<{ title: string }>('SELECT title FROM nodes WHERE id = ?', [other])?.title ?? other}: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+  }
+
+  // the copy's own words, when they say more than the node kept does
+  const dupBody = vault.readBody(dup.file_path).trim()
+  const keepBody = vault.readBody(keep.file_path)
+  const squash = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase()
+  const merged = !!dupBody && !squash(keepBody).includes(squash(dupBody))
+  if (merged) {
+    const where = crossing ? ` in ${projectRow(dup.project_id).name}` : ''
+    setContent({ id: keep.id, content: `${keepBody.trimEnd()}\n\n## Merged from a duplicate${where} (${new Date().toISOString().slice(0, 10)})\n\n${dupBody}\n` }, actor)
+  }
+
+  archiveNodeVerb({ id: dup.id, note: `Duplicate of "${keep.title}" (${keep.id}) — merged` }, actor)
+  logActivity(keep.project_id, actor, 'node.merged', 'node', keep.id,
+    `merged the duplicate "${dup.title}"${crossing ? ` from ${projectRow(dup.project_id).name}` : ''} into "${keep.title}"`,
+    { dupId: dup.id, referenceId, linksMoved, dropped })
+  emitEvent('node.updated', keep.project_id, loadNode(keep.id), actor)
+  return { ok: true, keptId: keep.id, archivedId: dup.id, referenceId, linksMoved, dropped, merged }
+}
+
+/**
  * FORK — take a local, editable copy of another project's node, keeping a bare
  * connection labelled "forked from".
  *

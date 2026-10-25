@@ -254,6 +254,17 @@ select.input { cursor: pointer; }
 .linked-row select.input { width: 150px; flex: none; padding: 4px 8px; font-size: 11.5px; }
 .linked-row .linked-remove { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 14px; padding: 0 3px; line-height: 1; }
 .linked-row .linked-remove:hover { color: var(--danger); }
+/* "already on the board" — the duplicate hint under a new node's title */
+.dup-hint { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.dup-hint-label { font-size: 10.5px; font-weight: 700; color: var(--warn); text-transform: uppercase; letter-spacing: 0.6px; }
+.dup-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.dup-row .dup-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-row .dup-path { max-width: 38%; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-clusters { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
+.dup-cluster { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.dup-cluster .dup-row { cursor: pointer; }
+.dup-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.dup-why { font-size: 11px; color: var(--text-faint); }
 
 .palette-input { font-size: 14px; padding: 10px 12px; }
 .palette-results { max-height: min(56vh, 460px); overflow: auto; display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }

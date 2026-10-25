@@ -145,6 +145,22 @@ export interface Annotation {
   createdAt: number
 }
 
+/** A live node whose title already says what a new (or another) node says — see main/duplicates.ts. */
+export interface DuplicateCandidate {
+  id: string
+  title: string
+  type: NodeType
+  projectId: string
+  projectName: string
+  /** where it lives on its project's canvas: null = the top level */
+  graphId: string | null
+  /** where it lives, readable: `Engine ▸ Core substrate` */
+  path: string
+  reason: 'same title' | 'similar title'
+  /** 1 = the same title; otherwise the word overlap */
+  score: number
+}
+
 export interface NodeDetail extends SpecNode {
   content: string
   annotations: Annotation[]

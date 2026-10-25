@@ -8,6 +8,7 @@ import * as skills from './skills'
 import { buildDocument } from './document'
 import { exportProject, importProject } from './transfer'
 import { searchAll } from './search'
+import { dismissDuplicates, duplicateClusters, findDuplicates } from './duplicates'
 import { getBoardLock, getSettings, setBoardLock, updateSettings } from './settings'
 import { emitEvent } from './events'
 import { rolesGrantableBy } from '@shared/types'
@@ -95,6 +96,8 @@ const CAPABILITY: Record<string, Capability> = {
   'activity.list': 'read',
   'search.run': 'read',
   'search.all': 'read',
+  'duplicates.find': 'read',
+  'duplicates.clusters': 'read',
   'document.build': 'read',
   // Exporting a project is a READ, for the same reason building a document is:
   // it copies rows and bodies out and writes nothing back. That the copy happens
@@ -144,6 +147,8 @@ const CAPABILITY: Record<string, Capability> = {
   'nodes.prune': 'write',
   'nodes.refer': 'write',
   'nodes.share': 'write',
+  'nodes.mergeDuplicate': 'write',
+  'duplicates.dismiss': 'write',
   'nodes.unshare': 'write',
   'nodes.reference': 'write',
   'nodes.fork': 'write',
@@ -455,7 +460,23 @@ export const registry: Record<string, Handler> = {
   'archive.projects': () => svc.listArchivedProjects(),
   'archive.restoreProject': (p, c) => svc.restoreProject(p, c.actor),
   'projects.purge': (p, c) => svc.purgeProject(p, c.actor),
-  'nodes.create': (p, c) => svc.createNode(p, c.actor),
+  // the create answers with what already says the same thing (duplicates.ts) —
+  // an agent learns it at the one moment it can still choose to reference instead
+  'nodes.create': (p, c) => {
+    const node = svc.createNode(p, c.actor)
+    const q = p as { linkTo?: unknown; inside?: unknown }
+    const linked = Array.isArray(q.linkTo)
+      ? (q.linkTo as { nodeId?: unknown }[]).map((l) => l?.nodeId).filter((x): x is string => typeof x === 'string')
+      : []
+    const inside = typeof q.inside === 'string' ? [q.inside] : []
+    let possibleDuplicates: ReturnType<typeof findDuplicates>['candidates'] = []
+    try {
+      possibleDuplicates = findDuplicates({ title: node.title, projectId: node.projectId, exclude: [node.id, ...linked, ...inside] }).candidates
+    } catch (e) {
+      console.error('[duplicates] check after create failed', e) // a hint never fails a create
+    }
+    return possibleDuplicates.length ? { ...node, possibleDuplicates } : node
+  },
   'nodes.get': (p) => svc.getNode(p),
   'nodes.update': (p, c) => svc.updateNode(p, c.actor),
   'nodes.delete': (p, c) => svc.deleteNode(p, c.actor),
@@ -549,6 +570,12 @@ export const registry: Record<string, Handler> = {
   'search.run': (p) => svc.search(p),
   // every project, nearest-first, a path on every result (search.ts)
   'search.all': (p) => searchAll(p),
+  // DUPLICATES (duplicates.ts): what already says this, the board's clusters,
+  // "not a duplicate", and merging a copy into the node kept
+  'duplicates.find': (p) => findDuplicates(p),
+  'duplicates.clusters': (p) => duplicateClusters(p),
+  'duplicates.dismiss': (p, c) => dismissDuplicates(p, c.actor),
+  'nodes.mergeDuplicate': (p, c) => svc.mergeDuplicate(p, c.actor),
 
   /**
    * TRIMMED unless the caller is approved. The full payload carries the vault

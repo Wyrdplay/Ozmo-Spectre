@@ -12,6 +12,7 @@ import { Modal, TypeChip, TypeDot } from './widgets'
 import '../refine.css'
 import { useLevelScope } from '@/lib/level'
 import { ScopeNote } from './ScopeNote'
+import { DuplicatesModal } from './DuplicatesModal'
 
 /**
  * REFINE WORKS THE FOG.
@@ -64,6 +65,7 @@ export function RefineView(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ id: string; title: string; copied: boolean; responded: number } | null>(null)
   const [sweeping, setSweeping] = useState(false)
+  const [deduping, setDeduping] = useState(false)
   const [showBody, setShowBody] = useState(false)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
@@ -300,12 +302,17 @@ export function RefineView(): React.JSX.Element {
           {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
         </select>
       )}
+      <button className="btn sm ghost" onClick={() => setDeduping(true)} disabled={!projectId}
+        title="Nodes that say the same thing — keep one, merge the rest, or say they are not duplicates">
+        Possible duplicates…
+      </button>
       <button className="btn sm ghost" onClick={() => setSweeping(true)} disabled={!!lock}
         title={lock ? lock.message : 'Clear fog that was resolved before resolving cleared it (answered, fixed, pruned…)'}>
         Clear resolved…
       </button>
     </div>
     <ScopeNote scope={scope} shown={0} total={0} />
+    {deduping && projectId && <DuplicatesModal projectId={projectId} onClose={() => setDeduping(false)} />}
     </>
   )
 

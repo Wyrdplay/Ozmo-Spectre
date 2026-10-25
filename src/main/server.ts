@@ -742,6 +742,12 @@ export async function startServer(
   // EVERYWHERE: every project, ranked nearest-first from `from` (a sub-graph or
   // project id), each result with its path; `doors=1` = only things you can go into
   app.get('/api/search/all', h('search.all', (r) => ({ q: r.query.q, from: r.query.from, limit: r.query.limit, doors: r.query.doors })))
+  // DUPLICATES: what already says this title (exclude = ids alike on purpose), the
+  // board's clusters, "not a duplicate", and merging one copy into the node kept
+  app.get('/api/duplicates', h('duplicates.find', (r) => ({ title: r.query.title, projectId: r.query.projectId, exclude: r.query.exclude, limit: r.query.limit })))
+  app.get('/api/duplicates/clusters', h('duplicates.clusters', (r) => ({ projectId: r.query.projectId })))
+  app.post('/api/duplicates/dismiss', h('duplicates.dismiss', (r) => ({ ids: r.body?.ids })))
+  app.post('/api/nodes/:id/merge', h('nodes.mergeDuplicate', (r) => ({ keepId: r.params.id, dupId: r.body?.duplicateId })))
   app.get('/api/search', h('search.run', (r) => ({ projectId: r.query.projectId as string, q: r.query.q as string })))
   app.post('/api/ui/focus', h('ui.focus', (r) => r.body))
 

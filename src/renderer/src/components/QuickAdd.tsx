@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
   EDGE_TYPES, defaultEdgeFor,
-  type EdgeType, type NodeType, type SpecNode
+  type DuplicateCandidate, type EdgeType, type NodeType, type SpecNode
 } from '@shared/types'
 import { useStore } from '@/store'
 import { rpc } from '@/api'
@@ -58,6 +58,50 @@ export function QuickAdd(): React.JSX.Element {
       })
     )
   }, [type, nodeById])
+
+  // "this already exists" — asked while the title is typed, never in the way of
+  // creating: Enter still creates. The nodes this one will link to are alike on purpose.
+  const [dups, setDups] = useState<DuplicateCandidate[]>([])
+  useEffect(() => {
+    const t = title.trim()
+    if (!projectId || t.length < 8) {
+      setDups([])
+      return
+    }
+    let live = true
+    const timer = setTimeout(() => {
+      rpc<{ candidates: DuplicateCandidate[] }>('duplicates.find', { title: t, projectId, exclude: links.map((l) => l.nodeId) })
+        .then((r) => { if (live) setDups(r.candidates) })
+        .catch(() => { if (live) setDups([]) }) // a hint, never an error
+    }, 250)
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [title, projectId, links])
+
+  const openExisting = (d: DuplicateCandidate): void => {
+    hide()
+    void useStore.getState().go({ projectId: d.projectId, graphId: d.graphId, nodeId: d.id })
+  }
+  /** The one in another project, brought here as a reference instead of a copy. */
+  const referenceExisting = async (d: DuplicateCandidate): Promise<void> => {
+    if (!projectId || busy) return
+    setBusy(true)
+    try {
+      await rpc('nodes.share', { id: d.id })
+      const ref = await rpc<SpecNode>('nodes.reference', { nodeId: d.id, projectId, x: quickAdd.x, y: quickAdd.y })
+      const here = useStore.getState().graphRoot
+      if (here) await rpc('nodes.move', { id: ref.id, graphId: here })
+      hide()
+      selectNode(ref.id)
+      toast(`referenced "${d.title}" from ${d.projectName} — one node, shown here`, 'info')
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   /** Direction an edge type would take for a row: member points at the container
    *  (warp or area), addresses starts at the warp — when exactly one endpoint
@@ -133,6 +177,25 @@ export function QuickAdd(): React.JSX.Element {
         onChange={(e) => setTitle(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && create()}
       />
+      {dups.length > 0 && (
+        <div className="dup-hint" role="status">
+          <div className="dup-hint-label">Already on the board</div>
+          {dups.map((d) => (
+            <div key={d.id} className="dup-row">
+              <span className="type-dot" style={{ background: styleOf(d.type).color }} />
+              <span className="dup-title" title={d.title}>{d.title}</span>
+              <span className="dup-path" title={d.path}>{d.path}</span>
+              <button className="btn sm ghost" onClick={() => openExisting(d)} title="Go to it, where it lives">Open</button>
+              {d.projectId !== projectId && (
+                <button className="btn sm" onClick={() => void referenceExisting(d)} disabled={busy}
+                  title={`Show the node from ${d.projectName} here, read-only, instead of copying it`}>
+                  Reference here
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       <TagsEditor tags={tags} onChange={setTags} />
       {quickAdd.linkTo && (
         <div className="linked-section">
@@ -187,7 +250,7 @@ export function QuickAdd(): React.JSX.Element {
       <div className="actions">
         <button className="btn ghost" onClick={hide}>Cancel</button>
         <button className="btn primary" onClick={create} disabled={!title.trim() || busy}>
-          Create {quickAdd.x !== undefined ? 'here' : ''}
+          {dups.length ? 'Create anyway' : `Create ${quickAdd.x !== undefined ? 'here' : ''}`}
         </button>
       </div>
     </Modal>

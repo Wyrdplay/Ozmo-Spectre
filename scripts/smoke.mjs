@@ -1037,6 +1037,77 @@ ok('graduate prune 200 → question cleared', grPrune.status === 200 && grPrune.
   await req('DELETE', `/api/projects/${dp}?purge=1`)
 }
 
+// DUPLICATES — "this already exists" while typing, in the create response and
+// board-wide; alike-by-design pairs never listed; "not a duplicate" remembered;
+// merging moves every link onto the node kept, or onto a reference to it
+{
+  const stamp = Date.now()
+  const p1 = (await req('POST', '/api/projects', { name: `dups-a-${stamp}` })).json.id
+  const p2 = (await req('POST', '/api/projects', { name: `dups-b-${stamp}` })).json.id
+  const mk = async (pid, type, title, extra = {}) => (await req('POST', `/api/projects/${pid}/nodes`, { type, title, ...extra })).json
+  const T = `The shadow map uses four cascades ${stamp}`
+  const A = await mk(p1, 'feature', T, { content: 'Four cascades, fit to the frustum.' })
+  const B = await mk(p2, 'feature', T, { content: 'Four cascades, fit to the frustum.\n\nThe far split is stabilised.' })
+  ok('duplicates: the create answers with what already says it', (B.possibleDuplicates ?? []).some((d) => d.id === A.id && d.reason === 'same title'),
+    JSON.stringify(B.possibleDuplicates))
+  ok('duplicates: a first of its kind carries no list', A.possibleDuplicates === undefined)
+  const found = (await req('GET', `/api/duplicates?title=${encodeURIComponent(`The shadow map uses exactly four cascades ${stamp}`)}&projectId=${p1}`)).json
+  ok('duplicates: a similar title is found, its own project first', found.candidates?.[0]?.id === A.id && found.candidates.some((d) => d.id === B.id && d.reason === 'similar title'),
+    JSON.stringify(found))
+  ok('duplicates: a title is required', (await req('GET', '/api/duplicates?title=')).status === 400)
+  // alike on purpose: an action designated from a feedback carries its title
+  const FB = await mk(p1, 'feedback', `Shadows flicker at the cascade seams ${stamp}`)
+  const ACT = await mk(p1, 'action', `Shadows flicker at the cascade seams ${stamp}`, { linkTo: [{ nodeId: FB.id, type: 'derives', outgoing: false }] })
+  ok('duplicates: a designation is not a duplicate of its feedback', !(ACT.possibleDuplicates ?? []).some((d) => d.id === FB.id), JSON.stringify(ACT.possibleDuplicates))
+  // instances of one class share words by design
+  const CLS = await mk(p1, 'feature', `Collision pairs ${stamp}`)
+  const I1 = await mk(p1, 'instance', `Sphere against axis aligned box ${stamp}`, { linkTo: [{ nodeId: CLS.id, type: 'class-of', outgoing: false }] })
+  const I2 = await mk(p1, 'instance', `Sphere against axis aligned box swept ${stamp}`, { linkTo: [{ nodeId: CLS.id, type: 'class-of', outgoing: false }] })
+  const clusters = (await req('GET', `/api/duplicates/clusters?projectId=${p1}`)).json.clusters
+  const has = (ids) => clusters.some((c) => ids.every((id) => c.some((d) => d.id === id)))
+  ok('duplicates: the board lists the cross-project pair', has([A.id, B.id]), JSON.stringify(clusters.map((c) => c.map((d) => d.title))))
+  ok('duplicates: …but never a feedback and its designation', !has([FB.id, ACT.id]))
+  ok('duplicates: …nor two instances of one class', !has([I1.id, I2.id]))
+  // "not a duplicate" is remembered
+  const N1 = await mk(p1, 'question', `Which cascade blend hides the seam best ${stamp}`)
+  const N2 = await mk(p1, 'question', `Which cascade blend hides the seam best ${stamp}`)
+  const fresh = (await req('GET', `/api/duplicates/clusters?projectId=${p1}`)).json.clusters
+  ok('duplicates: a same-title pair is listed', fresh.some((c) => c.some((d) => d.id === N1.id) && c.some((d) => d.id === N2.id)))
+  ok('duplicates: dismissing needs two ids', (await req('POST', '/api/duplicates/dismiss', { ids: [N1.id] })).status === 400)
+  ok('duplicates: "not a duplicate" is accepted', (await req('POST', '/api/duplicates/dismiss', { ids: [N1.id, N2.id] })).status === 200)
+  const after = (await req('GET', `/api/duplicates/clusters?projectId=${p1}`)).json.clusters
+  ok('duplicates: …and never listed again', !after.some((c) => c.some((d) => d.id === N1.id) && c.some((d) => d.id === N2.id)))
+  // merge across projects: the copy's project still links to it → it gets a reference
+  const C = await mk(p2, 'component', `Cascade fitter ${stamp}`, { linkTo: [{ nodeId: B.id, type: 'depends', outgoing: true }] })
+  const W = await mk(p2, 'warp', `Shadows ship ${stamp}`)
+  await req('POST', `/api/projects/${p2}/edges`, { sourceId: B.id, targetId: W.id, type: 'member' })
+  const m = await req('POST', `/api/nodes/${A.id}/merge`, { duplicateId: B.id })
+  ok('merge: across projects the copy is archived and replaced by a reference', m.status === 200 && m.json.referenceId && m.json.archivedId === B.id &&
+    (await req('GET', `/api/nodes/${B.id}`)).status === 404, JSON.stringify(m.json))
+  const ref = (await req('GET', `/api/nodes/${m.json.referenceId}`)).json
+  ok('merge: the reference lives in the copy\'s project and points at the node kept', ref.projectId === p2 && ref.referencesNodeId === A.id)
+  ok('merge: the copy\'s own project\'s links move onto the reference', ref.edges.some((e) => e.sourceId === C.id && rels(e).some((r) => r.type === 'depends')),
+    JSON.stringify(ref.edges))
+  const a2 = (await req('GET', `/api/nodes/${A.id}`)).json
+  ok('merge: a warp link goes to the node kept, not the reference', a2.edges.some((e) => e.targetId === W.id && rels(e).some((r) => r.type === 'member')))
+  ok('merge: the copy\'s extra words are merged in, marked', a2.content.includes('The far split is stabilised.') && a2.content.includes('Merged from a duplicate'))
+  ok('merge: the node kept is now shared', a2.shared === true)
+  // merge in one project: links move onto the node kept
+  const K = await mk(p1, 'feature', `Contact shadows ${stamp}`)
+  const D = await mk(p1, 'feature', `Contact shadows ${stamp}`)
+  const L = await mk(p1, 'bug', `Contact shadows leak through thin walls ${stamp}`, { linkTo: [{ nodeId: D.id, type: 'blocks', outgoing: true }] })
+  const m2 = await req('POST', `/api/nodes/${K.id}/merge`, { duplicateId: D.id })
+  ok('merge: in one project there is no reference, and the links move', m2.status === 200 && m2.json.referenceId === null &&
+    (await req('GET', `/api/nodes/${K.id}`)).json.edges.some((e) => e.sourceId === L.id && rels(e).some((r) => r.type === 'blocks')), JSON.stringify(m2.json))
+  ok('merge: the copy can be restored from the archive', (await req('POST', `/api/archive/${D.id}/restore`, {})).status === 200)
+  // a copy that holds nodes is refused, so nothing goes to the archive with it by surprise
+  await mk(p1, 'component', `Inside the copy ${stamp}`, { graphId: D.id })
+  ok('merge: a copy that holds nodes is refused', (await req('POST', `/api/nodes/${K.id}/merge`, { duplicateId: D.id })).status === 409)
+  ok('merge: a node is never merged into itself', (await req('POST', `/api/nodes/${K.id}/merge`, { duplicateId: K.id })).status === 400)
+  await req('DELETE', `/api/projects/${p1}?purge=1`)
+  await req('DELETE', `/api/projects/${p2}?purge=1`)
+}
+
 // EVERY NODE IS A FOLDER — emptied, it closes and its folder goes; deleted or
 // archived, everything inside goes with it, deepest first, with no live row or
 // file left behind; restored, the whole subtree comes back nested as it was
