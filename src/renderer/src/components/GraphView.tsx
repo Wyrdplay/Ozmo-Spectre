@@ -711,11 +711,26 @@ export function GraphView(): React.JSX.Element {
     const maxY = Math.max(...ys) + 80
     const w = canvas.clientWidth
     const h = canvas.clientHeight
-    const k = Math.min(1.4, Math.max(0.18, Math.min(w / (maxX - minX), h / (maxY - minY))))
+    // the filter toolbar floats over the canvas's top-left: fit into the space
+    // beside it or below it — whichever shows the map larger — not behind it
+    const bw = maxX - minX
+    const bh = maxY - minY
+    let area = { x: 0, y: 0, w, h }
+    const tb = canvas.parentElement?.querySelector('.graph-toolbar') as HTMLElement | null
+    if (tb) {
+      const c = canvas.getBoundingClientRect()
+      const r = tb.getBoundingClientRect()
+      const right = { x: r.right - c.left + 12, y: 0, w: w - (r.right - c.left + 12), h }
+      const below = { x: 0, y: r.bottom - c.top + 12, w, h: h - (r.bottom - c.top + 12) }
+      const fits = (a: typeof area): number => (a.w > 120 && a.h > 120 ? Math.min(a.w / bw, a.h / bh) : 0)
+      const pick = fits(right) >= fits(below) ? right : below
+      if (fits(pick) > 0) area = pick
+    }
+    const k = Math.min(1.4, Math.max(0.18, Math.min(area.w / bw, area.h / bh)))
     targetTransformRef.current = {
       k,
-      x: w / 2 - ((minX + maxX) / 2) * k,
-      y: h / 2 - ((minY + maxY) / 2) * k
+      x: area.x + area.w / 2 - ((minX + maxX) / 2) * k,
+      y: area.y + area.h / 2 - ((minY + maxY) / 2) * k
     }
   }, [])
 
